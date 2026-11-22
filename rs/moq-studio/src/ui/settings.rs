@@ -185,7 +185,7 @@ impl Panels {
 							Setting::Hotkeys => self.hotkeys(ui, fx),
 							Setting::Guests => self.guest_settings(ui),
 							Setting::Remote => self.remote_settings(ui),
-							Setting::Advanced => self.advanced(ui, fx),
+							Setting::Advanced => self.advanced(ui),
 						});
 					// A pane closes the window by clearing it, as the scene
 					// graph's Open does, or opens another by naming it, as
@@ -1280,8 +1280,8 @@ impl Panels {
 	}
 
 	/// Settings, Advanced: scenes and sources published on their own, the
-	/// virtual camera, the effects, and the scene graph.
-	fn advanced(&mut self, ui: &mut Ui, fx: &mut Fx) {
+	/// virtual camera, and the scene graph.
+	fn advanced(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let (scenes, sources, published) = {
 			let state = engine.state.lock().unwrap();
@@ -1401,14 +1401,6 @@ impl Panels {
 		for scene in scenes.iter().filter(|scene| scene.published) {
 			self.camera(ui, Some(&scene.name));
 		}
-		row(
-			ui,
-			"Effects",
-			"How this window moves and glows. It never reaches the stream.",
-			|ui| {
-				fx.picker(ui);
-			},
-		);
 		row(
 			ui,
 			"Scene graph",

@@ -19,7 +19,6 @@ use egui_kittest::kittest::{NodeT, Queryable};
 use moq_scene::Source;
 use moq_scene::source::Status;
 
-use crate::fx::Effects;
 use crate::ui::{Inspect, MixView, Page, Setting, Side};
 use crate::{App, Window, autosave, engine, fx, hotkeys, library, setup, show, stream};
 
@@ -455,7 +454,7 @@ views! {
 	/// each link carries a token of its own.
 	settings_remote_paired: Live, studio(View::Paired);
 	/// Settings, Advanced: published scenes and sources, the virtual camera,
-	/// the effects, and the scene graph.
+	/// and the scene graph.
 	settings_advanced: Still, studio(View::Setting(Setting::Advanced));
 	/// Settings, Advanced with a source published: how viewers may treat it,
 	/// as a sound alone, with no layer to inspect, sets it.
@@ -1838,7 +1837,7 @@ fn mix_sends_and_mutes() {
 /// Draw what `open` opens on a fresh engine, from a scene file in `shows`.
 fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, shows: &Path) -> image::RgbaImage {
 	if let &Open::Kit { sheet } = open {
-		return gallery(gpu, runtime, sheet);
+		return gallery(gpu, sheet);
 	}
 	if let Open::Library = open {
 		let (app, recent) = library_shelf();
@@ -2225,9 +2224,8 @@ fn window<'a>(
 		.renderer(egui_kittest::wgpu::WgpuTestRenderer::from_render_state(render.clone()))
 		.build_eframe(move |cc| {
 			crate::kit::install(&cc.egui_ctx);
-			let mut fx = fx::Fx::new(&render, None, &cc.egui_ctx, runtime.handle());
 			// Not the system's reduced motion, which differs between machines.
-			fx.pick(Effects::Full);
+			let fx = fx::Fx::moving(&render);
 			Window {
 				app,
 				render: render.clone(),
@@ -2257,15 +2255,14 @@ fn quit(engine: &engine::Engine, runtime: &tokio::runtime::Runtime) {
 }
 
 /// Draw the kit's gallery, with a sheet over it if `sheet`.
-fn gallery(gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, sheet: bool) -> image::RgbaImage {
+fn gallery(gpu: &engine::Gpu, sheet: bool) -> image::RgbaImage {
 	let render = render_state(gpu);
 	let mut harness = Harness::builder()
 		.with_size(SIZE)
 		.renderer(egui_kittest::wgpu::WgpuTestRenderer::from_render_state(render.clone()))
 		.build_eframe(|cc| {
 			crate::kit::install(&cc.egui_ctx);
-			let mut fx = fx::Fx::new(&render, None, &cc.egui_ctx, runtime.handle());
-			fx.pick(Effects::Full);
+			let fx = fx::Fx::moving(&render);
 			crate::kit::gallery::Gallery::new(fx, sheet)
 		});
 	// Enough for the popover and the sheet to settle where they open.

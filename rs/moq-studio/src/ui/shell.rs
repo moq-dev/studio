@@ -676,7 +676,7 @@ impl Panels {
 			Stroke::new(1.0, stroke),
 			egui::StrokeKind::Inside,
 		);
-		let pulse = (recording && fx.on()).then(|| Mark::new(ui.painter()));
+		let pulse = recording.then(|| Mark::new(ui.painter()));
 		let dot = Rect::from_center_size(pos2(rect.left() + 15.0, rect.center().y), Vec2::splat(9.0));
 		ui.painter().circle_filled(dot.center(), 4.5, kit::ACCENT);
 		if let Some(pulse) = pulse {
@@ -1542,10 +1542,8 @@ const LOGO_INNER: Color32 = Color32::from_rgb(0xff, 0x8a, 0x3d);
 /// whatever is drawn on it next.
 pub(super) fn bar(ui: &Ui, fx: &mut Fx, rect: Rect) {
 	ui.painter().rect_filled(rect, 0, kit::P1);
-	if fx.on() {
-		let mark = Mark::new(ui.painter());
-		fx.panel(&mark.around(rect));
-	}
+	let mark = Mark::new(ui.painter());
+	fx.panel(&mark.around(rect));
 }
 
 /// The sheet renaming what `renaming` names, while it names one, as the name

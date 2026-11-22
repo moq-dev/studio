@@ -11,8 +11,7 @@ plugin: there is no plugin API, no cargo feature flags, and nothing to
 install.
 
 Settings > Advanced is gone: Published scenes and Scene graph move to Mods,
-the Virtual camera toggle moves to Settings > Stream, and the Effects picker is
-deleted by [its own quest](/quest/m0/ux/effects-picker.md).
+and the Virtual camera toggle moves to Settings > Stream.
 
 ## Plan
 
@@ -65,10 +64,6 @@ Also in this PR:
   [multiview](/quest/m1/try-multiview.md),
   [phone remote](/quest/m2/try-phone-remote.md), and the pane list in
   [Try the Settings window](/quest/m0/ux/try-settings.md).
-
-## Required
-
-- [Delete the Effects picker](/quest/m0/ux/effects-picker.md) - empties Advanced of the row that has no other home
 
 ## Related
 

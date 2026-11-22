@@ -11,7 +11,7 @@ use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
 use eframe::egui_wgpu;
-use egui::{Color32, Rect, Ui};
+use egui::{Color32, Rect};
 use rune_fx::{
 	ElectricParams, ElectricStyle, Fx as Effect, FxFrame, FxLayer, FxOptions, FxRenderer, GlowParams, GlowStyle,
 	GradientKind, GrainGradientParams, LiquidMetalParams, MeshGradientParams, PlasticParams, PulseParams, PulseStyle,
@@ -23,38 +23,13 @@ use crate::kit;
 
 mod motion;
 
-/// How the window's effects move, an editor setting.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum Effects {
-	/// Every effect, animated.
-	Full,
-	/// Every effect settles on one pose and stops moving.
-	Reduced,
-	/// No effects.
-	Off,
-}
-
-impl Effects {
-	fn name(self) -> &'static str {
-		match self {
-			Self::Full => "Full",
-			Self::Reduced => "Reduced",
-			Self::Off => "Off",
-		}
-	}
-}
-
-/// Where the picked setting is kept, beside the other editor settings.
-const SETTING: &str = "effects";
-
-/// The window's effects: the setting, the system's, and this frame's layers.
+/// The window's effects: whether they move, and this frame's layers.
 pub struct Fx {
-	/// The setting picked, or `None` to follow the system's reduced motion.
-	picked: Option<Effects>,
-	system: motion::System,
-	/// What this frame shows, and when: seconds since the window opened, and
-	/// the layers' clock, which wraps.
-	effects: Effects,
+	/// The system's reduced-motion preference, or `None` to always move.
+	system: Option<motion::System>,
+	/// What this frame shows, and when: whether its effects hold still,
+	/// seconds since the window opened, and the layers' clock, which wraps.
+	reduced: bool,
 	time: f64,
 	clock: f32,
 	layers: Vec<FxLayer>,
@@ -70,13 +45,19 @@ struct Frame {
 }
 
 impl Fx {
-	/// Draw on `render`'s device, with the setting `storage` keeps.
-	pub fn new(
-		render: &egui_wgpu::RenderState,
-		storage: Option<&dyn eframe::Storage>,
-		ctx: &egui::Context,
-		runtime: &tokio::runtime::Handle,
-	) -> Self {
+	/// Draw on `render`'s device, following the system's reduced motion.
+	pub fn new(render: &egui_wgpu::RenderState, ctx: &egui::Context, runtime: &tokio::runtime::Handle) -> Self {
+		Self::with(render, Some(motion::System::new(ctx, runtime)))
+	}
+
+	/// Draw on `render`'s device, always moving whatever the system asks, so
+	/// a view looks the same on every machine.
+	#[cfg(test)]
+	pub fn moving(render: &egui_wgpu::RenderState) -> Self {
+		Self::with(render, None)
+	}
+
+	fn with(render: &egui_wgpu::RenderState, system: Option<motion::System>) -> Self {
 		let mut fx = FxRenderer::new(&render.device, render.target_format, FxOptions { dither: true });
 		// egui blends in gamma space on a non-sRGB target, as a Rune frame
 		// with sRGB blending does.
@@ -87,11 +68,8 @@ impl Fx {
 			.callback_resources
 			.insert(Renderer { fx, prepared: None });
 		Self {
-			picked: storage
-				.and_then(|storage| eframe::get_value(storage, SETTING))
-				.flatten(),
-			system: motion::System::new(ctx, runtime),
-			effects: Effects::Full,
+			system,
+			reduced: false,
 			time: 0.0,
 			clock: 0.0,
 			layers: Vec::new(),
@@ -104,27 +82,9 @@ impl Fx {
 		}
 	}
 
-	/// Pick `effects`, as Settings, Advanced does.
-	#[cfg(test)]
-	pub fn pick(&mut self, effects: Effects) {
-		self.picked = Some(effects);
-	}
-
-	pub fn save(&self, storage: &mut dyn eframe::Storage) {
-		eframe::set_value(storage, SETTING, &self.picked);
-	}
-
-	/// What the setting follows while none is picked.
-	fn system(&self) -> Effects {
-		match self.system.reduced() {
-			true => Effects::Reduced,
-			false => Effects::Full,
-		}
-	}
-
 	/// Start a frame: what it shows, and when.
 	pub fn begin(&mut self, ctx: &egui::Context) {
-		self.effects = self.picked.unwrap_or_else(|| self.system());
+		self.reduced = self.system.as_ref().is_some_and(motion::System::reduced);
 		self.time = ctx.input(|input| input.time);
 		self.clock = (self.time % WRAP) as f32;
 		self.layers.clear();
@@ -140,37 +100,12 @@ impl Fx {
 		let _ = self.frame.layers.set(std::mem::take(&mut self.layers));
 	}
 
-	/// Whether this frame draws effects, so widgets drawn over a fill can
-	/// leave their own background out.
-	pub fn on(&self) -> bool {
-		self.effects != Effects::Off
-	}
-
-	/// Settings, Advanced: the setting picked, or the system's.
-	pub fn picker(&mut self, ui: &mut Ui) -> egui::Response {
-		let options = [
-			(None, "System"),
-			(Some(Effects::Full), Effects::Full.name()),
-			(Some(Effects::Reduced), Effects::Reduced.name()),
-			(Some(Effects::Off), Effects::Off.name()),
-		];
-		let system = format!(
-			"{}, while the system asks apps to reduce motion or not",
-			self.system().name()
-		);
-		ui.add(crate::kit::Segmented::new(&mut self.picked, &options))
-			.on_hover_text(system)
-	}
-
 	/// Draw `layers` at `at` in `painter`'s layer, clipped to it.
 	fn draw(&mut self, painter: &egui::Painter, at: egui::layers::ShapeIdx, layers: impl IntoIterator<Item = FxLayer>) {
-		if !self.on() {
-			return;
-		}
-		let reduced = self.effects == Effects::Reduced;
+		let (clock, reduced) = (self.clock, self.reduced);
 		let start = self.layers.len();
 		self.layers
-			.extend(layers.into_iter().map(|layer| layer.at(self.clock).reduced(reduced)));
+			.extend(layers.into_iter().map(|layer| layer.at(clock).reduced(reduced)));
 		if self.layers.len() == start {
 			return;
 		}
