@@ -28,6 +28,9 @@ pub(super) enum Dialog {
 	Open(Task<Option<PathBuf>>),
 	/// Where to write a copy of the show.
 	Export(Task<Option<PathBuf>>),
+	/// The copy being written, off the window's thread since the folder may be
+	/// slow to sync, and what to say once it is.
+	Exporting(Task<Result<String, String>>),
 }
 
 impl Panels {
@@ -99,6 +102,13 @@ impl Panels {
 		}
 		let picked = match &mut self.show_dialog {
 			Some(Dialog::Open(task) | Dialog::Export(task)) => task.poll().cloned(),
+			Some(Dialog::Exporting(task)) => {
+				if let Some(done) = task.poll().cloned() {
+					self.show_dialog = None;
+					self.say(done);
+				}
+				None
+			}
 			None => return,
 		};
 		ctx.request_repaint_after(Duration::from_millis(100));
@@ -109,12 +119,16 @@ impl Panels {
 			Some(Dialog::Open(_)) => self.leaving = Some(Leave::Open(path)),
 			Some(Dialog::Export(_)) => {
 				let collection = self.engine.state.lock().unwrap().collection().clone();
-				let result = crate::show::export(&collection, self.engine.autosave.path(), &path)
-					.map(|()| format!("Exported a copy to {}", path.display()))
-					.with_context(|| format!("cannot export to {}", path.display()));
-				self.report(result);
+				let show = self.engine.autosave.path().to_path_buf();
+				let task = Task::spawn(&self.runtime, move || async move {
+					crate::show::export(&collection, &show, &path)
+						.map(|()| format!("Exported a copy to {}", path.display()))
+						.map_err(|err| format!("cannot export to {}: {err:#}", path.display()))
+				})
+				.unwrap_or_else(|err| Task::Done(Err(format!("cannot start the export: {err}"))));
+				self.show_dialog = Some(Dialog::Exporting(task));
 			}
-			None => {}
+			_ => {}
 		}
 	}
 }
@@ -123,9 +137,10 @@ impl Studio {
 	/// What the Show menu asked for since this last said so, which the window
 	/// answers by closing the show and opening the next, or
 	/// [`refuse`](Self::refuse). Held while a settings save is under way,
-	/// which writes the stream settings where the show is now.
+	/// which writes the stream settings where the show is now, and while a
+	/// copy is being written, whose result this show reports.
 	pub fn leaving(&mut self) -> Option<Leave> {
-		if self.panels.saving.is_some() {
+		if self.panels.saving.is_some() || matches!(self.panels.show_dialog, Some(Dialog::Exporting(_))) {
 			return None;
 		}
 		self.panels.leaving.take()

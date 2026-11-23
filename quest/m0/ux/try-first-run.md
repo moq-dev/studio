@@ -24,8 +24,10 @@ the [mock-up](/quest/m0/ux/mock/overhaul-first.webp):
   My Show…" and whether the canvas came out at 60 fps on a hardware encoder.
 - **Permissions:** the camera and microphone prompts macOS raises on that
   launch (run `tccutil reset Camera live.kixel.studio` and `tccutil reset
-  Microphone live.kixel.studio` first if you answered them before), and the
-  desktop's screen picker on Wayland from the Screen card.
+  Microphone live.kixel.studio` first if you answered them before), the
+  Screen Recording prompt the Screen card raises on macOS (`tccutil reset
+  ScreenCapture live.kixel.studio`), and the desktop's screen picker on
+  Wayland from the Screen card.
 - **The microphone:** whether **Mic** in the sound moves with your voice
   without a click, and whether hearing it by default is right.
 - **Shows:** relaunching reopens the show; New show, Open show file…,

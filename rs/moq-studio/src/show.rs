@@ -135,12 +135,13 @@ pub fn first(canvas: Canvas, mic: bool) -> anyhow::Result<Collection> {
 	Ok(collection)
 }
 
-/// Whether the system has a microphone to hear. A listing that fails is
-/// logged and counts as none, as a build without capture has.
+/// Whether the system has a default microphone, the one a new show's `Mic`
+/// opens: an input on another audio host alone is none. A listing that fails
+/// is logged and counts as none, as a build without capture has.
 async fn microphone() -> bool {
 	#[cfg(feature = "capture")]
 	match moq_audio::capture::devices().await {
-		Ok(devices) => return !devices.is_empty(),
+		Ok(devices) => return devices.iter().any(|device| device.default),
 		Err(err) => tracing::warn!(%err, "cannot list the microphones"),
 	}
 	false
@@ -235,7 +236,7 @@ pub fn name(path: &Path) -> String {
 
 /// Rename the closed show at `path` to `name`: its scene file, history, and
 /// stream settings, in the same directory. Its recordings and clips in
-/// `recordings` keep their names, which its stream settings note as an
+/// `recordings`, this run's folder for them, keep their names, which its stream settings note as an
 /// earlier name of its, so REVIEW still lists them and media that reads one
 /// still finds it. Refuses a name that is no file name, or that another show
 /// there has, had, or recorded under; a rename that fails partway puts back
@@ -272,11 +273,15 @@ pub fn rename(path: &Path, name: &str, recordings: &Path) -> anyhow::Result<Path
 		!claimed(dir, Some(path))?.contains(name),
 		"another show was called {name}"
 	);
-	anyhow::ensure!(
-		ours || !recorded(recordings, name)?,
-		"{} holds recordings of another show called {name}",
-		recordings.display()
-	);
+	// This run's folder, and the one the show saves, which a `--recordings`
+	// flag only overrides for this run.
+	for folder in [recordings.to_path_buf(), saved.folder(path)] {
+		anyhow::ensure!(
+			ours || !recorded(&folder, name)?,
+			"{} holds recordings of another show called {name}",
+			folder.display()
+		);
+	}
 	// Taken while the file is there to resolve.
 	let key = engine::grant_key(path).with_context(|| format!("reading {}", path.display()))?;
 	let quitting = MOVING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -571,6 +576,29 @@ mod tests {
 		// Back to the name it recorded under, which is its own.
 		let back = rename(&to, "My Show", &videos).unwrap();
 		assert_eq!(saved(&stream::path(&back)).unwrap().earlier, ["Podcast"]);
+	}
+
+	/// A name recorded under in the folder the show saves is refused, even
+	/// while this run records elsewhere, as `--recordings` makes it.
+	#[test]
+	fn a_rename_checks_the_saved_recordings_folder() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("show.toml");
+		std::fs::write(&path, "scene").unwrap();
+		let saved = dir.path().join("saved");
+		std::fs::create_dir(&saved).unwrap();
+		std::fs::write(
+			stream::path(&path),
+			format!("recordings = {:?}", saved.display().to_string()),
+		)
+		.unwrap();
+		std::fs::write(saved.join("Talk 2026-11-03T12-00-00Z.mp4"), "").unwrap();
+		let flagged = dir.path().join("flagged");
+		assert!(
+			rename(&path, "Talk", &flagged).is_err(),
+			"Talk recorded in the saved folder"
+		);
+		assert!(path.exists());
 	}
 
 	/// A show that never had a history, stream settings, or recordings

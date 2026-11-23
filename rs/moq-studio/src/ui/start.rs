@@ -143,6 +143,11 @@ impl Panels {
 			Card::Camera => line(&listing.map(|listing| &listing.cameras)),
 			Card::Screen => match line(&listing.map(|listing| &listing.displays)) {
 				(true, _, _) => (true, "Display or app".to_string(), None),
+				_ if listing.is_some_and(|listing| display(&listing.displays).is_some()) => (
+					true,
+					"Main display".to_string(),
+					Some("Asks for Screen Recording access first".to_string()),
+				),
 				not => not,
 			},
 			Card::Media => (self.quick.dialog.is_none(), "Image or video".to_string(), None),
@@ -159,7 +164,7 @@ impl Panels {
 		let listing = self.devices.listing.as_ref();
 		let pick = match card {
 			Card::Camera => listing.and_then(|listing| device(&listing.cameras)),
-			Card::Screen => listing.and_then(|listing| device(&listing.displays)),
+			Card::Screen => listing.and_then(|listing| display(&listing.displays)),
 			Card::Media => {
 				self.quick.dialog = Some(media_dialog(&self.runtime));
 				return;
@@ -255,6 +260,19 @@ fn first<'a>(devices: &'a [Pick], own: &[String]) -> Option<&'a Pick> {
 	devices
 		.iter()
 		.find(|pick| !matches!(&pick.source, Source::Camera { id: Some(id) } if own.contains(id)))
+}
+
+/// The display the Screen card adds: the first listed, or on macOS, the main
+/// display when none is, since listing them needs the Screen Recording access
+/// that only opening one asks for.
+fn display(displays: &Result<Vec<Pick>, String>) -> Option<Pick> {
+	let listed = displays.as_ref().ok().and_then(|displays| displays.first()).cloned();
+	listed.or_else(|| {
+		cfg!(target_os = "macos").then(|| Pick {
+			name: "Display".into(),
+			source: Source::Display { id: None },
+		})
+	})
 }
 
 /// The system's dialog for an image or video file.

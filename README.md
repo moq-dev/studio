@@ -108,14 +108,16 @@ a new show, **My Show**, already saved in the app's storage
 opens, the studio picks its canvas: 1080p at 60 fps when a hardware encoder
 keeps up with it over a short burst of moving frames (three quarters of each
 frame's period at most, leaving the rest for sources and the compositor), and
-1080p at 30 fps otherwise. If the system has a microphone, the show hears it
-as **Mic** in the sound. Its recordings go to your Videos folder. Change the
-canvas in Settings, Show, and where recordings go in Settings, Recording.
+1080p at 30 fps otherwise. If the system has a default microphone, the show
+hears it as **Mic** in the sound. Its recordings go to your Videos folder.
+Change the canvas in Settings, Show, and where recordings go in Settings,
+Recording.
 
 While the scene has no layers, the picture shows the quick start (on LIVE,
-only off air): one click on **Camera** (naming the camera it adds), **Screen**, **Media** (an image or
-video file), or **Web / Text** (a web address, or a text to edit) adds the
-scene's first layer, and the picture becomes the scene. Anything dropped or
+only off air): one click on **Camera** (naming the camera it adds), **Screen**
+(on macOS before Screen Recording is allowed, the main display, which asks for
+it), **Media** (an image or video file), or **Web / Text** (a web address, or a
+text to edit) adds the scene's first layer, and the picture becomes the scene. Anything dropped or
 pasted on the picture lands there too (see
 [Dropping and pasting](#dropping-and-pasting)).
 
