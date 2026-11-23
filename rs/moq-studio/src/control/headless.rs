@@ -24,9 +24,9 @@ const SIZE: egui::Vec2 = egui::vec2(1440.0, 900.0);
 /// The shortest time between frames.
 const FRAME: Duration = Duration::from_micros(16_667);
 
-/// Run the studio off-screen on the show a window would open for `scenes`,
-/// serving `socket`, until it is told to close; then end the studio as
-/// quitting a window does.
+/// Run the studio off-screen on the show at `scenes`, or else on the latest
+/// show in app data or a new one, as a first launch would, serving `socket`
+/// until it is told to close; then end the studio as quitting a window does.
 pub fn run(scenes: Option<PathBuf>, opener: show::Opener, socket: Socket) -> anyhow::Result<()> {
 	let render = render_state(&opener.gpu)?;
 	let started = Arc::<Started>::default();
@@ -47,8 +47,8 @@ pub fn run(scenes: Option<PathBuf>, opener: show::Opener, socket: Socket) -> any
 			});
 			let keyboard = hotkeys::Keyboard::default();
 			let control = socket.serve(&cc.egui_ctx, &runtime, keyboard.clone());
-			// Empty, and never saved, so a headless run leaves the window's
-			// recent list as it was.
+			// Empty, and never saved: a headless run neither reads the window's
+			// recent shows nor changes them.
 			let recent = recent::Recent::default();
 			let shows = show::dir();
 			let (target, instead) = crate::first(scenes, &recent, shows.as_deref());

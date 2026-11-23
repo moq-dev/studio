@@ -167,7 +167,7 @@ pub fn videos() -> Option<PathBuf> {
 /// A scene file in `dir` for a new show recording into `recordings`:
 /// [`NAME`], numbered past any name a show there has or had, or that a
 /// recording there is named after, created with the directory if need be.
-pub fn new_path(dir: &Path, recordings: Option<&Path>) -> anyhow::Result<PathBuf> {
+pub fn new_path(dir: &Path, recordings: &[PathBuf]) -> anyhow::Result<PathBuf> {
 	std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
 	let claimed = claimed(dir, None)?;
 	for n in 1.. {
@@ -176,10 +176,10 @@ pub fn new_path(dir: &Path, recordings: Option<&Path>) -> anyhow::Result<PathBuf
 			n => format!("{NAME} {n}"),
 		};
 		let path = dir.join(format!("{name}.toml"));
-		let recorded = match recordings {
-			Some(recordings) => recorded(recordings, &name)?,
-			None => false,
-		};
+		let mut recorded = false;
+		for recordings in recordings {
+			recorded |= self::recorded(recordings, &name)?;
+		}
 		if !taken(&path)? && !claimed.contains(&name) && !recorded {
 			return Ok(path);
 		}
@@ -199,8 +199,12 @@ pub fn latest(dir: &Path) -> Option<PathBuf> {
 		if !name.ends_with(".toml") || sibling {
 			return None;
 		}
-		let written = entry.metadata().ok()?.modified().ok()?;
-		Some((written, entry.path()))
+		// Through a link, and never a folder that happens to end in `.toml`.
+		let metadata = std::fs::metadata(entry.path()).ok()?;
+		if !metadata.is_file() {
+			return None;
+		}
+		Some((metadata.modified().ok()?, entry.path()))
 	});
 	scenes.max().map(|(_, path)| path)
 }
@@ -260,8 +264,10 @@ pub fn rename(path: &Path, name: &str, recordings: &Path) -> anyhow::Result<Path
 	let ours = saved.earlier.iter().any(|earlier| earlier == name);
 	let dir = path.parent().unwrap_or(Path::new(""));
 	for (from, to) in files(path).into_iter().zip(files(&to)) {
-		// A name only cased apart is the show's own on a case-insensitive system.
-		let met = exists(&to)? && !same_file::is_same_file(&from, &to).unwrap_or(false);
+		// A name only cased apart is the show's own on a case-insensitive
+		// system; any other name for the same file, such as a hard link, is not.
+		let recased = name.to_lowercase() == old.to_lowercase();
+		let met = exists(&to)? && !(recased && same_file::is_same_file(&from, &to).unwrap_or(false));
 		anyhow::ensure!(!met, "another show is called {name}");
 	}
 	anyhow::ensure!(
@@ -419,10 +425,13 @@ fn recorded(dir: &Path, show: &str) -> anyhow::Result<bool> {
 /// which only its own scene file's directory holds. Its history and stream
 /// settings stay with the show.
 pub fn export(collection: &Collection, path: &Path, to: &Path) -> anyhow::Result<()> {
-	let own = std::path::absolute(to)? == std::path::absolute(path)?
-		// Through a link or a name cased apart, too.
-		|| same_file::is_same_file(to, path).unwrap_or(false);
-	anyhow::ensure!(!own, "that is the show's own file");
+	let to_absolute = std::path::absolute(to)?;
+	for file in files(path) {
+		let own = to_absolute == std::path::absolute(&file)?
+			// Through a link or a name cased apart, too.
+			|| same_file::is_same_file(to, &file).unwrap_or(false);
+		anyhow::ensure!(!own, "that is one of the show's own files");
+	}
 	let parent = |path: &Path| {
 		let dir = path.parent().filter(|dir| !dir.as_os_str().is_empty());
 		std::path::absolute(dir.unwrap_or(Path::new(".")))
@@ -489,14 +498,28 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let shows = dir.path().join("shows");
 		let videos = dir.path().join("videos");
-		assert_eq!(new_path(&shows, Some(&videos)).unwrap(), shows.join("My Show.toml"));
+		assert_eq!(
+			new_path(&shows, std::slice::from_ref(&videos)).unwrap(),
+			shows.join("My Show.toml")
+		);
 		std::fs::write(shows.join("My Show.toml"), "").unwrap();
 		std::fs::write(shows.join("My Show 2.stream.toml"), "").unwrap();
 		std::fs::write(shows.join("Podcast.stream.toml"), "earlier = [\"My Show 3\"]").unwrap();
 		std::fs::create_dir(&videos).unwrap();
 		std::fs::write(videos.join("My Show 4-clip-1.mp4"), "").unwrap();
-		assert_eq!(new_path(&shows, Some(&videos)).unwrap(), shows.join("My Show 5.toml"));
-		assert_eq!(new_path(&shows, None).unwrap(), shows.join("My Show 4.toml"));
+		assert_eq!(
+			new_path(&shows, std::slice::from_ref(&videos)).unwrap(),
+			shows.join("My Show 5.toml")
+		);
+		assert_eq!(new_path(&shows, &[]).unwrap(), shows.join("My Show 4.toml"));
+		// Every folder a new show's recordings may go to counts.
+		let flagged = dir.path().join("flagged");
+		std::fs::create_dir(&flagged).unwrap();
+		std::fs::write(flagged.join("My Show 5-clip-1.mp4"), "").unwrap();
+		assert_eq!(
+			new_path(&shows, &[flagged, videos]).unwrap(),
+			shows.join("My Show 6.toml")
+		);
 	}
 
 	/// The latest show is the scene file written last, never a history or
@@ -517,6 +540,8 @@ mod tests {
 			let file = std::fs::File::create(dir.path().join(name)).unwrap();
 			file.set_modified(at(secs)).unwrap();
 		}
+		// A folder is no show, however its name ends.
+		std::fs::create_dir(dir.path().join("Backup.toml")).unwrap();
 		assert_eq!(latest(dir.path()), Some(dir.path().join("My Show 2.toml")));
 	}
 
@@ -583,6 +608,19 @@ mod tests {
 		assert_eq!(std::fs::read_to_string(&to).unwrap(), "scene");
 		assert!(!autosave::history_path(&to).exists());
 		assert_eq!(saved(&stream::path(&to)).unwrap().earlier, ["show"]);
+	}
+
+	/// Another name for the same file, such as a hard link, is another
+	/// show's, unlike the show's own name cased apart.
+	#[cfg(unix)]
+	#[test]
+	fn a_rename_onto_a_hard_link_is_refused() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("show.toml");
+		std::fs::write(&path, "scene").unwrap();
+		std::fs::hard_link(&path, dir.path().join("Talk.toml")).unwrap();
+		assert!(rename(&path, "Talk", &dir.path().join("never made")).is_err());
+		assert!(path.exists());
 	}
 
 	/// A rename that cannot tell whether a file is there, such as a history
@@ -653,6 +691,9 @@ mod tests {
 		assert_eq!(copy, collection);
 
 		assert!(export(&collection, &show, &show).is_err());
+		for sidecar in [autosave::history_path(&show), stream::path(&show)] {
+			assert!(export(&collection, &show, &sidecar).is_err(), "{}", sidecar.display());
+		}
 		#[cfg(unix)]
 		{
 			// A link beside the show to a file elsewhere roots, as the file is

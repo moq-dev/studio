@@ -10,7 +10,8 @@ which no headless run exercises.
 ## Plan
 
 The zero-gate first launch is on `main`
-(`cargo run -p moq-studio --features capture,openh264`). What to try, beside
+(`cargo run -p moq-studio --features capture,openh264`, adding `pipewire` on a
+Wayland desktop for its screen picker). What to try, beside
 the [mock-up](/quest/m0/ux/mock/overhaul-first.webp):
 
 - **Cold launch:** move the app's storage aside (`~/.local/share/moq-studio`
@@ -22,7 +23,9 @@ the [mock-up](/quest/m0/ux/mock/overhaul-first.webp):
   quest hoped for two clicks in all. Note how long the window shows "Opening
   My Show…" and whether the canvas came out at 60 fps on a hardware encoder.
 - **Permissions:** the camera and microphone prompts macOS raises on that
-  launch, and the desktop's screen picker on Wayland from the Screen card.
+  launch (run `tccutil reset Camera live.kixel.studio` and `tccutil reset
+  Microphone live.kixel.studio` first if you answered them before), and the
+  desktop's screen picker on Wayland from the Screen card.
 - **The microphone:** whether **Mic** in the sound moves with your voice
   without a click, and whether hearing it by default is right.
 - **Shows:** relaunching reopens the show; New show, Open show file…,

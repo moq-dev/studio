@@ -213,17 +213,9 @@ impl Stream {
 			}
 		}
 		let text = toml::to_string(&saved).context("cannot write the stream settings")?;
-		let dir = self
-			.path
-			.parent()
-			.filter(|dir| !dir.as_os_str().is_empty())
-			.unwrap_or(Path::new("."));
-		let mut file =
-			tempfile::NamedTempFile::new_in(dir).with_context(|| format!("writing {}", self.path.display()))?;
-		std::io::Write::write_all(&mut file, text.as_bytes())
-			.with_context(|| format!("writing {}", self.path.display()))?;
-		file.persist(&self.path)
-			.with_context(|| format!("writing {}", self.path.display()))?;
+		// On disk before it replaces the old file, and the replacing synced, so
+		// a crash leaves one or the other whole, as a scene save does.
+		crate::autosave::write_file(&self.path, &text).with_context(|| format!("writing {}", self.path.display()))?;
 		self.saved = saved;
 		Ok(())
 	}

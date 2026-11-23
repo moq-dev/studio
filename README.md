@@ -1114,9 +1114,10 @@ source opens the desktop's screen-sharing picker (xdg-desktop-portal) the
 first time it opens, and shows whichever display or window you choose there.
 It is the way to share a screen or window on a Wayland desktop, where the
 studio cannot list them itself. BUILD's Add, among this machine's devices,
-and the quick start's Screen offer them as **Picked display** and **Picked
-window**, first on a Wayland desktop, and Add's form for any source as **Display (system
-picker)** and **Window (system picker)**.
+offers them as **Picked display** and **Picked window**, first on a Wayland
+desktop, where the quick start's Screen adds **Picked display**, and Add's
+form for any source as **Display (system picker)** and **Window (system
+picker)**.
 
 The scene file records only that the source is picked, not what you picked,
 so it stays portable. What you picked is the portal's grant, kept per machine
@@ -2261,7 +2262,10 @@ refuses a path where another file or a running studio already is, and removes
 the socket when it exits. It never listens on the network, and without
 `--control` it does not listen at all. Add `--headless` to run the studio
 with no window, drawing off-screen on the GPU at 1440x900, for CI or a
-machine with no display. Its clipboard text is its own: what it copies, it
+machine with no display. Without a scene file, it opens the latest show in
+the app's storage, or a new one, as a first launch would; it neither reads
+nor changes the window's recent shows, so name the scene file to be sure
+which show it opens. Its clipboard text is its own: what it copies, it
 pastes, and the desktop's clipboard text is neither read nor replaced.
 
 `moq-studio ctl --socket <socket> <command>` sends one command and prints the

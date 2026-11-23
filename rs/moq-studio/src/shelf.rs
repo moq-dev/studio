@@ -172,10 +172,12 @@ fn list(dir: &Path, names: &[String], mut lengths: Lengths) -> (Listing, Lengths
 	let mut names = names.to_vec();
 	names.sort_by_key(|name| std::cmp::Reverse(name.len()));
 	let mut seen = BTreeMap::new();
-	let mut recordings: BTreeMap<String, Gathered> = BTreeMap::new();
+	// By the name a recording was made under and its stamp, so two names'
+	// recordings that share a stamp stay apart.
+	let mut recordings: BTreeMap<(&str, String), Gathered> = BTreeMap::new();
 	for entry in entries.flatten() {
 		let name = entry.file_name().to_string_lossy().into_owned();
-		let Some(file) = names.iter().find_map(|show| parse(show, &name)) else {
+		let Some((show, file)) = names.iter().find_map(|show| Some((show.as_str(), parse(show, &name)?))) else {
 			continue;
 		};
 		let Ok(metadata) = entry.metadata() else { continue };
@@ -203,7 +205,7 @@ fn list(dir: &Path, names: &[String], mut lengths: Lengths) -> (Listing, Lengths
 				source,
 				repaired,
 			} => {
-				let gathered = recordings.entry(stamp).or_default();
+				let gathered = recordings.entry((show, stamp)).or_default();
 				gathered.bytes += bytes;
 				gathered.modified = gathered.modified.max(modified);
 				gathered.repaired |= repaired;
@@ -223,7 +225,7 @@ fn list(dir: &Path, names: &[String], mut lengths: Lengths) -> (Listing, Lengths
 	}
 	listing
 		.cards
-		.extend(recordings.into_iter().filter_map(|(stamp, gathered)| {
+		.extend(recordings.into_iter().filter_map(|((_, stamp), gathered)| {
 			// The first program file, its repair over it, is what a click shows.
 			let (_, _, path) = gathered.programs.into_iter().min()?;
 			Some(Card {
@@ -524,6 +526,21 @@ mod tests {
 				repaired: false
 			}]
 		);
+	}
+
+	/// Recordings under two of the show's names that share a stamp are two
+	/// cards, each its own length.
+	#[test]
+	fn two_names_sharing_a_stamp_stay_apart() {
+		let dir = tempfile::tempdir().unwrap();
+		let stamp = "2026-11-03T12-00-00Z";
+		std::fs::write(dir.path().join(format!("Talk {stamp}.mp4")), mp4(5, 0)).unwrap();
+		std::fs::write(dir.path().join(format!("Podcast {stamp}.mp4")), mp4(7, 0)).unwrap();
+		let names = ["Talk".to_string(), "Podcast".to_string()];
+		let (listing, _) = list(dir.path(), &names, BTreeMap::new());
+		let mut lengths: Vec<_> = listing.cards.iter().map(|card| card.length).collect();
+		lengths.sort();
+		assert_eq!(lengths, [Some(Duration::from_secs(5)), Some(Duration::from_secs(7))]);
 	}
 
 	/// A regular MP4's boxes, holding `seconds` in its movie header after

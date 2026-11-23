@@ -293,9 +293,13 @@ enum Target {
 	},
 }
 
+/// What opening a show ends with: where a rename moved it, once it did, and
+/// the show opened.
+type Opened = (Option<PathBuf>, anyhow::Result<(Arc<engine::Engine>, stream::Stream)>);
+
 /// A show being opened off the window's thread.
 struct Opening {
-	task: task::Task<anyhow::Result<(Arc<engine::Engine>, stream::Stream)>>,
+	task: task::Task<Opened>,
 	/// Its name, while it opens.
 	name: String,
 	/// What to open if it cannot be, saying why in the studio; with none, the
@@ -429,26 +433,42 @@ impl Window {
 		};
 		let opener = self.opener.clone();
 		let shows = self.shows.clone();
-		// Where a new show records: the flag's folder, if set, else Videos.
-		let recordings = self.opener.flags.recordings.clone().or_else(show::videos);
+		// Where a new show's recordings would go: this run's folder, and Videos,
+		// which its stream settings name for the runs after.
+		let recordings: Vec<PathBuf> = self
+			.opener
+			.flags
+			.recordings
+			.iter()
+			.cloned()
+			.chain(show::videos())
+			.collect();
 		// Naming a new show, or renaming one, reads its folders too.
 		let spawned = task::Task::spawn(&self.opener.runtime, move || async move {
-			let (path, create) = match target {
-				Target::Open(path) => (path, false),
-				Target::Create(path) => (path, true),
-				Target::New => {
-					let shows = shows.context("this system has no app storage to keep a show in")?;
-					(show::new_path(&shows, recordings.as_deref())?, true)
-				}
-				Target::Rename { from, name, recordings } => {
-					let to = show::rename(&from, &name, &recordings).context("cannot rename the show")?;
-					(to, false)
-				}
-			};
-			opener.open(path, create).await
+			let mut moved = None;
+			let opened = async {
+				let (path, create) = match target {
+					Target::Open(path) => (path, false),
+					Target::Create(path) => (path, true),
+					Target::New => {
+						let shows = shows.context("this system has no app storage to keep a show in")?;
+						(show::new_path(&shows, &recordings)?, true)
+					}
+					Target::Rename { from, name, recordings } => {
+						let to = show::rename(&from, &name, &recordings).context("cannot rename the show")?;
+						moved = Some(to.clone());
+						(to, false)
+					}
+				};
+				opener.open(path, create).await
+			}
+			.await;
+			(moved, opened)
 		});
-		let task = spawned
-			.unwrap_or_else(|err| task::Task::Done(Err(anyhow::Error::new(err).context("cannot open the show"))));
+		let task = spawned.unwrap_or_else(|err| {
+			let err = anyhow::Error::new(err).context("cannot open the show");
+			task::Task::Done((None, Err(err)))
+		});
 		self.app = App::Opening(Box::new(Opening {
 			task,
 			name,
@@ -466,21 +486,25 @@ impl Window {
 			self.app = App::Opening(opening);
 			return;
 		}
-		let task::Task::Done(opened) = opening.task else {
+		let task::Task::Done((moved, opened)) = opening.task else {
 			unreachable!("polled done")
 		};
 		ui.ctx().request_repaint();
+		// A rename that moved the files stands, whether or not the show opens.
+		if let (Some(from), Some(to)) = (&opening.renamed, &moved) {
+			self.recent.moved(from, to);
+		}
 		match opened {
-			Ok((engine, stream)) => {
-				if let Some(from) = &opening.renamed {
-					self.recent.moved(from, engine.autosave.path());
-				}
-				self.app = App::Starting(engine, Box::new(stream));
-			}
+			Ok((engine, stream)) => self.app = App::Starting(engine, Box::new(stream)),
 			Err(err) => {
 				let err = err.context(format!("cannot open {}", opening.name));
 				tracing::error!(error = format!("{err:#}"), "cannot open the show");
-				match opening.instead {
+				// The show's old name is gone once a rename moved it.
+				let instead = match moved {
+					Some(_) => opening.instead.map(|_| Target::New),
+					None => opening.instead,
+				};
+				match instead {
 					Some(instead) => {
 						// A new show last: one that cannot be made ends the window.
 						let then = match instead {
@@ -514,8 +538,9 @@ impl Window {
 	) {
 		self.started.set(engine.clone());
 		self.recent.opened(engine.autosave.path(), recent::now());
-		// Now rather than at eframe's next save, so a crash or a kill still
-		// reopens this show.
+		// Asked for now rather than at eframe's next save, so a crash soon
+		// after likely still reopens this show; the write finishes on its own
+		// thread, and a show in app storage is found without it.
 		if let Some(storage) = frame.storage_mut() {
 			self.recent.save(storage);
 			storage.flush();
