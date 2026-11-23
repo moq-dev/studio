@@ -579,7 +579,11 @@ impl Panels {
 		let result = match restart {
 			Restart::Landscape(canvas) => {
 				let label = format!("Switch off {}", Mod::Formats.name());
-				let result = edit(&mut state, label, None, |draft| draft.set_canvas(canvas));
+				// A show reloaded while this was asked may go out in portrait.
+				let result = edit(&mut state, label, None, |draft| {
+					draft.set_portrait(false)?;
+					draft.set_canvas(canvas)
+				});
 				if result.is_ok() {
 					self.controls.mods.set(Mod::Formats, false);
 					self.deselect_item();

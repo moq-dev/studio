@@ -65,18 +65,32 @@ pub(super) fn drawn(state: &State, layer: &Layer, index: usize, format: Format) 
 		true => collection.canvas_of(format),
 		false => collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas),
 	};
-	let arranged = layer
-		.scene
-		.as_deref()
-		.and_then(|scene| state.compositor.placed(format, scene))
-		.filter(|arranged| arranged.len() == collection.items(layer).map_or(0, <[Item]>::len))
-		.and_then(|arranged| arranged.get(index))
-		.filter(|arranged| item.slot.is_some() && !arranged.rect.is_empty());
+	let arranged =
+		arranged(state, layer, index, format).filter(|arranged| item.slot.is_some() && !arranged.rect.is_empty());
 	Some(match (arranged, item.slot) {
 		(Some(arranged), _) => (arranged.rect, arranged.crop),
 		(None, Some(_)) => (Rect::fill(&canvas), item.crop),
 		(None, None) => (item.rect, item.crop),
 	})
+}
+
+/// Whether the layer at `index` of `layer` is in a slot its arrangement
+/// closes, as while its source is offline, so it is drawn nowhere.
+pub(super) fn closed(state: &State, layer: &Layer, index: usize) -> bool {
+	arranged(state, layer, index, Format::Landscape).is_some_and(|item| item.slot.is_some() && !item.visible)
+}
+
+/// The layer at `index` of `layer` as `format`'s picture arranges it now,
+/// once the compositor has arranged its scene.
+fn arranged<'a>(state: &'a State, layer: &Layer, index: usize, format: Format) -> Option<&'a Item> {
+	let collection = state.collection();
+	let format = collection.format_of(layer, format);
+	layer
+		.scene
+		.as_deref()
+		.and_then(|scene| state.compositor.placed(format, scene))
+		.filter(|arranged| arranged.len() == collection.items(layer).map_or(0, <[Item]>::len))
+		.and_then(|arranged| arranged.get(index))
 }
 
 /// What a slot's chip calls it: the role in it, a guest, or the slot.

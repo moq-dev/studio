@@ -1707,15 +1707,25 @@ fn studio_mode_cues_and_takes() {
 }
 
 /// While a mod is off, its feature is held back where no page shows it: a
-/// key for it does nothing, a layer's menu offers no slot, and a guest is not
-/// placed on their own, though the settings ask. It draws no view.
+/// key for it does nothing, a layer's menu offers no slot, a guest is not
+/// placed on their own, though the settings ask, and a guest waiting to be
+/// placed by hand, in no scene, does not switch Audio scenes & routes on.
+/// It draws no view.
 #[test]
 #[ignore = "draws on a GPU; run with `just shots`"]
 fn a_mod_off_holds_its_feature_back() {
 	let (_show, runtime, gpu) = lavapipe();
 	let _entered = runtime.enter();
 	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
-	std::fs::copy(fixture.join("shots/show.toml"), "show.toml").unwrap();
+	let show = std::fs::read_to_string(fixture.join("shots/show.toml")).unwrap();
+	// The only source in no scene: a guest who joined and waits.
+	let show = show.replacen(
+		"[sources.highlight]\nkind = \"color\"\ncolor = \"#f59e0b\"\n",
+		"[sources.waiting]\nkind = \"broadcast\"\npath = \"room/waiting\"\n",
+		1,
+	);
+	assert!(show.contains("room/waiting"));
+	std::fs::write("show.toml", show).unwrap();
 	std::fs::write("show.stream.toml", "guests_appear = true\n").unwrap();
 	let app = start(launch(&gpu), stream(None), &runtime);
 	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
@@ -1744,6 +1754,31 @@ fn a_mod_off_holds_its_feature_back() {
 		offered
 	};
 	assert!(!offered(&mut harness), "no slot in the layer's menu");
+	assert!(
+		crate::controls::sounds(&engine.state.lock().unwrap(), "waiting"),
+		"the waiting guest makes a sound"
+	);
+	assert!(
+		!controls.mods.on(Mod::Audio),
+		"a guest waiting to be placed is not left out"
+	);
+
+	// Added from Not in any scene, they are heard on the stream.
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		unreachable!("the studio is open")
+	};
+	studio.build(Side::Add, Inspect::Layer, None);
+	harness.run_steps(2);
+	let adds: Vec<_> = harness.get_all_by_role_and_label(Role::Button, "Add").collect();
+	adds.last().expect("the waiting guest's Add").click();
+	harness.run_steps(2);
+	{
+		let state = engine.state.lock().unwrap();
+		let collection = state.collection();
+		let program = collection.program_audio().unwrap();
+		assert!(collection.heard(program).contains("waiting"), "heard once placed");
+	}
+	assert!(!controls.mods.on(Mod::Audio));
 
 	enable(&mut harness, &[Mod::Layout]);
 	assert!(engine.guests_appear(), "as the settings ask");
@@ -1779,11 +1814,26 @@ fn a_mod_switched_off_turns_its_feature_off() {
 		r#"sounds = ["caller", "guest", "music"]"#,
 		1,
 	);
+	// A tile whose role nothing fills, which its arrangement closes.
+	let slots = read("slots.toml")
+		.replacen(
+			"[sources.game]",
+			"[sources.Empty]\nkind = \"role\"\n\n[sources.game]",
+			1,
+		)
+		.replacen(
+			r#"{ source = "Dana", slot = "tile" },"#,
+			r#"{ source = "Dana", slot = "tile" }, { source = "Empty", slot = "tile" },"#,
+			1,
+		);
+	// Going out in portrait too, where keeping clear leaves the portrait
+	// picture be.
+	let keep = read("keep.toml").replacen("version = 1\n", "version = 1\nportrait = true\n", 1);
 	let shows = [
 		(mix, Mod::Audio),
 		(one, Mod::Audio),
-		(read("slots.toml"), Mod::Layout),
-		(read("keep.toml"), Mod::Layout),
+		(slots, Mod::Layout),
+		(keep, Mod::Layout),
 		(read("dual.toml"), Mod::Formats),
 		(read("portrait.toml"), Mod::Formats),
 		(read("published.toml"), Mod::Published),
@@ -1840,15 +1890,28 @@ fn a_mod_switched_off_turns_its_feature_off() {
 				);
 			}
 			Mod::Layout => {
+				assert_eq!(after.scenes.len(), before.scenes.len());
 				for (scene, was) in after.scenes.iter().zip(&before.scenes) {
+					assert_eq!(scene.items.len(), was.items.len(), "{}", scene.name);
 					for (item, was) in scene.items.iter().zip(&was.items) {
 						assert!(
 							item.slot.is_none() && item.keep_clear.is_none(),
 							"{} set free",
 							item.source
 						);
-						if was.slot.is_some() {
+						if item.source == "Empty" {
+							assert!(!item.visible, "a closed tile stays hidden");
+						} else if was.slot.is_some() {
 							assert!(!item.rect.is_empty(), "{} kept where it was drawn", item.source);
+							assert!(item.visible, "{} still shown", item.source);
+						}
+						if was.keep_clear.is_some() {
+							assert_eq!(
+								after.placement(item, moq_scene::Format::Portrait),
+								before.placement(was, moq_scene::Format::Portrait),
+								"{} keeps its portrait place",
+								item.source
+							);
 						}
 					}
 				}
@@ -1859,6 +1922,7 @@ fn a_mod_switched_off_turns_its_feature_off() {
 			}
 			Mod::Published => {
 				assert!(after.published.is_empty(), "no source published independently");
+				assert_eq!(after.scenes.len(), before.scenes.len());
 				assert!(
 					after
 						.scenes

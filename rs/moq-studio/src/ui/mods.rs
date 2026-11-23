@@ -42,7 +42,9 @@ fn used(state: &State) -> Vec<Mod> {
 }
 
 /// The sources the stream's mix leaves out: each sent only to another audio
-/// scene, or making a sound and sent to none.
+/// scene, or making a sound and sent to none. A source with a picture that
+/// no layer shows, such as a guest waiting to be placed, is not left out:
+/// Add places it and hears it.
 fn unheard(state: &State) -> BTreeSet<String> {
 	let collection = state.collection();
 	let heard = collection
@@ -50,10 +52,12 @@ fn unheard(state: &State) -> BTreeSet<String> {
 		.map(|program| collection.heard(program))
 		.unwrap_or_default();
 	let sent = collection.audio_scenes.iter().flat_map(|scene| &scene.sounds);
+	let shown = |name: &str| (collection.layers()).any(|(_, items)| items.iter().any(|item| item.source == name));
+	let waiting = |name: &str| collection.sources.get(name).is_some_and(Source::has_video) && !shown(name);
 	let sounding = collection
 		.sources
 		.keys()
-		.filter(|name| crate::controls::sounds(state, name));
+		.filter(|name| crate::controls::sounds(state, name) && !waiting(name));
 	sent.chain(sounding)
 		.filter(|name| !heard.contains(name.as_str()) && collection.sources.contains_key(*name))
 		.cloned()
@@ -284,17 +288,28 @@ fn layout_off(state: &mut State, label: String) -> anyhow::Result<()> {
 					});
 					(rect, crop, portrait)
 				}
+				// Keeping clear moves only the landscape picture, so the
+				// portrait one keeps the place it has from the layer's own.
 				(None, Some(_)) => {
 					let placed = super::keep::placed(state, &layer, item, Format::Landscape);
-					(placed.rect, item.crop, item.portrait)
+					let portrait = match dual && item.shown_in(Format::Portrait) {
+						true => Some(collection.placement(item, Format::Portrait)),
+						false => item.portrait,
+					};
+					(placed.rect, item.crop, portrait)
 				}
 			};
+			// A slot closed now, as while its source is offline, shows
+			// nothing, so its layer stays hidden rather than filling the
+			// picture when the source returns.
+			let closed = super::slots::closed(state, &layer, index);
 			let free = Item {
 				slot: None,
 				keep_clear: None,
 				rect,
 				crop,
 				portrait,
+				visible: item.visible && !closed,
 				..item.clone()
 			};
 			freed.push((layer.clone(), index, free));

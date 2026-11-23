@@ -4432,6 +4432,10 @@ mod tests {
 			stream,
 			tokio::runtime::Handle::current(),
 		));
+		use crate::mods::Mod;
+		for each in [Mod::Studio, Mod::Review, Mod::Remote] {
+			controls.mods.set(each, true);
+		}
 		controls.set_studio(true);
 		controls.scene(&mut engine.state.lock().unwrap(), "Guest").unwrap();
 		{

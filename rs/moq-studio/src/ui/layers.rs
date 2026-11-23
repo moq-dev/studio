@@ -635,8 +635,14 @@ impl Panels {
 							..Item::new(name.clone(), moq_scene::Rect::default())
 						};
 					}
+					// Its sound joins the stream with it, as a new source's does.
+					let heard = state.collection().sources.get(&name).is_some_and(Source::has_audio);
 					let result = edit(&mut state, format!("Add `{name}` {}", place(&layer)), None, |draft| {
-						draft.insert_item(&layer, index, item)
+						draft.insert_item(&layer, index, item)?;
+						if heard {
+							draft.hear(&name)?;
+						}
+						Ok(())
 					});
 					if result.is_ok() {
 						self.select(Some(Picked { layer, index }));
