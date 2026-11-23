@@ -183,8 +183,13 @@ async fn an_agent_builds_a_show() {
 	studio.ctl(&["type", "tone"]);
 	studio.ctl(&["click", "Kind"]);
 	studio.ctl(&["click", "Media file"]);
+	// The name, through the run's own clipboard.
+	studio.ctl(&["click", "Name"]);
+	studio.ctl(&["key", "ctrl+a"]);
+	studio.ctl(&["key", "ctrl+c"]);
 	studio.ctl(&["click", "file"]);
-	studio.ctl(&["type", "tone.webm"]);
+	studio.ctl(&["key", "ctrl+v"]);
+	studio.ctl(&["type", ".webm"]);
 	studio.ctl(&["click", "Add source"]);
 	studio.ctl(&["wait", "--settled", "--timeout", "20s"]);
 	let state = &studio.snapshot()["state"]["studio"];

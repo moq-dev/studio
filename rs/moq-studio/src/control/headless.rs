@@ -4,7 +4,8 @@
 //! A frame is drawn whenever the studio asks for one, as a window's would be,
 //! but no more often than a 60 Hz display draws them, and the picture only
 //! when a screenshot asks for it. Animations are off, as in `just shots`, so
-//! what a request changes is there on the next frame.
+//! what a request changes is there on the next frame. The clipboard's text
+//! is the run's own, so a run neither reads nor replaces the desktop's.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -67,10 +68,15 @@ pub fn run(app: App, opener: show::Opener, socket: Socket) -> anyhow::Result<()>
 		.build_eframe(window);
 
 	let begun = kio::clock::now();
+	let mut clipboard = String::new();
 	loop {
 		let last = kio::clock::now();
 		harness.input_mut().time = Some(last.saturating_duration_since(begun).as_secs_f64());
 		harness.step();
+		let pasting = clip(&harness, &mut clipboard);
+		if pasting {
+			harness.input_mut().events.push(egui::Event::Paste(clipboard.clone()));
+		}
 		// What the desktop answers a close asked for with.
 		if root(&harness).commands.contains(&egui::ViewportCommand::Close) {
 			let root = harness.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default();
@@ -81,8 +87,13 @@ pub fn run(app: App, opener: show::Opener, socket: Socket) -> anyhow::Result<()>
 			break;
 		}
 		// egui's "never" is a delay too long to add.
+		let delay = if pasting {
+			Duration::ZERO
+		} else {
+			root(&harness).repaint_delay
+		};
 		let mut next = last
-			.checked_add(root(&harness).repaint_delay)
+			.checked_add(delay)
 			.unwrap_or(last.saturating_add(Duration::from_secs(3600)));
 		// Until the frame due, or sooner if asked; never before the next
 		// frame a display would draw.
@@ -110,6 +121,18 @@ pub fn run(app: App, opener: show::Opener, socket: Socket) -> anyhow::Result<()>
 /// The last frame's output for the window.
 fn root<'a>(harness: &'a Harness<'_, Window>) -> &'a egui::ViewportOutput {
 	&harness.output().viewport_output[&egui::ViewportId::ROOT]
+}
+
+/// Keep the text the last frame copied in `clipboard`, returning whether it
+/// asked to paste text that is there, as a window's clipboard would answer.
+fn clip(harness: &Harness<'_, Window>, clipboard: &mut String) -> bool {
+	for command in &harness.output().platform_output.commands {
+		if let egui::OutputCommand::CopyText(text) = command {
+			// As egui-winit pastes it, with Windows line endings normalized.
+			*clipboard = text.replace("\r\n", "\n");
+		}
+	}
+	root(harness).commands.contains(&egui::ViewportCommand::RequestPaste) && !clipboard.is_empty()
 }
 
 /// A renderer on `gpu`'s device, as the window's is.

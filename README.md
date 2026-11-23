@@ -2221,7 +2221,8 @@ refuses a path where another file or a running studio already is, and removes
 the socket when it exits. It never listens on the network, and without
 `--control` it does not listen at all. Add `--headless` to run the studio
 with no window, drawing off-screen on the GPU at 1440x900, for CI or a
-machine with no display.
+machine with no display. Its clipboard text is its own: what it copies, it
+pastes, and the desktop's clipboard text is neither read nor replaced.
 
 `moq-studio ctl --socket <socket> <command>` sends one command and prints the
 answer:

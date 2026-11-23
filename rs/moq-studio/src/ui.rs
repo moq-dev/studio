@@ -1174,8 +1174,13 @@ impl Panels {
 		if ctx.input_mut(|input| input.consume_shortcut(&palette::OPEN)) {
 			self.toggle_palette();
 		}
-		// egui pastes only text, so a paste it does not report may be a picture.
-		let pressed = self.keyboard.as_ref().is_some_and(hotkeys::Keyboard::pasted);
+		// egui pastes only text, so a paste it does not report may be a picture;
+		// one asked of the window waits for its text as a menu's Paste does.
+		let pasted = self.keyboard.as_ref().and_then(hotkeys::Keyboard::pasted);
+		if pasted == Some(hotkeys::Pasted::Asked) {
+			self.dropping.paste_asked(ctx.pointer_latest_pos());
+		}
+		let pressed = pasted == Some(hotkeys::Pasted::Read);
 		let text = ctx.input(|input| input.events.iter().any(|event| matches!(event, egui::Event::Paste(_))));
 		let menu = self.dropping.menu_pasted(ctx, text);
 		// A focused text field, or a page the picture passes the keyboard to,

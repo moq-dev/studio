@@ -134,8 +134,17 @@ struct Pressing {
 	/// The modifiers held now, as egui names them.
 	modifiers: egui::Modifiers,
 	taking: Taking,
-	/// Whether a paste reached egui since [`Keyboard::pasted`] last said so.
-	pasted: bool,
+	/// The latest paste to reach egui since [`Keyboard::pasted`] last said so.
+	pasted: Option<Pasted>,
+}
+
+/// How a paste pressed in the studio's window reads the clipboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pasted {
+	/// Read with the key, so egui reports any text on the same frame.
+	Read,
+	/// Asked of the window, which reports any text on a later frame.
+	Asked,
 }
 
 /// What a key pressed in the window does besides reaching egui.
@@ -188,7 +197,9 @@ impl Keyboard {
 		// A paste lands in the studio's window, never from the multiview's.
 		let paste = studio && !repeat && paste(pressing.modifiers, key, &name);
 		let heard = Self::hear(&mut pressing, key, name, repeat, studio);
-		pressing.pasted |= heard && paste;
+		if heard && paste {
+			pressing.pasted = Some(Pasted::Read);
+		}
 		heard
 	}
 
@@ -210,14 +221,17 @@ impl Keyboard {
 			}
 			_ => Self::hear(&mut pressing, key, name, false, true),
 		};
-		pressing.pasted |= heard && paste;
+		// `--control` asks the window for the clipboard's text.
+		if heard && paste {
+			pressing.pasted = Some(Pasted::Asked);
+		}
 		heard
 	}
 
-	/// Whether a paste was pressed since this last said so, which egui reports
-	/// only when the clipboard holds text.
-	pub fn pasted(&self) -> bool {
-		std::mem::take(&mut self.0.lock().unwrap().pasted)
+	/// How the latest paste pressed since this last said so reads the
+	/// clipboard, whose text egui reports only when there is some.
+	pub fn pasted(&self) -> Option<Pasted> {
+		self.0.lock().unwrap().pasted.take()
 	}
 
 	fn hear(pressing: &mut Pressing, key: PhysicalKey, name: Key, repeat: bool, studio: bool) -> bool {
@@ -739,9 +753,12 @@ mod tests {
 			)
 		};
 		assert!(paste(false));
-		assert!(!keyboard.pasted(), "the multiview pasted");
+		assert_eq!(keyboard.pasted(), None, "the multiview pasted");
 		assert!(paste(true));
-		assert!(keyboard.pasted(), "the studio's window pasted");
+		assert_eq!(keyboard.pasted(), Some(Pasted::Read), "the studio's window pasted");
+		let v = (PhysicalKey::Code(KeyCode::KeyV), Key::Character("v".into()));
+		assert!(keyboard.injected(v.0, v.1));
+		assert_eq!(keyboard.pasted(), Some(Pasted::Asked), "--control asked the window");
 	}
 
 	/// Typing into the studio's window holds its keys back, not those the
