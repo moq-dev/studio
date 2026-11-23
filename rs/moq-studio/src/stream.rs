@@ -96,7 +96,8 @@ pub struct Overridden {
 	pub guest_expiry: bool,
 }
 
-/// Which relays a stream goes to, as the go-live sheet switches them.
+/// Which of a stream's relays to dial: both to go live, and each on its own to
+/// follow them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Switched {
 	pub relay: bool,
@@ -385,10 +386,7 @@ impl Stream {
 			self.check_failover()?;
 		}
 		let relays = self.relays(switched)?;
-		anyhow::ensure!(
-			!relays.is_empty(),
-			"no relay is switched on; set one in Settings, Stream"
-		);
+		anyhow::ensure!(!relays.is_empty(), "no relay is set; set one in Settings, Destinations");
 		Ok(Destination {
 			relays,
 			broadcast: self.broadcast().to_string(),

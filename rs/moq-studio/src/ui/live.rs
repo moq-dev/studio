@@ -1,57 +1,57 @@
-//! Going live from the window: the live control on the title bar, the go-live
-//! sheet with where the stream goes and the checks before it does, the health
-//! dot and what it opens, and the Stream settings.
-
-use std::collections::BTreeMap;
+//! Going live from the window: the live control on the title bar, the check
+//! going live waits on, run in the background, the Go live popover under the
+//! control, the health dot and what it opens, and the Destinations settings.
 
 use egui::{Align, Rect, Sense, Stroke, Vec2, pos2, vec2};
 use moq_net::bandwidth::Rate;
 
-use super::levels::reading;
 use super::*;
+use crate::controls::Probing;
 use crate::engine::OnAir;
 use crate::setup::{self, Encoding, Task};
-use crate::stream::{Saved, Stream};
+use crate::stream::{Saved, Stream, Switched};
 use crate::uplink;
 
-/// How long END STREAM is held down to end the stream.
-const HOLD: Duration = Duration::from_millis(1200);
-
-/// How loud a microphone gets, on the meter's scale, to count as moving.
-const MOVING: f32 = 0.2;
-
-/// How long the microphone check listens before saying it heard nothing.
-const LISTEN: Duration = Duration::from_secs(4);
-
-/// The go-live sheet's checks, run while it is open.
-pub(super) struct Going {
-	/// The canvases the encoders were timed at together, the program's and
-	/// its turned one while the show goes out in both formats; others start
-	/// the checks over.
-	canvases: Vec<Canvas>,
-	/// How each encodes, in the canvases' order.
+/// The check going live waits on, run in the background off air: whether the
+/// encoder keeps up with the program, and whether the connection to the
+/// first relay carries what it sends.
+pub(super) struct Ready {
+	/// What it checks; a check of anything else is stale.
+	of: Checked,
+	/// How each canvas encodes, in the order of `of.canvases`.
 	encoder: Task<Result<Vec<Encoding>, String>>,
 	/// Started once the encoder is known, since what it sends is what the
 	/// connection is measured toward.
 	uplink: Option<Measuring>,
-	/// The loudest each microphone was since the sheet opened, on the meter's
-	/// scale.
-	heard: BTreeMap<String, f32>,
-	opened: kio::clock::Instant,
-	/// Whether the confirm was pressed, so the sheet waits on going live.
-	confirmed: bool,
+}
+
+/// What a check is of: the program's canvases, where it goes, and the
+/// network path there. A check goes stale when any of them changes, never
+/// with age.
+#[derive(Clone, PartialEq)]
+struct Checked {
+	/// The program's canvas, and its turned one while the show goes out in
+	/// both formats, which are encoded together.
+	canvases: Vec<Canvas>,
+	/// The relay and the failover relay.
+	relays: [Option<url::Url>; 2],
+	/// The path the probe publishes beneath, which the relay's token covers.
+	broadcast: String,
+	/// How many saves set a relay's token.
+	tokens: u64,
+	/// How many times the relays watched connected again, as a new network
+	/// path makes them.
+	reconnects: u64,
 }
 
 /// How a check came out.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Outcome {
 	/// Still checking.
 	Waiting,
 	Passed,
 	/// Failed: going live still works, but viewers would notice.
 	Failed,
-	/// Nothing to check, such as a show without a camera.
-	Skipped,
 }
 
 /// What a failed check offers to do about it.
@@ -59,75 +59,223 @@ enum Outcome {
 enum Fix {
 	/// Send the program at this canvas instead.
 	Send(Canvas),
-	/// Measure the connection again.
+	/// Check again, such as once the relay is back.
 	Again,
-	/// Open BUILD, where the sources are.
-	Build,
 }
 
-/// A check's line in the sheet.
+/// A check's line.
 struct Check {
 	mark: Outcome,
 	icon: Icon,
 	name: &'static str,
 	/// What it found, or what is wrong and why, as one sentence.
 	said: String,
-	/// The microphone's level, for its meter.
-	level: Option<(f32, f32)>,
+	/// What the health dot reads while it fails, in a word or two.
+	word: &'static str,
 	fixes: Vec<(String, Fix)>,
 }
 
-impl Going {
-	/// Start the checks for the program at `canvases`, the encoders' noted as
-	/// `probing` until it ends, even once the sheet closes, and not run
-	/// without it, while a go-live opens the program's encoders.
-	fn new(
-		gpu: crate::engine::Gpu,
-		runtime: &tokio::runtime::Handle,
-		canvases: Vec<Canvas>,
-		probing: Option<crate::controls::Probing>,
-	) -> Self {
-		let encoder = match probing {
-			Some(probing) => Task::spawn(runtime, {
-				let canvases = canvases.clone();
-				move || async move {
-					let _probing = probing;
-					setup::probe(gpu, &canvases).await
-				}
-			})
-			.unwrap_or_else(|err| Task::Done(Err(format!("cannot start the check: {err}")))),
-			None => Task::Done(Err("not checked while a stream goes live".into())),
-		};
-		Self {
-			canvases,
-			encoder,
-			uplink: None,
-			heard: BTreeMap::new(),
-			opened: kio::clock::now(),
-			confirmed: false,
-		}
-	}
+/// The Go live popover, while open.
+#[derive(Default)]
+pub(super) struct Going {
+	/// The relay's address and token typed, while the show has no relay.
+	address: String,
+	token: String,
+	/// Why the address typed cannot be saved.
+	invalid: Option<String>,
+	/// Whether it goes live as soon as the check passes: from a press, until
+	/// the check fails.
+	armed: bool,
 }
 
-impl Going {
-	/// Whether every check that runs in the background has finished.
-	#[cfg(test)]
-	pub(super) fn done(&self) -> bool {
-		matches!(self.encoder, Task::Done(_))
-			&& matches!(
-				self.uplink,
-				Some(Measuring {
-					task: Task::Done(_),
-					..
-				})
-			)
+impl Ready {
+	/// Start checking what `of` names, the encoder noted as `probing` until
+	/// it finishes, which a go-live waits out before the program's open.
+	fn new(gpu: crate::engine::Gpu, runtime: &tokio::runtime::Handle, of: Checked, probing: Probing) -> Self {
+		let encoder = Task::spawn(runtime, {
+			let canvases = of.canvases.clone();
+			move || async move {
+				let _probing = probing;
+				setup::probe(gpu, &canvases).await
+			}
+		})
+		.unwrap_or_else(|err| Task::Done(Err(format!("cannot start the check: {err}"))));
+		Self {
+			of,
+			encoder,
+			uplink: None,
+		}
+	}
+
+	/// Collect what finished, and start measuring the connection once the
+	/// encoder says what it sends.
+	fn advance(&mut self, controls: &Controls, runtime: &tokio::runtime::Handle) {
+		self.encoder.poll();
+		if self.uplink.is_none()
+			&& let Task::Done(encoder) = &self.encoder
+		{
+			self.uplink = Some(match encoder {
+				Ok(encodings) => {
+					// Up to past what they send, so a connection that carries
+					// it says so rather than stopping at its rate.
+					let ceiling = setup::total(encodings).scaled(1.0 / setup::headroom());
+					measure(controls, runtime, ceiling)
+				}
+				Err(_) => Measuring {
+					task: Task::Done(Err("the encoder failed, so what it would send is not known".into())),
+					_stop: None,
+				},
+			});
+		}
+		if let Some(uplink) = &mut self.uplink {
+			uplink.task.poll();
+		}
+	}
+
+	/// The worst of its checks: failed if any did, else waiting if any is.
+	fn outcome(&self) -> Outcome {
+		let marks = self.checks().map(|check| check.mark);
+		match () {
+			_ if marks.contains(&Outcome::Failed) => Outcome::Failed,
+			_ if marks.contains(&Outcome::Waiting) => Outcome::Waiting,
+			_ => Outcome::Passed,
+		}
+	}
+
+	/// The encoder and what it encodes, such as `nvenc 1080p at 60`, once it
+	/// keeps up.
+	fn encoded(&self) -> Option<String> {
+		let Task::Done(Ok(encodings)) = &self.encoder else {
+			return None;
+		};
+		let encoding = encodings.first()?;
+		setup::keeps_up(&self.of.canvases, encodings)
+			.then(|| format!("{} {}", encoding.encoder, named(self.of.canvases[0])))
+	}
+
+	/// The checks, as they stand: the encoders keep up with their canvases
+	/// together, and the connection carries what they send.
+	fn checks(&self) -> [Check; 2] {
+		let encodes = self.of.canvases.len();
+		let formats = match encodes {
+			1 => String::new(),
+			_ => " in both formats".to_string(),
+		};
+		let canvas = self.of.canvases[0];
+		let send = smaller(canvas).map(|smaller| (format!("Send {} instead", named(smaller)), Fix::Send(smaller)));
+		let encoder = match &self.encoder {
+			Task::Running(_) => Check {
+				mark: Outcome::Waiting,
+				icon: Icon::Encoder,
+				name: "Encoder",
+				said: format!("Timing {}", named(canvas)),
+				word: "",
+				fixes: Vec::new(),
+			},
+			Task::Done(Ok(encodings)) if setup::keeps_up(&self.of.canvases, encodings) => Check {
+				mark: Outcome::Passed,
+				icon: Icon::Encoder,
+				name: "Encoder",
+				said: format!("Keeps up with {}{formats}", named(canvas)),
+				word: "",
+				fixes: Vec::new(),
+			},
+			Task::Done(Ok(encodings)) => Check {
+				mark: Outcome::Failed,
+				icon: Icon::Encoder,
+				name: "Encoder",
+				said: format!(
+					"The encoder takes {} ms a frame, too slow for {}{formats}. Viewers would see it stutter.",
+					encodings
+						.iter()
+						.map(|encoding| encoding.frame)
+						.max()
+						.unwrap_or_default()
+						.as_millis(),
+					named(canvas)
+				),
+				word: "Encoder too slow",
+				fixes: send.clone().into_iter().collect(),
+			},
+			Task::Done(Err(err)) => Check {
+				mark: Outcome::Failed,
+				icon: Icon::Encoder,
+				name: "Encoder",
+				said: format!("The encoder failed: {err}."),
+				word: "Encoder failed",
+				// A smaller picture frees no encode session, which a second
+				// picture is likelier to be refused for.
+				fixes: match encodes {
+					1 => send.clone().into_iter().collect(),
+					_ => Vec::new(),
+				},
+			},
+		};
+
+		// The connection carries the program. Published scenes and sources
+		// share what is left, following the connection as it changes.
+		let again = ("Check again".to_string(), Fix::Again);
+		let task = self.uplink.as_ref().map(|uplink| &uplink.task);
+		let connection = match (task, &self.encoder) {
+			(Some(Task::Done(Ok(carries))), Task::Done(Ok(encodings))) => {
+				let needs = setup::total(encodings);
+				let sending = match encodes {
+					1 => "the program",
+					_ => "the program in both formats",
+				};
+				match carries.scaled(setup::headroom()) >= needs {
+					true => Check {
+						mark: Outcome::Passed,
+						icon: Icon::Uplink,
+						name: "Connection",
+						said: format!(
+							"Carries {}, and {sending} needs {}",
+							health::rate(*carries),
+							health::rate(needs)
+						),
+						word: "",
+						fixes: Vec::new(),
+					},
+					false => Check {
+						mark: Outcome::Failed,
+						icon: Icon::Uplink,
+						name: "Connection",
+						said: format!(
+							"The connection carries {} and {sending} needs {}. Viewers would see it stall.",
+							health::rate(*carries),
+							health::rate(needs)
+						),
+						word: "Connection too slow",
+						fixes: send.into_iter().chain([again]).collect(),
+					},
+				}
+			}
+			(Some(Task::Done(Err(err))), _) => Check {
+				mark: Outcome::Failed,
+				icon: Icon::Uplink,
+				name: "Connection",
+				said: format!("The connection was not measured: {err}."),
+				word: "Relay not reached",
+				fixes: vec![again],
+			},
+			// Measuring, or about to once the encoder says what it sends.
+			_ => Check {
+				mark: Outcome::Waiting,
+				icon: Icon::Uplink,
+				name: "Connection",
+				said: "Measuring the connection to the relay".into(),
+				word: "",
+				fixes: Vec::new(),
+			},
+		};
+		[encoder, connection]
 	}
 }
 
 /// The connection being measured, which stops, withdrawing its probe, when
 /// this is dropped, and on its own once the stream starts going live, from
-/// the sheet or a hotkey, window shown or not, so it never competes with the
-/// stream for the uplink.
+/// the popover or a hotkey, window shown or not, so it never competes with
+/// the stream for the uplink.
 struct Measuring {
 	task: Task<Result<Rate, String>>,
 	/// Dropping it ends the measurement.
@@ -183,20 +331,156 @@ impl Panels {
 		}
 	}
 
-	/// The live control: GO LIVE off air, which opens the go-live sheet; the
-	/// clock on air, which reads END STREAM under the pointer and ends the
-	/// stream once held down.
+	/// What a check would be of now, or `None` while the show has no relay.
+	fn check_of(&self) -> Option<Checked> {
+		let (relays, broadcast) = {
+			let stream = self.controls.stream.lock().unwrap();
+			let relays = [stream.relay().cloned(), stream.failover().cloned()];
+			(relays, stream.broadcast().to_string())
+		};
+		if relays.iter().all(Option::is_none) {
+			return None;
+		}
+		let canvases = program_canvases(self.engine.state.lock().unwrap().collection());
+		Some(Checked {
+			canvases,
+			relays,
+			broadcast,
+			tokens: self.tokens,
+			reconnects: self.engine.reconnects(),
+		})
+	}
+
+	/// The check, unless it is stale.
+	fn fresh(&self) -> Option<&Ready> {
+		let of = self.check_of()?;
+		self.ready.as_ref().filter(|ready| ready.of == of)
+	}
+
+	/// Keep the check fresh off air, before every frame and while the window
+	/// is hidden, starting it over whenever what it is of changes; then go
+	/// live from the popover once it passes.
+	pub(super) fn follow_ready(&mut self) {
+		let Some(of) = self.check_of() else {
+			self.ready = None;
+			self.follow_going();
+			return;
+		};
+		let off = self.engine.on_air() == OnAir::Off && !self.controls.going();
+		if !off {
+			// One the stream cut short, as it would compete with it, starts
+			// over once the stream ends.
+			if self
+				.ready
+				.as_ref()
+				.is_some_and(|ready| ready.outcome() == Outcome::Waiting)
+			{
+				self.ready = None;
+			}
+			self.follow_going();
+			return;
+		}
+		if self.ready.as_ref().is_none_or(|ready| ready.of != of) {
+			// Not admitted while a go-live opens the program's encoders.
+			self.ready = self
+				.controls
+				.probing()
+				.map(|probing| Ready::new(self.engine.gpu().clone(), &self.runtime, of, probing));
+		}
+		if let Some(ready) = &mut self.ready {
+			ready.advance(&self.controls, &self.runtime);
+		}
+		self.follow_going();
+	}
+
+	/// GO LIVE pressed, from its button or the palette: on air at once when
+	/// the check passed, or else the popover, which waits on the check while
+	/// it runs, says why when it failed, and asks for a relay when the show
+	/// has none.
+	pub(super) fn press_go_live(&mut self) {
+		*self.controls.refused.lock().unwrap() = None;
+		let outcome = self.fresh().map(Ready::outcome);
+		if outcome == Some(Outcome::Passed) {
+			match self.controls.go_live() {
+				Ok(_) => {
+					self.going = None;
+					return;
+				}
+				Err(err) => *self.controls.refused.lock().unwrap() = Some(format!("{err:#}")),
+			}
+		}
+		let set = self.check_of().is_some();
+		let refused = self.controls.refused.lock().unwrap().is_some();
+		self.going = Some(Going {
+			armed: set && outcome != Some(Outcome::Failed) && !refused,
+			..Going::default()
+		});
+	}
+
+	/// Go live from the popover once its press is armed and the check passed,
+	/// or stop waiting once it failed, or once a relay typed into it could
+	/// not be saved; close it once the stream is on its way.
+	fn follow_going(&mut self) {
+		let Some(going) = &self.going else { return };
+		if self.engine.on_air() != OnAir::Off {
+			self.going = None;
+			return;
+		}
+		if !going.armed || self.saving.is_some() || self.controls.going() {
+			return;
+		}
+		let outcome = match self.check_of() {
+			// The relay typed into the popover was not saved.
+			None => Outcome::Failed,
+			Some(_) => match self.fresh() {
+				Some(ready) => ready.outcome(),
+				None => Outcome::Waiting,
+			},
+		};
+		match outcome {
+			Outcome::Waiting => {}
+			Outcome::Failed => {
+				if let Some(going) = &mut self.going {
+					going.armed = false;
+				}
+			}
+			Outcome::Passed => match self.controls.go_live() {
+				Ok(_) => self.going = None,
+				Err(err) => {
+					*self.controls.refused.lock().unwrap() = Some(format!("{err:#}"));
+					if let Some(going) = &mut self.going {
+						going.armed = false;
+					}
+				}
+			},
+		}
+	}
+
+	/// Apply a check's fix. One from the popover goes live once the check
+	/// passes again.
+	fn fix(&mut self, fix: Fix) {
+		match fix {
+			Fix::Send(canvas) => {
+				let label = format!("Send {} instead", named(canvas));
+				let mut state = self.engine.state.lock().unwrap();
+				let result = super::edit(&mut state, label, None, |draft| draft.set_canvas(canvas));
+				drop(state);
+				self.check(result);
+			}
+			Fix::Again => self.ready = None,
+		}
+		if let Some(going) = &mut self.going {
+			going.armed = true;
+		}
+	}
+
+	/// The live control: GO LIVE off air, with its popover under it; LIVE and
+	/// the clock on air, which asks before it ends the stream.
 	pub(super) fn live_control(&mut self, ui: &mut Ui) {
 		let on_air = self.engine.on_air();
 		let font = kit::display_bold(17.0);
 		let clock_font = kit::mono(14.0);
 		let painter = ui.painter().clone();
-		let end = kit::caps_galley(&painter, "End stream", font.clone(), Color32::WHITE, None);
-		let live_word = kit::caps_galley(&painter, "Live", font.clone(), Color32::WHITE, None);
-		let clock_width = painter
-			.layout_no_wrap("00:00:00".into(), clock_font.clone(), Color32::WHITE)
-			.size()
-			.x;
 		match on_air {
 			OnAir::Off => {
 				let key = self.key(&Action::GoLive, ui.ctx());
@@ -206,15 +490,28 @@ impl Panels {
 				let (rect, response) = ui.allocate_exact_size(size, Sense::click());
 				response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Go live"));
 				let response = kit::tip(response, "Go live", key.as_deref());
-				let fill = match response.hovered() {
+				let open = self.going.is_some();
+				let fill = match response.hovered() || open {
 					true => Color32::WHITE,
 					false => Color32::from_gray(0xe8),
 				};
 				painter.rect_filled(rect, 6, fill);
+				if open {
+					painter.rect_stroke(
+						rect.expand(2.0),
+						8,
+						Stroke::new(1.5, kit::ACCENT),
+						egui::StrokeKind::Outside,
+					);
+				}
 				painter.galley(rect.center() - word.size() / 2.0, word, kit::BG);
 				if response.clicked() {
-					self.open_going();
+					match open {
+						true => self.going = None,
+						false => self.press_go_live(),
+					}
 				}
+				self.going_popover(&response);
 			}
 			OnAir::Starting | OnAir::Ending => {
 				let text = match on_air {
@@ -240,28 +537,23 @@ impl Panels {
 			}
 			OnAir::Live(live) => {
 				let key = self.key(&Action::EndStream, ui.ctx());
-				let width = (12.0 + live_word.size().x + 10.0 + clock_width + 12.0).max(end.size().x + 24.0);
-				let (rect, response) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click_and_drag());
-				response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "End stream"));
+				let live_word = kit::caps_galley(&painter, "Live", font, Color32::WHITE, None);
+				let time = painter.layout_no_wrap(
+					super::shell::clock(live.since.elapsed()),
+					clock_font.clone(),
+					Color32::WHITE,
+				);
+				let clock_width = painter
+					.layout_no_wrap("00:00:00".into(), clock_font, Color32::WHITE)
+					.size()
+					.x;
+				let width = 12.0 + live_word.size().x + 10.0 + clock_width + 12.0;
+				let (rect, response) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
+				response
+					.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Live: end the stream"));
 				let relays = live.relays.join(" and ");
-				let note = format!("Live at {} on {relays}. Hold to end the stream.", live.path);
-				let held = response.is_pointer_button_down_on();
+				let note = format!("Live at {} on {relays}. Click to end the stream.", live.path);
 				let response = kit::tip(response, &note, key.as_deref());
-				let ending = match (held, self.ending) {
-					(true, Some(since)) => Some(since),
-					(true, None) => Some(kio::clock::now()),
-					(false, _) => None,
-				};
-				self.ending = ending;
-				let progress = ending.map_or(0.0, |since| since.elapsed().as_secs_f32() / HOLD.as_secs_f32());
-				if progress >= 1.0 {
-					self.ending = None;
-					if let Err(err) = self.controls.end_stream() {
-						self.report(Err(err));
-					}
-				} else if ending.is_some() {
-					ui.ctx().request_repaint();
-				}
 				let glow = egui::Shadow {
 					offset: [0, 0],
 					blur: 22,
@@ -269,525 +561,315 @@ impl Panels {
 					color: kit::ACCENT.gamma_multiply(0.4),
 				};
 				painter.add(glow.as_shape(rect, egui::CornerRadius::same(6)));
-				if response.hovered() || held {
-					painter.rect_filled(rect, 6, kit::ERR.gamma_multiply(0.35));
-					let filled = rect.with_max_x(rect.left() + rect.width() * progress.min(1.0));
-					painter.rect_filled(filled, 6, kit::ERR);
-					painter.rect_stroke(rect, 6, Stroke::new(1.0, kit::ERR), egui::StrokeKind::Inside);
-					painter.galley(rect.center() - end.size() / 2.0, end, Color32::WHITE);
-				} else {
-					painter.rect_filled(rect, 6, kit::ACCENT);
-					let elapsed = live.since.elapsed();
-					let time = painter.layout_no_wrap(super::shell::clock(elapsed), clock_font, Color32::WHITE);
-					let x = rect.left() + 12.0;
-					let after = x + live_word.size().x + 10.0;
-					painter.galley(
-						pos2(x, rect.center().y - live_word.size().y / 2.0),
-						live_word,
-						Color32::WHITE,
+				let fill = match response.hovered() {
+					true => kit::ACCENT.gamma_multiply(1.15),
+					false => kit::ACCENT,
+				};
+				painter.rect_filled(rect, 6, fill);
+				let x = rect.left() + 12.0;
+				let after = x + live_word.size().x + 10.0;
+				painter.galley(
+					pos2(x, rect.center().y - live_word.size().y / 2.0),
+					live_word,
+					Color32::WHITE,
+				);
+				painter.galley(pos2(after, rect.center().y - time.size().y / 2.0), time, Color32::WHITE);
+				let mut end = false;
+				kit::popover(&response).width(280.0).show(|ui| {
+					ui.label(
+						egui::RichText::new("End the stream?")
+							.font(kit::ui_strong(15.0))
+							.color(kit::TEXT),
 					);
-					let x = after;
-					painter.galley(pos2(x, rect.center().y - time.size().y / 2.0), time, Color32::WHITE);
-				}
-			}
-		}
-	}
-
-	/// Open the go-live sheet, starting its checks.
-	pub(super) fn open_going(&mut self) {
-		let canvases = program_canvases(self.engine.state.lock().unwrap().collection());
-		*self.controls.refused.lock().unwrap() = None;
-		let probing = self.controls.probing();
-		self.going = Some(Going::new(self.engine.gpu().clone(), &self.runtime, canvases, probing));
-	}
-
-	/// The go-live sheet, while open: where the stream goes, each with a
-	/// switch and its state, the checks as they come in, and one confirm.
-	pub(super) fn going_sheet(&mut self, ctx: &egui::Context) {
-		if self.going.is_none() {
-			return;
-		}
-		let on_air = self.engine.on_air();
-		// Live: the sheet has done its job.
-		if on_air.live().is_some() {
-			self.going = None;
-			return;
-		}
-		ctx.request_repaint_after(Duration::from_millis(100));
-		let broadcast = self.controls.stream.lock().unwrap().broadcast().to_string();
-		let (show, program, canvases, both) = {
-			let state = self.engine.state.lock().unwrap();
-			let path = self.engine.autosave.path();
-			let show = path
-				.file_stem()
-				.unwrap_or(path.as_os_str())
-				.to_string_lossy()
-				.into_owned();
-			let program = state.compositor.program_scene().map(str::to_string);
-			let collection = state.collection();
-			// Each relay carries both pictures, each its own broadcast.
-			let both = collection.portrait.then(|| {
-				format!(
-					"Both formats go to each relay: landscape at {broadcast}, portrait at {broadcast}/{}.",
-					moq_scene::PORTRAIT
-				)
-			});
-			(show, program, program_canvases(collection), both)
-		};
-		// Not while going live, which keeps the sheet waiting on it, and
-		// whose encoders a new check would compete with: once it ends.
-		if self.going.as_ref().is_some_and(|going| going.canvases != canvases) && !self.controls.going() {
-			self.open_going();
-		}
-		self.advance_going();
-		let checks = self.checks();
-		let mut close = false;
-		let mut fixes = Vec::new();
-		let mut confirm = false;
-		let mut settings = false;
-		let refused = self.controls.refused.lock().unwrap().clone();
-		let confirmed = self.going.as_ref().is_some_and(|going| going.confirmed);
-		// The encoder check holds a hardware encode session until it finishes,
-		// which would count against the program's.
-		let probing = self
-			.going
-			.as_ref()
-			.is_some_and(|going| matches!(going.encoder, Task::Running(_)));
-		let id = egui::Id::new("go live");
-		let asked = kit::Sheet::new(id, "Go live").show(ctx, |ui| {
-			let opens = match &program {
-				Some(scene) => format!("{show} opens on {scene}"),
-				None => format!("{show} opens on an empty picture"),
-			};
-			ui.label(egui::RichText::new(opens).color(kit::DIM));
-			ui.add_space(10.0);
-			heading(ui, "Where it goes");
-			let count = self.destinations(ui, &mut settings);
-			if let Some(both) = &both {
-				ui.add_space(4.0);
-				ui.label(egui::RichText::new(both).font(kit::ui(12.0)).color(kit::DIM));
-			}
-			ui.add_space(10.0);
-			heading(ui, "Checks");
-			for (index, check) in checks.iter().enumerate() {
-				kit::popover_row(ui, index + 1 == checks.len(), |ui| {
-					if let Some(fix) = check_row(ui, check) {
-						fixes.push(fix);
-					}
+					ui.add(
+						egui::Label::new(
+							egui::RichText::new("Viewers see it end. The relays get its last seconds first.")
+								.font(kit::ui(12.5))
+								.color(kit::DIM),
+						)
+						.wrap(),
+					);
+					ui.add_space(8.0);
+					ui.horizontal(|ui| {
+						let stop = egui::Button::new(
+							egui::RichText::new("End stream")
+								.font(kit::ui_strong(13.0))
+								.color(Color32::WHITE),
+						)
+						.fill(kit::ERR);
+						if ui.add(stop).clicked() {
+							end = true;
+							ui.close();
+						}
+						if ui.button("Keep live").clicked() {
+							ui.close();
+						}
+					});
 				});
-			}
-			ui.add_space(12.0);
-			if let Some(refused) = &refused {
-				ui.horizontal(|ui| {
-					ui.add(Icon::Warning.image(16.0, kit::ERR));
-					ui.add(egui::Label::new(egui::RichText::new(refused).color(kit::TEXT)).wrap());
-				});
-				ui.add_space(8.0);
-			}
-			let going = self.controls.going();
-			let waiting = confirmed && (going || matches!(on_air, OnAir::Starting));
-			let text = match (waiting, count) {
-				(true, _) => "Going live".to_string(),
-				(false, 0) => "Switch a destination on".to_string(),
-				(false, _) if probing => "Checking the encoder".to_string(),
-				(false, count) => format!("Go live to {count}"),
-			};
-			let enabled = count > 0 && on_air == OnAir::Off && !going && !probing;
-			confirm = confirm_button(ui, &text, enabled, waiting).clicked();
-		});
-		close |= asked;
-		if settings {
-			self.setting = Some(Setting::Stream);
-			close = true;
-		}
-		for fix in fixes {
-			match fix {
-				Fix::Send(canvas) => {
-					let label = format!("Send {} instead", named(canvas));
-					let mut state = self.engine.state.lock().unwrap();
-					let result = super::edit(&mut state, label, None, |draft| draft.set_canvas(canvas));
-					drop(state);
-					self.check(result);
-				}
-				Fix::Again => {
-					if let Some(going) = &mut self.going {
-						going.uplink = None;
-					}
-				}
-				Fix::Build => {
-					self.page = Page::Build;
-					close = true;
+				if end && let Err(err) = self.controls.end_stream() {
+					self.report(Err(err));
 				}
 			}
-		}
-		if confirm {
-			match self.controls.go_live() {
-				Ok(_) => {
-					if let Some(going) = &mut self.going {
-						going.confirmed = true;
-					}
-				}
-				Err(err) => *self.controls.refused.lock().unwrap() = Some(format!("{err:#}")),
-			}
-		}
-		if close {
-			self.going = None;
 		}
 	}
 
-	/// Collect the checks that finished, and start measuring the connection
-	/// once the encoder says what it sends.
-	fn advance_going(&mut self) {
-		let Some(going) = &mut self.going else { return };
-		going.encoder.poll();
-		if going.uplink.is_none()
-			&& let Task::Done(encoder) = &going.encoder
-		{
-			going.uplink = Some(match encoder {
-				Ok(encodings) => {
-					// Up to past what they send, so a connection that carries
-					// it says so rather than stopping at its rate.
-					let ceiling = setup::total(encodings).scaled(1.0 / setup::headroom());
-					measure(&self.controls, &self.runtime, ceiling)
-				}
-				Err(_) => Measuring {
-					task: Task::Done(Err("the encoder failed, so what it would send is not known".into())),
-					_stop: None,
-				},
-			});
-		}
-		if let Some(uplink) = &mut going.uplink {
-			uplink.task.poll();
-		}
-	}
-
-	/// Each destination, with its switch and its state; how many are on.
-	fn destinations(&mut self, ui: &mut Ui, settings: &mut bool) -> usize {
-		let (relay, failover) = {
+	/// The Go live popover under `anchor`, while open: a relay to type in
+	/// while the show has none; otherwise where the stream goes, the check as
+	/// it comes in with a fix for what failed, and one button.
+	fn going_popover(&mut self, anchor: &egui::Response) {
+		let Some(mut going) = self.going.take() else { return };
+		let (relays, broadcast) = {
 			let stream = self.controls.stream.lock().unwrap();
-			(stream.relay().cloned(), stream.failover().cloned())
+			let relays = [
+				("Relay", stream.relay().cloned()),
+				("Failover relay", stream.failover().cloned()),
+			];
+			(relays, stream.broadcast().to_string())
 		};
-		if relay.is_none() && failover.is_none() {
-			kit::popover_row(ui, true, |ui| {
-				ui.label("No relay yet. Add the one the stream goes to.");
-				ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-					*settings = ui.button("Set one up").clicked();
-				});
-			});
-			return 0;
-		}
-		let watched = self.engine.watched();
-		let mut switched = *self.controls.switched.lock().unwrap();
-		let rows = [
-			("Relay", relay, &mut switched.relay),
-			("Failover relay", failover, &mut switched.failover),
-		];
-		let rows: Vec<_> = rows
-			.into_iter()
-			.filter_map(|(name, url, on)| Some((name, url?, on)))
-			.collect();
-		let count = rows.len();
-		let mut on_count = 0;
-		for (index, (name, url, on)) in rows.into_iter().enumerate() {
-			let endpoint = crate::engine::air::endpoint(&url);
-			let state = watched.iter().find(|(relay, _)| relay.endpoint == endpoint);
-			let (dot, said) = match (*on, state) {
-				(false, _) => (None, "Off".to_string()),
-				(true, None) => (Some(kit::DIM), "Not dialed yet".to_string()),
-				(true, Some((relay, rtt))) => match &relay.state {
-					health::State::Connected => (
-						Some(kit::OK),
-						match rtt {
-							Some(rtt) => format!("Connected, {} ms away", rtt.as_millis()),
-							None => "Connected".into(),
-						},
-					),
-					health::State::Connecting => (Some(kit::DIM), "Connecting".into()),
-					health::State::Disconnected(why) => (Some(kit::ERR), format!("Cannot reach it: {why}")),
-				},
-			};
-			if *on {
-				on_count += 1;
-			}
-			kit::popover_row(ui, index + 1 == count, |ui| {
-				ui.add(kit::Toggle::new(on));
-				let (at, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
-				match dot {
-					Some(dot) => ui.painter().circle_filled(at.center(), 4.0, dot),
-					None => ui
-						.painter()
-						.circle_stroke(at.center(), 3.5, Stroke::new(1.0, kit::FAINT)),
-				};
-				ui.label(egui::RichText::new(name).font(kit::ui_strong(13.0)).color(kit::TEXT))
-					// The endpoint, never the address, whose query can carry a token
-					// on a shared screen.
-					.on_hover_text(endpoint.as_str());
-				ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-					ui.add(egui::Label::new(egui::RichText::new(said).color(kit::DIM)).truncate());
-				});
-			});
-		}
-		let changed = switched != *self.controls.switched.lock().unwrap();
-		*self.controls.switched.lock().unwrap() = switched;
-		// The connection is measured to the first relay switched on.
-		if changed && let Some(going) = &mut self.going {
-			going.uplink = None;
-		}
-		on_count
-	}
-
-	/// The checks, as they stand.
-	fn checks(&mut self) -> Vec<Check> {
-		let engine = self.engine.clone();
-		let state = engine.state.lock().unwrap();
-		let collection = state.collection();
-		let now = kio::clock::now();
-		let Some(going) = &mut self.going else {
-			return Vec::new();
-		};
-		let mut checks = Vec::new();
-
-		// Each camera in the show has a picture.
-		let cameras: Vec<_> = collection
-			.sources
-			.iter()
-			.filter(|(_, source)| matches!(source, Source::Camera { .. }))
-			.map(|(name, _)| {
-				let failed = state.compositor.error(name).map(|err| err.to_string());
-				let status = state.sources.get(name).map(|feed| feed.status());
-				(name.clone(), failed, status)
-			})
-			.collect();
-		let blank = cameras
-			.iter()
-			.find(|(_, failed, status)| failed.is_some() || !matches!(status, Some(Status::Live)));
-		checks.push(match (cameras.first(), blank) {
-			(None, _) => Check {
-				mark: Outcome::Skipped,
-				icon: Icon::Camera,
-				name: "Camera",
-				said: "This show has no camera".into(),
-				level: None,
-				fixes: Vec::new(),
-			},
-			(Some((name, ..)), None) => Check {
-				mark: Outcome::Passed,
-				icon: Icon::Camera,
-				name: "Camera",
-				said: format!("{name} has a picture"),
-				level: None,
-				fixes: Vec::new(),
-			},
-			(Some(_), Some((name, failed, status))) => {
-				let why = match (failed, status) {
-					(Some(failed), _) => format!("{name} has no picture: {failed}."),
-					(None, Some(Status::Failed(why))) => format!("{name} has no picture: {why}."),
-					(None, Some(Status::Starting)) | (None, None) => format!("{name} is still starting."),
-					(None, _) => format!("{name} has no picture. Check it is plugged in and not in use."),
-				};
-				Check {
-					mark: Outcome::Failed,
-					icon: Icon::Camera,
-					name: "Camera",
-					said: why,
-					level: None,
-					fixes: vec![("Open BUILD".into(), Fix::Build)],
-				}
-			}
-		});
-
-		// Each microphone's level moves.
-		let microphones: Vec<String> = collection
-			.sources
-			.iter()
-			.filter(|(_, source)| matches!(source, Source::Microphone { .. }))
-			.map(|(name, _)| name.clone())
-			.collect();
-		for name in &microphones {
-			let (level, _) = reading(self.levels.sound(name));
-			let heard = going.heard.entry(name.clone()).or_default();
-			*heard = heard.max(level);
-		}
-		// The first that has not moved yet, so one silent beside another that
-		// moves is still named.
-		let silent = microphones
-			.iter()
-			.find(|name| going.heard.get(*name).is_none_or(|heard| *heard < MOVING));
-		let listened = now.saturating_duration_since(going.opened) >= LISTEN;
-		let shown = silent.or(microphones.first());
-		let level = shown.map(|name| reading(self.levels.sound(name)));
-		checks.push(match (shown, silent, listened) {
-			(None, ..) => Check {
-				mark: Outcome::Skipped,
-				icon: Icon::Mic,
-				name: "Microphone",
-				said: "This show has no microphone".into(),
-				level: None,
-				fixes: Vec::new(),
-			},
-			(Some(name), None, _) => Check {
-				mark: Outcome::Passed,
-				icon: Icon::Mic,
-				name: "Microphone",
-				said: match microphones.len() {
-					1 => format!("{name} is moving"),
-					count => format!("All {count} microphones are moving"),
-				},
-				level,
-				fixes: Vec::new(),
-			},
-			(Some(_), Some(name), false) => Check {
-				mark: Outcome::Waiting,
-				icon: Icon::Mic,
-				name: "Microphone",
-				said: format!("Listening to {name}; say something"),
-				level,
-				fixes: Vec::new(),
-			},
-			(Some(_), Some(name), true) => Check {
-				mark: Outcome::Failed,
-				icon: Icon::Mic,
-				name: "Microphone",
-				said: format!("{name} has been silent. Speak, or check it is not muted in the sound panel."),
-				level,
-				fixes: Vec::new(),
-			},
-		});
-
-		// The encoders keep up with their canvases together: a picture in each
-		// format, timed at once, while the show goes out in both.
-		let encodes = going.canvases.len();
-		let formats = match encodes {
-			1 => String::new(),
-			_ => " in both formats".to_string(),
-		};
-		let canvas = going.canvases[0];
-		let send = smaller(canvas).map(|smaller| (format!("Send {} instead", named(smaller)), Fix::Send(smaller)));
-		let encoding = match &going.encoder {
-			Task::Done(Ok(encodings)) => Some(encodings.clone()),
+		let set = relays.iter().any(|(_, url)| url.is_some());
+		let fresh = self.fresh();
+		let checks = fresh.map(Ready::checks);
+		let outcome = fresh.map(Ready::outcome);
+		let encoded = fresh.and_then(Ready::encoded);
+		let refused = self.controls.refused.lock().unwrap().clone();
+		let saving = self.saving.is_some();
+		// Why the relay typed in here could not be saved.
+		let unsaved = match &self.saved {
+			Some((Setting::Destinations, note)) if !set => Some(note.clone()),
 			_ => None,
 		};
-		checks.push(match &going.encoder {
-			Task::Running(_) => Check {
-				mark: Outcome::Waiting,
-				icon: Icon::Encoder,
-				name: "Encoder",
-				said: format!("Timing {}", named(canvas)),
-				level: None,
-				fixes: Vec::new(),
-			},
-			Task::Done(Ok(encodings)) if setup::keeps_up(&going.canvases, encodings) => Check {
-				mark: Outcome::Passed,
-				icon: Icon::Encoder,
-				name: "Encoder",
-				said: format!("Keeps up with {}{formats}", named(canvas)),
-				level: None,
-				fixes: Vec::new(),
-			},
-			Task::Done(Ok(encodings)) => Check {
-				mark: Outcome::Failed,
-				icon: Icon::Encoder,
-				name: "Encoder",
-				said: format!(
-					"The encoder takes {} ms a frame, too slow for {}{formats}. Viewers would see it stutter.",
-					encodings
-						.iter()
-						.map(|encoding| encoding.frame)
-						.max()
-						.unwrap_or_default()
-						.as_millis(),
-					named(canvas)
-				),
-				level: None,
-				fixes: send.clone().into_iter().collect(),
-			},
-			Task::Done(Err(err)) => Check {
-				mark: Outcome::Failed,
-				icon: Icon::Encoder,
-				name: "Encoder",
-				said: format!("The encoder failed: {err}."),
-				level: None,
-				// A smaller picture frees no encode session, which a second
-				// picture is likelier to be refused for.
-				fixes: match encodes {
-					1 => send.clone().into_iter().collect(),
-					_ => Vec::new(),
-				},
-			},
+		let both = self.engine.state.lock().unwrap().collection().portrait.then(|| {
+			format!(
+				"Both formats go to each relay: landscape at {broadcast}, portrait at {broadcast}/{}.",
+				moq_scene::PORTRAIT
+			)
 		});
-
-		// The connection carries the program. Published scenes and sources
-		// share what is left, following the connection as it changes.
-		let again = ("Check again".to_string(), Fix::Again);
-		checks.push(match (going.uplink.as_ref().map(|uplink| &uplink.task), &encoding) {
-			(None, _) | (Some(Task::Running(_)), _) => Check {
-				mark: Outcome::Waiting,
-				icon: Icon::Uplink,
-				name: "Connection",
-				said: "Measuring the connection to the relay".into(),
-				level: None,
-				fixes: Vec::new(),
-			},
-			(Some(Task::Done(Err(err))), _) => Check {
-				mark: Outcome::Failed,
-				icon: Icon::Uplink,
-				name: "Connection",
-				said: format!("The connection was not measured: {err}."),
-				level: None,
-				fixes: vec![again],
-			},
-			(Some(Task::Done(Ok(_))), None) => Check {
-				mark: Outcome::Skipped,
-				icon: Icon::Uplink,
-				name: "Connection",
-				said: "Measured, but nothing encodes to compare it with".into(),
-				level: None,
-				fixes: Vec::new(),
-			},
-			(Some(Task::Done(Ok(carries))), Some(encodings)) => {
-				let needs = setup::total(encodings);
-				let sending = match encodes {
-					1 => "the program",
-					_ => "the program in both formats",
+		let watched = self.engine.watched();
+		let mut open = !anchor.ctx.input(|input| input.key_pressed(egui::Key::Escape));
+		let mut fixes = Vec::new();
+		let mut now = false;
+		let mut press = false;
+		let mut settings = false;
+		egui::Popup::from_response(anchor)
+			.id(egui::Id::new("go live"))
+			.open_bool(&mut open)
+			.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+			.frame(kit::popover_frame())
+			.align(egui::RectAlign::BOTTOM_END)
+			.gap(10.0)
+			.width(392.0)
+			.show(|ui| {
+				ui.set_width(392.0);
+				ui.horizontal(|ui| {
+					ui.label(
+						egui::RichText::new("Go live")
+							.font(kit::ui_strong(16.0))
+							.color(kit::TEXT),
+					);
+					if let Some(encoded) = &encoded {
+						ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+							ui.label(
+								egui::RichText::new(format!("● {encoded} ready"))
+									.font(kit::ui(12.0))
+									.color(kit::OK),
+							);
+						});
+					}
+				});
+				ui.add_space(6.0);
+				if !set {
+					ui.label(egui::RichText::new("Relay address").font(kit::ui(12.5)).color(kit::DIM));
+					ui.add(
+						egui::TextEdit::singleline(&mut going.address)
+							.id_salt("go live address")
+							.hint_text("https://relay.example/anon")
+							.desired_width(f32::INFINITY),
+					);
+					ui.add(
+						egui::TextEdit::singleline(&mut going.token)
+							.id_salt("go live token")
+							.password(true)
+							.hint_text("Token (optional)")
+							.desired_width(f32::INFINITY),
+					);
+					if let Some(why) = going.invalid.as_ref().or(unsaved.as_ref()) {
+						ui.add(egui::Label::new(egui::RichText::new(why).font(kit::ui(12.0)).color(kit::ERR)).wrap());
+					}
+					ui.add_space(4.0);
+					let waiting = saving || going.armed;
+					let enabled = !waiting && !going.address.trim().is_empty();
+					now = wide_button(ui, "Go live now", enabled, waiting).clicked();
+					ui.add_space(2.0);
+					ui.vertical_centered(|ui| {
+						ui.label(
+							egui::RichText::new("Saved in Settings, Destinations. Next time GO LIVE starts at once.")
+								.font(kit::ui(11.5))
+								.color(kit::DIM),
+						);
+					});
+					return;
+				}
+				let shown: Vec<_> = relays
+					.iter()
+					.filter_map(|(name, url)| Some((*name, url.as_ref()?)))
+					.collect();
+				for (name, url) in &shown {
+					let endpoint = crate::engine::air::endpoint(url);
+					let state = watched.iter().find(|(relay, _)| relay.endpoint == endpoint);
+					let (dot, said) = match state {
+						None => (kit::DIM, "Not dialed yet".to_string()),
+						Some((relay, rtt)) => match &relay.state {
+							health::State::Connected => (
+								kit::OK,
+								match rtt {
+									Some(rtt) => format!("Connected, {} ms away", rtt.as_millis()),
+									None => "Connected".into(),
+								},
+							),
+							health::State::Connecting => (kit::DIM, "Connecting".into()),
+							health::State::Disconnected(why) => (kit::ERR, format!("Cannot reach it: {why}")),
+						},
+					};
+					kit::popover_row(ui, false, |ui| {
+						let (at, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
+						ui.painter().circle_filled(at.center(), 4.0, dot);
+						ui.label(egui::RichText::new(*name).font(kit::ui_strong(13.0)).color(kit::TEXT))
+							// The endpoint, never the address, whose query can
+							// carry a token on a shared screen.
+							.on_hover_text(endpoint.as_str());
+						ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+							ui.add(egui::Label::new(egui::RichText::new(said).color(kit::DIM)).truncate());
+						});
+					});
+				}
+				if let Some(both) = &both {
+					ui.add_space(2.0);
+					ui.label(egui::RichText::new(both).font(kit::ui(12.0)).color(kit::DIM));
+				}
+				match &checks {
+					Some(checks) => {
+						for (index, check) in checks.iter().enumerate() {
+							kit::popover_row(ui, index + 1 == checks.len(), |ui| {
+								if let Some(fix) = check_row(ui, check) {
+									fixes.push(fix);
+								}
+							});
+						}
+					}
+					None => {
+						kit::popover_row(ui, true, |ui| {
+							ui.spinner();
+							ui.label(egui::RichText::new("Starting the check").color(kit::DIM));
+						});
+					}
+				}
+				ui.add_space(8.0);
+				if let Some(refused) = &refused {
+					ui.horizontal(|ui| {
+						ui.add(Icon::Warning.image(16.0, kit::ERR));
+						ui.add(egui::Label::new(egui::RichText::new(refused).color(kit::TEXT)).wrap());
+					});
+					ui.add_space(6.0);
+				}
+				let failed = outcome == Some(Outcome::Failed);
+				let (text, enabled, waiting) = match (going.armed, failed) {
+					(true, _) => ("Going live once checked", false, true),
+					(false, true) => ("Go live anyway", true, false),
+					(false, false) => ("Go live", true, false),
 				};
-				match carries.scaled(setup::headroom()) >= needs {
-					true => Check {
-						mark: Outcome::Passed,
-						icon: Icon::Uplink,
-						name: "Connection",
-						said: format!(
-							"Carries {}, and {sending} needs {}",
-							health::rate(*carries),
-							health::rate(needs)
-						),
-						level: None,
-						fixes: Vec::new(),
-					},
-					false => Check {
-						mark: Outcome::Failed,
-						icon: Icon::Uplink,
-						name: "Connection",
-						said: format!(
-							"The connection carries {} and {sending} needs {}. Viewers would see it stall.",
-							health::rate(*carries),
-							health::rate(needs)
-						),
-						level: None,
-						fixes: send.into_iter().chain([again]).collect(),
-					},
+				press = wide_button(ui, text, enabled, waiting).clicked();
+				ui.add_space(2.0);
+				ui.vertical_centered(|ui| {
+					settings = ui
+						.add(
+							egui::Button::new(
+								egui::RichText::new("Change in Settings, Destinations")
+									.font(kit::ui(11.5))
+									.color(kit::DIM),
+							)
+							.frame(false),
+						)
+						.clicked();
+				});
+			});
+		if now {
+			going.invalid = None;
+			match going.address.trim().parse::<url::Url>() {
+				Err(err) => going.invalid = Some(format!("This is not an address: {err}.")),
+				Ok(url) => {
+					let stream = self.controls.stream.lock().unwrap().clone();
+					let saved = Saved {
+						relay: Some(url.clone()),
+						..stream.saved().clone()
+					};
+					let token = going.token.trim();
+					let tokens: Vec<Token> = match token.is_empty() {
+						true => Vec::new(),
+						false => vec![(url.clone(), Some(token.to_string()))],
+					};
+					let retokened = !tokens.is_empty() || crate::stream::carries_token(url.as_str());
+					if self.refuse_overlap(Setting::Destinations) {
+						going.invalid = Some("Another save is still running; try again once it finishes.".into());
+					} else {
+						self.saved = None;
+						let mut saving = Saving::start(Setting::Destinations, stream, saved, tokens, &anchor.ctx);
+						saving.retokened = retokened;
+						self.saving = Some(saving);
+						going.armed = true;
+					}
 				}
 			}
-		});
-		checks
+		}
+		if press {
+			match outcome {
+				// Going live anyway, past a failed check, as a hotkey would.
+				Some(Outcome::Failed) => {
+					*self.controls.refused.lock().unwrap() = None;
+					match self.controls.go_live() {
+						Ok(_) => open = false,
+						Err(err) => *self.controls.refused.lock().unwrap() = Some(format!("{err:#}")),
+					}
+				}
+				_ => {
+					*self.controls.refused.lock().unwrap() = None;
+					going.armed = true;
+				}
+			}
+		}
+		if settings {
+			self.setting = Some(Setting::Destinations);
+			open = false;
+		}
+		self.going = open.then_some(going);
+		for fix in fixes {
+			self.fix(fix);
+		}
 	}
 
 	/// The stream's health as one dot, its name beside it unless `compact`,
 	/// opening the worst problem, every destination, the viewers, and the
-	/// encoder, and the details from there.
+	/// encoder, and the details from there. Off air, a failed check going
+	/// live waits on is the worst problem, with its fix.
 	pub(super) fn health_dot(&mut self, ui: &mut Ui, fx: &mut Fx, compact: bool) {
 		let on_air = self.engine.on_air();
 		let watched = self.engine.watched();
-		let (name, dot) = health_word(&self.engine);
+		let failed: Vec<Check> = match on_air {
+			OnAir::Off => self
+				.fresh()
+				.map(|ready| {
+					ready
+						.checks()
+						.into_iter()
+						.filter(|check| check.mark == Outcome::Failed)
+						.collect()
+				})
+				.unwrap_or_default(),
+			_ => Vec::new(),
+		};
+		let (name, dot) = match failed.first() {
+			Some(check) => (check.word.to_string(), kit::CUE),
+			None => health_word(&self.engine),
+		};
 		let name = name.as_str();
 		let report = self.engine.health.lock().unwrap();
 		let mark = crate::fx::Mark::new(ui.painter());
@@ -798,6 +880,7 @@ impl Panels {
 		fx.health(&mark.around(pill.rect).inset(2.0));
 		let mut details = false;
 		let mut settings = false;
+		let mut fixes = Vec::new();
 		kit::popover(&pill).show(|ui| {
 			ui.set_width(400.0);
 			let row = |ui: &mut Ui, dot: Option<Color32>, name: &str, note: &str, value: &str| {
@@ -816,6 +899,14 @@ impl Panels {
 					});
 				});
 			};
+			// What going live would run into, with its fix.
+			for check in &failed {
+				kit::popover_row(ui, false, |ui| {
+					if let Some(fix) = check_row(ui, check) {
+						fixes.push(fix);
+					}
+				});
+			}
 			// The worst problem first, on a card of its own.
 			if let Some(problem) = report.problems.first() {
 				let color = super::color(problem.verdict);
@@ -907,7 +998,10 @@ impl Panels {
 			self.details = true;
 		}
 		if settings {
-			self.setting = Some(Setting::Stream);
+			self.setting = Some(Setting::Destinations);
+		}
+		for fix in fixes {
+			self.fix(fix);
 		}
 	}
 
@@ -936,18 +1030,14 @@ impl Panels {
 		let moved = before.relay() != saved.relay() || before.failover() != saved.failover();
 		let rejoined = before.guests() != saved.guests();
 		let deferred = self.controls.set_stream(saved.clone(), moved || retokened || rejoined);
-		// A measurement under way is of the relay as it was.
-		if (moved || retokened)
-			&& let Some(going) = &mut self.going
-		{
-			going.uplink = None;
-		}
+		// A check made with the token before is stale.
+		self.tokens += u64::from(retokened);
 		let note = match (from, deferred) {
-			(Setting::Stream, true) => {
+			(Setting::Destinations, true) => {
 				"Saved. It applies the next time you go live; broadcast sources and guests follow the new relays \
 				 once this stream ends."
 			}
-			(Setting::Stream, false) => "Saved. It applies the next time you go live.",
+			(Setting::Destinations, false) => "Saved. It applies the next time you go live.",
 			(Setting::Guests, true) => "Saved. Guests move to the new room once this stream ends.",
 			(Setting::Guests, false) => "Saved. Guests join the new room now; links made before stop renewing.",
 			(_, _) => "Saved. The next recording goes there.",
@@ -958,30 +1048,73 @@ impl Panels {
 		if before.recordings(scene) != saved.recordings(scene) {
 			self.review.shelve(&self.engine, &self.runtime);
 		}
-		match from {
-			Setting::Stream => self.stream_form = Some(Form::new(&saved)),
-			Setting::Guests => self.guests_form = Some(super::settings::GuestForm::new(saved.saved())),
-			_ => {}
+		// A form holding nothing but what was just saved, or nothing new over
+		// the file before it, takes the file as saved now; one edited since
+		// keeps its edits, which save next.
+		if let Some(form) = &mut self.stream_form {
+			match form.settled(&before) {
+				true => self.stream_form = Some(Form::new(&saved)),
+				false => form.tried = None,
+			}
+		}
+		if let Some(form) = &mut self.guests_form {
+			match form.settled(before.saved()) {
+				true => self.guests_form = Some(super::settings::GuestForm::new(saved.saved())),
+				false => form.retry(),
+			}
 		}
 		self.saved = Some((from, note));
 	}
 
-	/// Settings, Stream: the relay and its token, a failover relay, the
-	/// broadcast's name, and on-demand encoding, kept beside the show. A
-	/// setting a flag overrides for this run says so, and is not editable.
-	pub(super) fn stream_settings(&mut self, ui: &mut Ui) {
+	/// Save the Destinations and Guests panes' edits, before every frame, once
+	/// none of their fields has the keyboard, so a relay is never dialed at a
+	/// half-typed address, and once Settings closes. An edit that cannot be
+	/// saved says why in its pane, and is not tried again until it changes.
+	pub(super) fn autosave_settings(&mut self, ctx: &egui::Context) {
+		if self.typing || self.saving.is_some() || self.picker.is_some() {
+			return;
+		}
+		let stream = self.controls.stream.lock().unwrap().clone();
+		if let Some(form) = &mut self.stream_form
+			&& let Some((saved, tokens)) = form.next(&stream)
+		{
+			let retokened = !tokens.is_empty()
+				|| [saved.relay.as_ref(), saved.failover.as_ref()]
+					.into_iter()
+					.flatten()
+					.any(|url| crate::stream::carries_token(url.as_str()));
+			self.saved = None;
+			let mut saving = Saving::start(Setting::Destinations, stream, saved, tokens, ctx);
+			saving.retokened = retokened;
+			self.saving = Some(saving);
+			return;
+		}
+		if let Some(form) = &mut self.guests_form
+			&& let Some(saved) = form.next(stream.saved())
+		{
+			self.saved = None;
+			self.saving = Some(Saving::start(Setting::Guests, stream, saved, Vec::new(), ctx));
+		}
+	}
+
+	/// Settings, Destinations: the relay and its token and the broadcast's
+	/// name, with a failover relay and on-demand encoding under Advanced,
+	/// kept beside the show and saved as they change. A setting a flag
+	/// overrides for this run says so, and is not editable.
+	pub(super) fn destinations_pane(&mut self, ui: &mut Ui) {
 		use super::settings::{field_row, row};
 		let stream = self.controls.stream.lock().unwrap().clone();
 		let overridden = stream.overridden();
-		let busy = self.saving.is_some() || self.picker.is_some();
 		let form = self.stream_form.get_or_insert_with(|| Form::new(&stream));
-		let token = |ui: &mut Ui, token: &mut String, forget: &mut bool| {
-			ui.add(
+		let mut typing = false;
+		let token = |ui: &mut Ui, token: &mut String, forget: &mut bool, typing: &mut bool| {
+			let field = ui.add(
 				egui::TextEdit::singleline(token)
 					.password(true)
 					.hint_text("Token: leave empty to keep the saved one")
 					.desired_width(f32::INFINITY),
 			);
+			*typing |= field.has_focus();
 			ui.checkbox(forget, "Forget the saved token");
 		};
 		// The relays flags set over the saved ones this run, which the token
@@ -992,132 +1125,150 @@ impl Panels {
 		let carries = |flag: Option<&url::Url>| flag.is_some_and(|url| crate::stream::carries_token(url.as_str()));
 		let relay_carries = !overridden.token && carries(relay_flag);
 		let failover_carries = carries(failover_flag);
-		ui.add_enabled_ui(!busy, |ui| {
-			// A flag locks only the address: the token stays the one kept for
-			// the relay in effect, which the flag may name, unless the flag's
-			// address carries its own.
-			field_row(ui, "Relay", "Where the program goes live, and its token.", None, |ui| {
-				address(
-					ui,
-					&mut form.relay,
-					"https://relay.example/anon",
-					relay_flag.map(|url| ("--connect", url)),
+		// A flag locks only the address: the token stays the one kept for the
+		// relay in effect, which the flag may name, unless the flag's address
+		// carries its own.
+		field_row(ui, "Relay", "Where the program goes live, and its token.", None, |ui| {
+			typing |= address(
+				ui,
+				&mut form.relay,
+				"https://relay.example/anon",
+				relay_flag.map(|url| ("--connect", url)),
+			);
+			ui.add_enabled_ui(!overridden.token && !relay_carries, |ui| {
+				token(ui, &mut form.relay_token, &mut form.forget_relay_token, &mut typing);
+			});
+			if overridden.token {
+				super::settings::flag_note(ui, "--connect-token");
+			} else if relay_carries {
+				super::settings::cue_note(ui, "The --connect address carries its own token, used over any kept");
+			}
+		});
+		field_row(
+			ui,
+			"Broadcast name",
+			"Where viewers find it on the relays.",
+			overridden.broadcast.then_some("--broadcast"),
+			|ui| {
+				let field = ui.add(
+					egui::TextEdit::singleline(&mut form.broadcast)
+						.hint_text(crate::stream::BROADCAST)
+						.desired_width(f32::INFINITY),
 				);
-				ui.add_enabled_ui(!overridden.token && !relay_carries, |ui| {
-					token(ui, &mut form.relay_token, &mut form.forget_relay_token);
-				});
-				if overridden.token {
-					super::settings::flag_note(ui, "--connect-token");
-				} else if relay_carries {
-					super::settings::cue_note(ui, "The --connect address carries its own token, used over any kept");
+				typing |= field.has_focus();
+			},
+		);
+		// Rarely wanted: a second relay, and encoding only while watched.
+		let id = ui.make_persistent_id("destinations advanced");
+		let mut advanced = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+		// Found by the palette, it opens to show what it holds.
+		if ADVANCED.iter().any(|name| super::settings::seeking(ui.ctx(), name)) {
+			advanced.set_open(true);
+		}
+		let mut set = Vec::new();
+		if stream.failover().is_some() {
+			set.push("a failover relay");
+		}
+		if stream.on_demand() {
+			set.push("on demand");
+		}
+		ui.add_space(8.0);
+		advanced
+			.show_header(ui, |ui| {
+				ui.label(
+					egui::RichText::new("Advanced")
+						.font(kit::ui_strong(13.5))
+						.color(kit::TEXT),
+				);
+				if !set.is_empty() {
+					ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+						ui.label(
+							egui::RichText::new(format!("With {}", set.join(" and ")))
+								.font(kit::ui(12.0))
+								.color(kit::DIM),
+						);
+					});
+				}
+			})
+			.body(|ui| {
+				field_row(
+					ui,
+					ADVANCED[0],
+					"A second relay the same broadcast goes to, which viewers resume from if the first fails. Each is \
+					 another upload of the whole stream.",
+					None,
+					|ui| {
+						typing |= address(
+							ui,
+							&mut form.failover,
+							"https://backup.example/anon",
+							failover_flag.map(|url| ("--failover", url)),
+						);
+						ui.add_enabled_ui(!failover_carries, |ui| {
+							token(
+								ui,
+								&mut form.failover_token,
+								&mut form.forget_failover_token,
+								&mut typing,
+							);
+						});
+						if failover_carries {
+							super::settings::cue_note(
+								ui,
+								"The --failover address carries its own token, used over any kept",
+							);
+						}
+					},
+				);
+				row(
+					ui,
+					ADVANCED[1],
+					"Spares the encoder while nobody watches the full size. A late viewer then gets nothing from \
+					 before they arrived.",
+					|ui| {
+						ui.add_enabled(!overridden.on_demand, kit::Toggle::new(&mut form.on_demand));
+					},
+				);
+				if overridden.on_demand {
+					super::settings::flag_note(ui, "--on-demand");
 				}
 			});
-			field_row(
-				ui,
-				"Failover relay",
-				"A second relay the same broadcast goes to, which viewers resume from if the first fails. Each is \
-				 another upload of the whole stream.",
-				None,
-				|ui| {
-					address(
-						ui,
-						&mut form.failover,
-						"https://backup.example/anon",
-						failover_flag.map(|url| ("--failover", url)),
-					);
-					ui.add_enabled_ui(!failover_carries, |ui| {
-						token(ui, &mut form.failover_token, &mut form.forget_failover_token);
-					});
-					if failover_carries {
-						super::settings::cue_note(
-							ui,
-							"The --failover address carries its own token, used over any kept",
-						);
-					}
-				},
+		ui.add_space(8.0);
+		if let Err(err) = form.saved(stream.saved()) {
+			ui.add(egui::Label::new(egui::RichText::new(err).font(kit::ui(12.0)).color(kit::ERR)).wrap());
+		}
+		if let Some(file) = stream.path().file_name() {
+			ui.label(
+				egui::RichText::new(format!("Kept in {}", file.to_string_lossy()))
+					.font(kit::ui(11.5))
+					.color(kit::DIM),
 			);
-			field_row(
-				ui,
-				"Broadcast name",
-				"Where viewers find it on the relays.",
-				overridden.broadcast.then_some("--broadcast"),
-				|ui| {
-					ui.add(
-						egui::TextEdit::singleline(&mut form.broadcast)
-							.hint_text(crate::stream::BROADCAST)
-							.desired_width(f32::INFINITY),
-					);
-				},
-			);
-			row(
-				ui,
-				"Encode only while someone watches",
-				"Spares the encoder while nobody watches the full size. A late viewer then gets nothing from before \
-				 they arrived.",
-				|ui| {
-					ui.add_enabled(!overridden.on_demand, kit::Toggle::new(&mut form.on_demand));
-				},
-			);
-			if overridden.on_demand {
-				super::settings::flag_note(ui, "--on-demand");
-			}
-		});
-		let edited = form.edited(stream.saved());
-		let mut save = None;
-		let mut revert = false;
-		ui.horizontal(|ui| {
-			if ui.add_enabled(edited && !busy, egui::Button::new("Save")).clicked() {
-				save = Some(form.saved(stream.saved()));
-			}
-			revert = ui.add_enabled(edited && !busy, egui::Button::new("Revert")).clicked();
-			if let Some(file) = stream.path().file_name() {
-				ui.add_space(8.0);
-				ui.label(
-					egui::RichText::new(format!("Kept in {}", file.to_string_lossy()))
-						.font(kit::ui(11.5))
-						.color(kit::DIM),
-				);
-			}
-		});
-		let tokens = form.tokens(&stream);
-		let retokened = !tokens.is_empty()
-			|| [&form.relay, &form.failover]
-				.iter()
-				.any(|url| crate::stream::carries_token(url));
+		}
+		self.typing |= typing;
 		ui.add_space(6.0);
-		self.saved_note(ui, Setting::Stream);
-		match save {
-			Some(Ok(saved)) => {
-				self.saved = None;
-				let mut saving = Saving::start(Setting::Stream, stream, saved, tokens, ui.ctx());
-				saving.retokened = retokened;
-				self.saving = Some(saving);
-			}
-			Some(Err(err)) => self.saved = Some((Setting::Stream, err)),
-			None => {}
-		}
-		if revert {
-			let stream = self.controls.stream.lock().unwrap().clone();
-			self.stream_form = Some(Form::new(&stream));
-		}
-		// On at once, rather than saved with the form above.
+		self.saved_note(ui, Setting::Destinations);
+		// On at once, as every setting here is.
 		ui.add_space(16.0);
 		self.camera(ui, None);
 	}
 }
 
+/// The Destinations pane's settings under Advanced, by the names their rows
+/// show, which the palette finds them by.
+const ADVANCED: [&str; 2] = ["Failover relay", "Encode only while someone watches"];
+
 /// A relay's address, or the one `flag` sets over it for this run, without
 /// its token, locked with a note. The saved address stays in `text`, as a
-/// flag is never saved.
-fn address(ui: &mut Ui, text: &mut String, hint: &str, flag: Option<(&str, &url::Url)>) {
+/// flag is never saved. Says whether the field has the keyboard.
+fn address(ui: &mut Ui, text: &mut String, hint: &str, flag: Option<(&str, &url::Url)>) -> bool {
 	match flag {
-		None => {
-			ui.add(
+		None => ui
+			.add(
 				egui::TextEdit::singleline(text)
 					.hint_text(hint)
 					.desired_width(f32::INFINITY),
-			);
-		}
+			)
+			.has_focus(),
 		Some((flag, url)) => {
 			let shown = crate::stream::redacted(url);
 			ui.add_enabled(
@@ -1125,16 +1276,15 @@ fn address(ui: &mut Ui, text: &mut String, hint: &str, flag: Option<(&str, &url:
 				egui::TextEdit::singleline(&mut shown.as_str()).desired_width(f32::INFINITY),
 			);
 			super::settings::flag_note(ui, flag);
+			false
 		}
 	}
 }
 
-/// Measure the connection to the first relay switched on toward `ceiling`,
-/// reading its token on the task's own thread, since the credential store
-/// blocks.
+/// Measure the connection to the first relay toward `ceiling`, reading its
+/// token on the task's own thread, since the credential store blocks.
 fn measure(controls: &Controls, runtime: &tokio::runtime::Handle, ceiling: Rate) -> Measuring {
 	let stream = controls.stream.lock().unwrap().clone();
-	let switched = *controls.switched.lock().unwrap();
 	let handle = runtime.clone();
 	let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
 	let mut on_air = controls.engine.on_air_changes();
@@ -1142,12 +1292,12 @@ fn measure(controls: &Controls, runtime: &tokio::runtime::Handle, ceiling: Rate)
 		let relays = {
 			// Each client binds its socket on the runtime.
 			let _runtime = handle.enter();
-			stream.relays(switched)
+			stream.relays(Switched::default())
 		};
 		let path = stream.broadcast().to_string();
 		async move {
 			let relays = relays.map_err(|err| format!("{err:#}"))?;
-			let relay = relays.into_iter().next().ok_or("no relay is switched on")?;
+			let relay = relays.into_iter().next().ok_or("no relay is set")?;
 			let measured = uplink::measure(&relay.client, relay.url, &path, ceiling, uplink::WINDOW);
 			tokio::select! {
 				biased;
@@ -1165,7 +1315,7 @@ fn measure(controls: &Controls, runtime: &tokio::runtime::Handle, ceiling: Rate)
 	}
 }
 
-/// A section's heading in a sheet or popover.
+/// A section's heading in a popover.
 fn heading(ui: &mut Ui, text: &str) {
 	ui.add_space(6.0);
 	ui.label(kit::caps(text, kit::display_bold(11.0)).color(kit::FAINT));
@@ -1195,9 +1345,6 @@ fn check_row(ui: &mut Ui, check: &Check) -> Option<Fix> {
 					painter.circle_filled(at.center(), 10.0, kit::CUE);
 					Icon::Close.paint(ui, at.shrink(4.0), 12.0, kit::ON_CUE);
 				}
-				Outcome::Skipped => {
-					painter.circle_stroke(at.center(), 9.0, Stroke::new(1.0, kit::FAINT));
-				}
 			}
 			if check.mark == Outcome::Failed {
 				ui.add(
@@ -1218,9 +1365,6 @@ fn check_row(ui: &mut Ui, check: &Check) -> Option<Fix> {
 			);
 			ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
 				ui.add(egui::Label::new(egui::RichText::new(&check.said).color(kit::DIM)).truncate());
-				if let Some((level, peak)) = check.level {
-					ui.add(kit::Meter::new(level, peak).run(kit::Run::Across, 80.0, 8.0));
-				}
 			});
 		});
 		if !check.fixes.is_empty() {
@@ -1241,9 +1385,10 @@ fn check_row(ui: &mut Ui, check: &Check) -> Option<Fix> {
 	pressed
 }
 
-/// The sheet's confirm: one wide light button, neither the accent nor red.
-fn confirm_button(ui: &mut Ui, text: &str, enabled: bool, waiting: bool) -> egui::Response {
-	let size = vec2(ui.available_width(), 54.0);
+/// The popover's one button, wide and light: neither the accent nor red,
+/// which say the stream is on air. A spinner beside it while `waiting`.
+fn wide_button(ui: &mut Ui, text: &str, enabled: bool, waiting: bool) -> egui::Response {
+	let size = vec2(ui.available_width(), 40.0);
 	let sense = if enabled { Sense::click() } else { Sense::hover() };
 	let (rect, response) = ui.allocate_exact_size(size, sense);
 	response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, text));
@@ -1254,7 +1399,7 @@ fn confirm_button(ui: &mut Ui, text: &str, enabled: bool, waiting: bool) -> egui
 	};
 	let painter = ui.painter();
 	painter.rect_filled(rect, 8, fill);
-	let galley = kit::caps_galley(painter, text, kit::display(22.0), ink, None);
+	let galley = kit::caps_galley(painter, text, kit::display(17.0), ink, None);
 	let mut at = rect.center() - galley.size() / 2.0;
 	if waiting {
 		let spinner = Rect::from_center_size(pos2(at.x - 14.0, rect.center().y), Vec2::splat(16.0));
@@ -1266,7 +1411,7 @@ fn confirm_button(ui: &mut Ui, text: &str, enabled: bool, waiting: bool) -> egui
 }
 
 /// A save of the show's stream file under way, from the Settings pane that
-/// asked for it.
+/// asked for it, or the Go live popover, as Destinations.
 pub(super) struct Saving {
 	pub(super) from: Setting,
 	/// Whether it sets a relay's token, which the relays are followed anew for.
@@ -1315,7 +1460,7 @@ impl Saving {
 	}
 }
 
-/// The Stream pane's form.
+/// The Destinations pane's form, holding edits until they save.
 pub(super) struct Form {
 	relay: String,
 	relay_token: String,
@@ -1325,6 +1470,9 @@ pub(super) struct Form {
 	forget_failover_token: bool,
 	broadcast: String,
 	on_demand: bool,
+	/// The last save it started, which is not tried again until the form
+	/// changes, so one refused waits for the next edit.
+	tried: Option<(Saved, Vec<Token>)>,
 }
 
 /// A token to keep for a relay, or `None` to forget its saved one.
@@ -1344,6 +1492,7 @@ impl Form {
 			forget_failover_token: false,
 			broadcast: saved.broadcast.clone().unwrap_or_default(),
 			on_demand: saved.on_demand,
+			tried: None,
 		}
 	}
 
@@ -1375,6 +1524,33 @@ impl Form {
 			|| self.forget_relay_token
 			|| self.forget_failover_token;
 		tokens || self.saved(saved).is_ok_and(|form| form != *saved) || self.saved(saved).is_err()
+	}
+
+	/// What to save over `stream`'s settings, if the form holds a change
+	/// that can be saved and was not tried as it is.
+	fn next(&mut self, stream: &Stream) -> Option<(Saved, Vec<Token>)> {
+		if !self.edited(stream.saved()) {
+			return None;
+		}
+		let next = (self.saved(stream.saved()).ok()?, self.tokens(stream));
+		if self.tried.as_ref() == Some(&next) {
+			return None;
+		}
+		self.tried = Some(next.clone());
+		Some(next)
+	}
+
+	/// Whether the form, after a save over `before`, holds no edit of its
+	/// own: none over `before`, or only the one just saved.
+	fn settled(&self, before: &Stream) -> bool {
+		if !self.edited(before.saved()) {
+			return true;
+		}
+		let now = self
+			.saved(before.saved())
+			.ok()
+			.map(|saved| (saved, self.tokens(before)));
+		now.is_some() && now == self.tried
 	}
 
 	/// The tokens typed or forgotten, by the relay they go with: the one
@@ -1459,5 +1635,52 @@ mod tests {
 		assert_eq!(smaller(canvas(1080, 1920, 30)), Some(canvas(720, 1280, 30)));
 		assert_eq!(smaller(canvas(1082, 1080, 60)), Some(canvas(1082, 1080, 30)));
 		assert_eq!(smaller(canvas(1082, 1080, 30)), None);
+	}
+
+	/// An edit saves once, and one the save refused waits for the next edit
+	/// rather than being tried every frame. After a save, a form holding only
+	/// what it saved settles, even when the save moved the address's token
+	/// into the credential store, which would otherwise read as an edit and
+	/// save again forever; one edited since keeps its edit.
+	#[test]
+	fn an_edit_saves_once_and_settles() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut stream = Stream::load(
+			&dir.path().join("show.toml"),
+			Default::default(),
+			Default::default(),
+			Default::default(),
+			crate::stream::Credentials::memory(),
+		)
+		.unwrap();
+		let mut form = Form::new(&stream);
+		assert!(form.next(&stream).is_none(), "nothing to save");
+
+		form.relay = "not a url".into();
+		assert!(
+			form.next(&stream).is_none(),
+			"an address that is not one is never saved"
+		);
+
+		form.relay = "https://relay.example/anon?jwt=secret".into();
+		let (saved, tokens) = form.next(&stream).expect("the edit saves");
+		assert!(form.next(&stream).is_none(), "and is not tried again as it is");
+		let before = stream.clone();
+		stream.save(saved).unwrap();
+		for (url, token) in &tokens {
+			stream.credentials().set(url, token.as_deref()).unwrap();
+		}
+		assert_ne!(
+			stream.relay().unwrap().as_str(),
+			form.relay,
+			"the token moved out of the address"
+		);
+		assert!(form.settled(&before), "what was saved settles");
+
+		let mut form = Form::new(&before);
+		form.relay = "https://relay.example/anon?jwt=secret".into();
+		form.next(&before).unwrap();
+		form.broadcast = "friday".into();
+		assert!(!form.settled(&before), "an edit made during the save is kept");
 	}
 }

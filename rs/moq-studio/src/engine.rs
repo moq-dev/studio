@@ -6185,8 +6185,8 @@ mod tests {
 			.expect("the studio closes");
 	}
 
-	/// A go-live, from a hotkey as from the sheet, waits out an encoder check
-	/// still running, such as a closed sheet's, whose hardware session the
+	/// A go-live, from a hotkey as from GO LIVE, waits out an encoder check
+	/// still running, such as a stale check's, whose hardware session the
 	/// program's encoders would count against, before it opens anything, and
 	/// admits no new one, such as a canvas change's, until it ends.
 	#[tokio::test(flavor = "multi_thread")]

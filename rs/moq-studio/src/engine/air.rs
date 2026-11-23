@@ -657,6 +657,16 @@ impl Engine {
 			.collect()
 	}
 
+	/// How many times the relays [watched](Self::watch) connected again, each
+	/// session after a relay's first, as a new network path makes them do.
+	pub fn reconnects(&self) -> u64 {
+		let watching = self.watching.lock().unwrap();
+		watching
+			.iter()
+			.map(|watch| watch.link.monitor.state().connects.saturating_sub(1))
+			.sum()
+	}
+
 	/// Close each watching session, so its relay hears the close.
 	pub(super) async fn unwatch(&self) {
 		let watching = std::mem::take(&mut *self.watching.lock().unwrap());

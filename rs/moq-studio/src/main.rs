@@ -66,7 +66,7 @@ pub struct Config {
 	pub watch: Option<url::Url>,
 
 	/// The broadcast path the program goes live at, for this run, over the
-	/// show's own (Settings, Stream), which is `studio` until set. With
+	/// show's own (Settings, Destinations), which is `studio` until set. With
 	/// `--watch`, the studio broadcast played, `studio` unless given.
 	#[usage(long)]
 	pub broadcast: Option<String>,

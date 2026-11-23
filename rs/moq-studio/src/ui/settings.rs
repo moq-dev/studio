@@ -10,7 +10,6 @@ use std::path::PathBuf;
 
 use egui::{Align, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
 
-use super::live::Saving;
 use super::*;
 use crate::setup::Task;
 use crate::stream::Saved;
@@ -84,13 +83,16 @@ pub(super) struct Picker {
 	task: Task<Option<PathBuf>>,
 }
 
-/// The Guests pane's form, until saved.
+/// The Guests pane's form, holding edits until they save.
 pub(super) struct GuestForm {
 	room: String,
 	key: String,
 	page: String,
 	expiry: Duration,
 	appear: bool,
+	/// The last save it started, which is not tried again until the form
+	/// changes, so one refused waits for the next edit.
+	tried: Option<Saved>,
 }
 
 impl GuestForm {
@@ -106,6 +108,7 @@ impl GuestForm {
 			page: saved.join_page.as_ref().map(ToString::to_string).unwrap_or_default(),
 			expiry: saved.guest_expiry.unwrap_or(crate::guests::DEFAULT_EXPIRY),
 			appear: saved.guests_appear,
+			tried: None,
 		}
 	}
 
@@ -134,6 +137,31 @@ impl GuestForm {
 	fn edited(&self, saved: &Saved) -> bool {
 		self.saved(saved).is_ok_and(|form| form != *saved) || self.saved(saved).is_err()
 	}
+
+	/// What to save over `saved`, if the form holds a change that can be
+	/// saved and was not tried as it is.
+	pub(super) fn next(&mut self, saved: &Saved) -> Option<Saved> {
+		if !self.edited(saved) {
+			return None;
+		}
+		let next = self.saved(saved).ok()?;
+		if self.tried.as_ref() == Some(&next) {
+			return None;
+		}
+		self.tried = Some(next.clone());
+		Some(next)
+	}
+
+	/// Whether the form, after a save over `before`, holds no edit of its
+	/// own: none over `before`, or only the one just saved.
+	pub(super) fn settled(&self, before: &Saved) -> bool {
+		!self.edited(before) || self.saved(before).ok().is_some_and(|now| Some(now) == self.tried)
+	}
+
+	/// Let the next change save, once a save of another finished.
+	pub(super) fn retry(&mut self) {
+		self.tried = None;
+	}
 }
 
 impl Panels {
@@ -141,6 +169,8 @@ impl Panels {
 	/// the one picked on the right.
 	pub(super) fn settings(&mut self, ctx: &egui::Context, fx: &mut Fx) {
 		self.follow_picker(ctx);
+		// Set again by the pane drawn, while one of its fields has the keyboard.
+		self.typing = false;
 		let Some(mut setting) = self.setting else { return };
 		let frame = egui::Frame::new()
 			.fill(kit::P1)
@@ -183,7 +213,7 @@ impl Panels {
 						.auto_shrink([false, false])
 						.show(ui, |ui| match setting {
 							Setting::Show => self.show_pane(ui),
-							Setting::Stream => self.stream_settings(ui),
+							Setting::Destinations => self.destinations_pane(ui),
 							Setting::Recording => self.recording(ui),
 							Setting::Hotkeys => self.hotkeys(ui, fx),
 							Setting::Guests => self.guest_settings(ui),
@@ -933,11 +963,12 @@ impl Panels {
 	fn guest_settings(&mut self, ui: &mut Ui) {
 		let stream = self.controls.stream.lock().unwrap().clone();
 		let overridden = stream.overridden();
-		let busy = self.saving.is_some() || self.picker.is_some();
+		let busy = self.picker.is_some();
 		let layout = self.controls.mods.on(Mod::Layout);
 		let saved = stream.saved().clone();
 		let form = self.guests_form.get_or_insert_with(|| GuestForm::new(&saved));
 		let mut pick_key = false;
+		let mut typing = false;
 
 		// Where guests stand now.
 		let room = self.engine.room();
@@ -965,7 +996,10 @@ impl Panels {
 		// tries it again.
 		if failure.is_some() && self.engine.on_air() == crate::engine::OnAir::Off {
 			ui.add_space(6.0);
-			if ui.add_enabled(!busy, egui::Button::new("Try again")).clicked() {
+			if ui
+				.add_enabled(!busy && self.saving.is_none(), egui::Button::new("Try again"))
+				.clicked()
+			{
 				self.controls.retry_room();
 			}
 		}
@@ -978,12 +1012,13 @@ impl Panels {
 				"A path under the relay's address, such as `guests`.",
 				overridden.room.then_some("--room"),
 				|ui| {
-					ui.add(
+					let field = ui.add(
 						egui::TextEdit::singleline(&mut form.room)
 							.id_salt("guests room")
 							.hint_text("guests")
 							.desired_width(f32::INFINITY),
 					);
+					typing |= field.has_focus();
 				},
 			);
 			field_row(
@@ -995,12 +1030,13 @@ impl Panels {
 				|ui| {
 					ui.horizontal(|ui| {
 						pick_key = ui.button("Choose").clicked();
-						ui.add(
+						let field = ui.add(
 							egui::TextEdit::singleline(&mut form.key)
 								.id_salt("guests room key")
 								.hint_text("room.jwk")
 								.desired_width(f32::INFINITY),
 						);
+						typing |= field.has_focus();
 					});
 				},
 			);
@@ -1010,12 +1046,13 @@ impl Panels {
 				"The page a guest's link opens. It must be https://.",
 				overridden.join_page.then_some("--join-page"),
 				|ui| {
-					ui.add(
+					let field = ui.add(
 						egui::TextEdit::singleline(&mut form.page)
 							.id_salt("guests join page")
 							.hint_text("https://join.studio.moq.dev/")
 							.desired_width(f32::INFINITY),
 					);
+					typing |= field.has_focus();
 				},
 			);
 			let mut lifetimes: Vec<(Duration, String)> = LIFETIMES
@@ -1050,26 +1087,14 @@ impl Panels {
 			}
 		});
 
-		let edited = form.edited(&saved);
-		let result = form.saved(&saved);
-		let mut revert = false;
-		let mut save = false;
+		let invalid = form.saved(&saved).err();
 		rule(ui);
 		ui.add_space(12.0);
-		ui.horizontal(|ui| {
-			save = ui.add_enabled(edited && !busy, egui::Button::new("Save")).clicked();
-			revert = ui.add_enabled(edited && !busy, egui::Button::new("Revert")).clicked();
-		});
+		if let Some(invalid) = invalid {
+			ui.add(egui::Label::new(RichText::new(invalid).font(kit::ui(12.0)).color(kit::ERR)).wrap());
+		}
+		self.typing |= typing;
 		self.saved_note(ui, Setting::Guests);
-		if save {
-			match result {
-				Ok(next) => self.save_stream(Setting::Guests, stream.clone(), next, Vec::new(), ui.ctx()),
-				Err(err) => self.saved = Some((Setting::Guests, err)),
-			}
-		}
-		if revert {
-			self.guests_form = Some(GuestForm::new(&saved));
-		}
 		if pick_key {
 			let from = stream
 				.saved()
@@ -1116,26 +1141,9 @@ impl Panels {
 		});
 	}
 
-	/// Save `saved` as the show's stream file, keeping `tokens`, for the
-	/// `from` pane, which shows how it went.
-	pub(super) fn save_stream(
-		&mut self,
-		from: Setting,
-		stream: crate::stream::Stream,
-		saved: Saved,
-		tokens: Vec<super::live::Token>,
-		ctx: &egui::Context,
-	) {
-		if self.refuse_overlap(from) {
-			return;
-		}
-		self.saved = None;
-		self.saving = Some(Saving::start(from, stream, saved, tokens, ctx));
-	}
-
 	/// Refuse a save for the `from` pane while another runs, which would
 	/// lose its result and write the file from settings it has not seen.
-	fn refuse_overlap(&mut self, from: Setting) -> bool {
+	pub(super) fn refuse_overlap(&mut self, from: Setting) -> bool {
 		let running = self.saving.is_some();
 		if running {
 			self.saved = Some((
@@ -1594,7 +1602,7 @@ pub(super) const SCENE_SIZES: &str = "Scene sizes";
 
 /// Whether the palette found the setting called `name`, which its pane has
 /// yet to light.
-fn seeking(ctx: &egui::Context, name: &str) -> bool {
+pub(super) fn seeking(ctx: &egui::Context, name: &str) -> bool {
 	let sought = ctx.data(|data| data.get_temp::<Sought>(egui::Id::new("sought setting")));
 	sought.is_some_and(|sought| sought.name == name)
 }
