@@ -2239,6 +2239,7 @@ fn window<'a>(
 				fx,
 				framed: true,
 				closed: window_closed,
+				control: None,
 			}
 		});
 	(harness, started, closed)
@@ -2570,20 +2571,5 @@ async fn settle(harness: &mut Harness<'_, Window>, engine: &engine::Engine) {
 
 /// A renderer on `gpu`'s device, as the window's is.
 fn render_state(gpu: &engine::Gpu) -> egui_wgpu::RenderState {
-	let config = egui_wgpu::WgpuConfiguration {
-		wgpu_setup: egui_wgpu::WgpuSetup::Existing(egui_wgpu::WgpuSetupExisting {
-			instance: gpu.instance.clone(),
-			adapter: gpu.adapter.clone(),
-			device: gpu.device.clone(),
-			queue: gpu.queue.clone(),
-		}),
-		..Default::default()
-	};
-	pollster::block_on(egui_wgpu::RenderState::create(
-		&config,
-		&gpu.instance,
-		None,
-		egui_wgpu::RendererOptions::PREDICTABLE,
-	))
-	.unwrap()
+	crate::control::headless::render_state(gpu).unwrap()
 }

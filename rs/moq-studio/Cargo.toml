@@ -52,11 +52,22 @@ bytes = { workspace = true }
 # The window, its event loop, and the egui integration. `wgpu` is the renderer
 # the compositor shares a device with; no glow, no system font discovery.
 # `persistence` keeps per-user picks, such as the output Listen plays on, out
-# of the shared scene file.
-eframe = { version = "0.36", default-features = false, features = ["default_fonts", "persistence", "wayland", "wgpu", "x11"] }
+# of the shared scene file. `accesskit` describes every widget to screen
+# readers, and to `--control`, which drives the window by those descriptions.
+eframe = { version = "0.36", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "persistence",
+    "wayland",
+    "wgpu",
+    "x11",
+] }
 egui = "0.36"
 # The kit's icons, Lucide's SVGs, drawn at whatever size and scale they are shown.
 egui_extras = { version = "0.36", default-features = false, features = ["svg"] }
+# `--headless`: the window run off-screen, frame by frame, and drawn on the
+# compositor's GPU when asked for a picture.
+egui_kittest = { version = "0.36", features = ["eframe", "wgpu"] }
 # `--watch` awaits the composition broadcast's catalog.
 hang = { workspace = true, features = ["async"] }
 # Stamps a recording's file name with when it started. Already in the graph
@@ -99,6 +110,9 @@ rfd = "0.18"
 same-file = "1.0.6"
 # The guests removed from scenes, kept beside the scene file.
 serde = { workspace = true }
+# `--control`'s requests and replies, a JSON object a line. Already in the
+# graph.
+serde_json = "1.0.154"
 # Glows, pulses, bursts, and fills in the UI, drawn on its wgpu device.
 rune-fx = { workspace = true }
 tempfile = { workspace = true }
@@ -136,8 +150,9 @@ x11rb = { version = "0.13", features = ["xkb"] }
 zbus-secret-service-keyring-store = { version = "1.0", features = ["rt-tokio-crypto-rust"] }
 
 [target.'cfg(unix)'.dependencies]
-# The room left on the recordings folder's disk. moq-scene's release.
-rustix = { version = "1", features = ["fs"] }
+# The room left on the recordings folder's disk, and whose process is on the
+# other end of `--control`'s socket. moq-scene's release.
+rustix = { version = "1", features = ["fs", "process"] }
 
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
 # System-wide hotkeys on macOS and Windows; X11 grabs keys itself, and Wayland
@@ -192,9 +207,6 @@ windows-native-keyring-store = { version = "1.1", default-features = false }
 resvg = { version = "0.50", default-features = false }
 
 [dev-dependencies]
-# `just shots`: the window drawn headless on the compositor's GPU, saved as
-# PNG. The release for eframe's egui.
-egui_kittest = { version = "0.36", features = ["eframe", "wgpu"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 # A clock that moves wall time too, which renewed tokens' expiries read.
 kio = { workspace = true, features = ["manual"] }

@@ -373,6 +373,75 @@ impl Studio {
 		&self.panels.engine
 	}
 
+	/// What `--control` reports of the studio: the page, what is on program
+	/// and cued, the selected layer, each source's status and level, whether
+	/// it is on air or recording, and the show's whole scene document.
+	pub fn describe(&self) -> serde_json::Value {
+		let panels = &self.panels;
+		let state = panels.engine.state.lock().unwrap();
+		let collection = state.collection();
+		let status = |status: Status| match status {
+			Status::Starting => "starting".to_string(),
+			Status::Live => "live".to_string(),
+			Status::Offline => "offline".to_string(),
+			Status::Failed(why) => format!("failed: {why}"),
+			Status::Ended => "ended".to_string(),
+			other => format!("{other:?}").to_lowercase(),
+		};
+		let sources: BTreeMap<&str, serde_json::Value> = state
+			.sources
+			.iter()
+			.map(|(name, feed)| {
+				let peak = levels::latest(panels.levels.sound(name)).peak();
+				let value = serde_json::json!({
+					"status": status(feed.status()),
+					"track": feed.track().map(status),
+					"peak_db": (peak > 0.0).then(|| decibels(peak)),
+				});
+				(name, value)
+			})
+			.collect();
+		// As a view settles: a replay source's track starts only with its
+		// first replay.
+		let starting: Vec<&str> = state
+			.sources
+			.iter()
+			.filter(|(_, feed)| {
+				matches!(feed.status(), Status::Starting)
+					|| (!matches!(feed.source(), Source::Replay) && matches!(feed.track(), Some(Status::Starting)))
+			})
+			.map(|(name, _)| name)
+			.collect();
+		let selection = panels.selection.as_ref().and_then(|picked| {
+			let item = picked.item(collection)?;
+			Some(serde_json::json!({
+				"scene": picked.layer.scene,
+				"index": picked.index,
+				"source": item.source,
+			}))
+		});
+		let on_air = match panels.engine.on_air() {
+			crate::engine::OnAir::Off => "off",
+			crate::engine::OnAir::Starting => "starting",
+			crate::engine::OnAir::Live(_) => "live",
+			crate::engine::OnAir::Ending => "ending",
+		};
+		let recording = panels.engine.recorder.status().is_some_and(|status| !status.done);
+		serde_json::json!({
+			"page": panels.page.name(),
+			"program": state.compositor.program_scene(),
+			"cued": state.cued(),
+			"selection": selection,
+			"on_air": on_air,
+			"recording": recording,
+			"sources": sources,
+			"starting": starting,
+			"frames": panels.engine.stats.rendered.load(Ordering::Relaxed),
+			"framerate": state.compositor.canvas().framerate,
+			"show": collection,
+		})
+	}
+
 	/// Whether Close show was clicked since this last said so, which the
 	/// window then answers by closing the show, or [`refuse`](Self::refuse).
 	pub fn closing(&mut self) -> bool {
