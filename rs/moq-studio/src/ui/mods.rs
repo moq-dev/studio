@@ -30,6 +30,36 @@ fn uses(collection: &moq_scene::Collection) -> Vec<Mod> {
 	used
 }
 
+/// The mods `state`'s show uses: as [`uses`] finds them, and Audio scenes &
+/// routes while a source making a sound is left out of the stream's mix,
+/// where only MIX reaches it.
+fn used(state: &State) -> Vec<Mod> {
+	let mut used = uses(state.collection());
+	if !used.contains(&Mod::Audio) && !unheard(state).is_empty() {
+		used.push(Mod::Audio);
+	}
+	used
+}
+
+/// The sources the stream's mix leaves out: each sent only to another audio
+/// scene, or making a sound and sent to none.
+fn unheard(state: &State) -> BTreeSet<String> {
+	let collection = state.collection();
+	let heard = collection
+		.program_audio()
+		.map(|program| collection.heard(program))
+		.unwrap_or_default();
+	let sent = collection.audio_scenes.iter().flat_map(|scene| &scene.sounds);
+	let sounding = collection
+		.sources
+		.keys()
+		.filter(|name| crate::controls::sounds(state, name));
+	sent.chain(sounding)
+		.filter(|name| !heard.contains(name.as_str()) && collection.sources.contains_key(*name))
+		.cloned()
+		.collect()
+}
+
 impl Panels {
 	/// Settings, Mods: each mod's switch, and under one that is on what it
 	/// keeps here.
@@ -63,7 +93,7 @@ impl Panels {
 		}
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
-		let used = uses(state.collection()).contains(&each);
+		let used = used(&state).contains(&each);
 		let canvas = state.collection().canvas;
 		// A portrait show turns to landscape, which restarts the video, so on
 		// air it asks first and the mod waits for the answer.
@@ -80,7 +110,7 @@ impl Panels {
 		let result = match each {
 			Mod::Audio if used => self.audio_off(&mut state, label),
 			Mod::Layout if used => layout_off(&mut state, label),
-			Mod::Published if used => self.published_off(&mut state, label),
+			Mod::Published if used => published_off(&mut state, label),
 			Mod::Formats if used => edit(&mut state, label, None, |draft| draft.set_portrait(false)),
 			Mod::Studio => {
 				// A scene open off air stays cued, for its banner to take live.
@@ -115,7 +145,7 @@ impl Panels {
 	/// frame draws, so an undo, a reload, or an outside edit that brings a
 	/// feature back brings its UI.
 	pub(super) fn follow_mods(&mut self, say: bool) {
-		let used = uses(self.engine.state.lock().unwrap().collection());
+		let used = used(&self.engine.state.lock().unwrap());
 		let mods = &self.controls.mods;
 		let switched: Vec<&str> = used
 			.into_iter()
@@ -142,6 +172,7 @@ impl Panels {
 		if off(Some(Mod::Multiview)) && self.multiview.open() {
 			self.multiview.set_open(false);
 		}
+		self.controls.follow_mods();
 	}
 
 	/// One mix: the audio scene on program, holding what it plays now and
@@ -151,13 +182,8 @@ impl Panels {
 		let collection = state.collection();
 		let program = collection.program_audio().context("no audio scene is on program")?;
 		let heard: BTreeSet<String> = collection.heard(program).into_iter().map(String::from).collect();
-		let elsewhere: BTreeSet<String> = collection
-			.audio_scenes
-			.iter()
-			.flat_map(|scene| &scene.sounds)
-			.filter(|sound| !heard.contains(*sound) && collection.sources.contains_key(*sound))
-			.cloned()
-			.collect();
+		let elsewhere = unheard(state);
+		let collection = state.collection();
 		let one = AudioScene {
 			program: true,
 			sounds: heard.union(&elsewhere).cloned().collect(),
@@ -202,43 +228,38 @@ impl Panels {
 		}
 		Ok(())
 	}
+}
 
-	/// No scene published or of its own size, no source published
-	/// independently, and no published scene's virtual camera.
-	fn published_off(&self, state: &mut State, label: String) -> anyhow::Result<()> {
-		let collection = state.collection();
-		let scenes: Vec<(usize, String)> = collection
-			.scenes
-			.iter()
-			.enumerate()
-			.filter(|(_, scene)| scene.published || scene.size.is_some())
-			.map(|(index, scene)| (index, scene.name.clone()))
-			.collect();
-		for (_, name) in &scenes {
-			if state.camera(Some(name)).is_some() {
-				self.engine.set_camera(Some(name), false)?;
-			}
+/// No scene published or of its own size, and no source published
+/// independently. The engine closes the virtual camera of each scene no
+/// longer published.
+fn published_off(state: &mut State, label: String) -> anyhow::Result<()> {
+	let collection = state.collection();
+	let scenes: Vec<usize> = collection
+		.scenes
+		.iter()
+		.enumerate()
+		.filter(|(_, scene)| scene.published || scene.size.is_some())
+		.map(|(index, _)| index)
+		.collect();
+	let sources: Vec<String> = collection.published.keys().cloned().collect();
+	edit(state, label, None, |draft| {
+		for index in scenes {
+			let scene = draft.collection().scenes[index].clone();
+			draft.set_scene(
+				index,
+				Scene {
+					published: false,
+					..scene
+				},
+			)?;
+			draft.set_size(index, None)?;
 		}
-		let collection = state.collection();
-		let sources: Vec<String> = collection.published.keys().cloned().collect();
-		edit(state, label, None, |draft| {
-			for (index, _) in scenes {
-				let scene = draft.collection().scenes[index].clone();
-				draft.set_scene(
-					index,
-					Scene {
-						published: false,
-						..scene
-					},
-				)?;
-				draft.set_size(index, None)?;
-			}
-			for name in sources {
-				draft.set_published(&name, None)?;
-			}
-			Ok(())
-		})
-	}
+		for name in sources {
+			draft.set_published(&name, None)?;
+		}
+		Ok(())
+	})
 }
 
 /// Every layer set free where it is drawn now, in each picture, and kept

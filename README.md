@@ -500,9 +500,9 @@ left to other programs. Switching it on shows its UI at once:
 | Mod | Adds |
 | --- | --- |
 | Audio scenes & routes | Audio scenes and their sends, on the MIX page (see [Audio scenes](#audio-scenes)), and the audio scene a recording or a published scene carries. Off, the show has one audio scene, the stream's, which every sound feeds and the recording holds. |
-| Replay & review | The REVIEW page, with the recordings, replays, and clips, the dock's **Save clip** and **Drop a marker**, their keys, and the replay source (see [Replay](#replay) and [Markers](#markers)). Off, the recordings are in the folder Settings, Recording opens. |
+| Replay & review | The REVIEW page, with the recordings, replays, and clips, the dock's **Save clip** and **Drop a marker**, their keys, and the replay source (see [Replay](#replay) and [Markers](#markers)). On, the sources on program keep encoding their recent past, which a replay of one plays; off, a source encodes only while something reads it, and the recordings are in the folder Settings, Recording opens. |
 | Studio mode | Studio mode's switch, which cues a scene for TAKE and AUTO (see [Off air and Studio mode](#off-air-and-studio-mode)), and their keys. |
-| Smart layout | Slots and roles (see [Slots and roles](#slots-and-roles)), **Keep out of the way** (see [Keeping out of the way](#keeping-out-of-the-way)), and guests appearing on their own. |
+| Smart layout | Slots and roles (see [Slots and roles](#slots-and-roles)), **Keep out of the way** (see [Keeping out of the way](#keeping-out-of-the-way)), and guests appearing on their own, which waits for it to be on. |
 | Both formats | A portrait show, and going out in both formats at once (see [Both formats at once](#both-formats-at-once)). |
 | Multiview | **Open the multiview**, in the show's menu and the palette (see [Multiview](#multiview)). |
 | Phone remote | Settings, Remote (see [Phone remote](#phone-remote)). Off, phones paired stay paired, but their presses do nothing. |
@@ -511,8 +511,8 @@ left to other programs. Switching it on shows its UI at once:
 
 Switching one off turns its feature off: the show then sends what it would
 without it. An edit it makes to the show is one undo takes back: audio scenes
-fold into the stream's, which keeps what it plays and takes every other sound
-muted, so the stream sounds the same; layers in slots or keeping out of the
+fold into the stream's, which keeps what it plays and takes every other sound,
+even one sent nowhere, muted, so the stream sounds the same; layers in slots or keeping out of the
 way stay where they are drawn; a portrait show turns to landscape, asking
 first on air as a new canvas does, and a show going out in both stops
 sending the portrait picture; and scenes and sources stop being published,
@@ -520,7 +520,8 @@ and scenes of their own size take the program's. Studio mode turns off, and
 the multiview and the scene graph close.
 
 Your mods are kept on this computer, beside your hotkeys, not in the show.
-A show that uses one, such as one with audio scenes or slots, switches it on
+A show that uses one, such as one with audio scenes, a sound the stream
+leaves out, or slots, switches it on
 as it opens, and so does an undo or reload that brings the feature back, so
 a feature never changes what goes out while its controls are hidden.
 

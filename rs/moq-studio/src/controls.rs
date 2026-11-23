@@ -400,9 +400,8 @@ impl Default for Replay {
 
 impl Controls {
 	pub fn new(engine: Arc<Engine>, stream: Stream, runtime: tokio::runtime::Handle) -> Self {
-		engine.set_guests_appear(stream.guests_appear());
 		let markers = Markers::new(engine.recorder.show());
-		Self {
+		let controls = Self {
 			engine,
 			runtime,
 			stream: Mutex::new(stream),
@@ -420,7 +419,18 @@ impl Controls {
 			studio: AtomicBool::new(false),
 			mods: Mods::default(),
 			fired: Arc::default(),
-		}
+		};
+		controls.follow_mods();
+		controls
+	}
+
+	/// Let the engine do only what the mods switched on allow: place guests
+	/// on their own with Smart layout, and keep the sources' recent past for
+	/// replays with Replay & review. Called as the mods or settings change.
+	pub fn follow_mods(&self) {
+		let appear = self.stream.lock().unwrap().guests_appear() && self.mods.on(Mod::Layout);
+		self.engine.set_guests_appear(appear);
+		self.engine.set_replays(self.mods.on(Mod::Review));
 	}
 
 	/// Whether Studio mode is on: a scene's pad or key cues it rather than
@@ -435,8 +445,9 @@ impl Controls {
 	}
 
 	/// Why `action` cannot run while its mod is off, if it is. TAKE and AUTO
-	/// still run, unlisted, as they take only what is cued, which with Studio
-	/// mode off is a scene opened off air, taken live from its banner.
+	/// still run, as they take only what is cued, which with Studio mode off
+	/// is a scene opened off air, taken live from its banner; their keys
+	/// are left to other programs.
 	fn modded(&self, action: &Action) -> Option<String> {
 		if matches!(action, Action::Cut | Action::Transition) {
 			return None;
@@ -656,7 +667,6 @@ impl Controls {
 	/// now if off air, or once the stream ends; says whether they wait for it.
 	/// Otherwise a guests' room that failed is tried again, off air.
 	pub fn set_stream(self: &Arc<Self>, stream: Stream, followed_changed: bool) -> bool {
-		self.engine.set_guests_appear(stream.guests_appear());
 		{
 			// Marked with the settings it belongs to, so a snapshot never
 			// holds the new relays without knowing they wait to be followed.
@@ -666,6 +676,7 @@ impl Controls {
 				self.rewatch.store(true, Ordering::Release);
 			}
 		}
+		self.follow_mods();
 		if !followed_changed {
 			// A room that failed is tried again on any save, such as once its
 			// key file is back, off air.
@@ -814,6 +825,9 @@ impl Controls {
 
 	/// Do `action` for a hotkey, keeping how it went for the status bar.
 	pub fn press(self: &Arc<Self>, action: &Action) {
+		if let Some(why) = self.modded(action) {
+			return self.report(action, Err(why));
+		}
 		match action {
 			Action::Replay => drop(self.replay(true, true, None)),
 			Action::SaveClip => drop(self.replay(false, true, None)),
@@ -954,7 +968,7 @@ pub fn mute(state: &mut State, name: &str) -> anyhow::Result<String> {
 }
 
 /// Whether the source called `name` has sound, and so a mute.
-fn sounds(state: &State, name: &str) -> bool {
+pub(crate) fn sounds(state: &State, name: &str) -> bool {
 	state.sources.get(name).is_some_and(|feed| feed.strip().is_some())
 }
 

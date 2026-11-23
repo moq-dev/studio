@@ -3,7 +3,7 @@
 
 use egui::{Align2, Rect, Sense, Stroke, Vec2, pos2, vec2};
 
-use super::build::{LayerAction, Menu, OFF_AIR_TOP, layer_menu, shown_in};
+use super::build::{LayerAction, OFF_AIR_TOP, layer_menu, shown_in};
 use super::*;
 
 /// A layer row's height.
@@ -168,7 +168,7 @@ impl Panels {
 			}
 			// Dropped on a slot on the picture, it takes that slot.
 			response.dnd_set_drag_payload(picked.clone());
-			if let Some(menu) = Menu::of(state, &picked, self.off_air(state).is_some()) {
+			if let Some(menu) = self.menu(state, &picked) {
 				response.context_menu(|ui| {
 					if let Some(chosen) = layer_menu(ui, &menu) {
 						action = Some((picked.clone(), chosen));

@@ -1706,6 +1706,52 @@ fn studio_mode_cues_and_takes() {
 	quit(&engine, &runtime);
 }
 
+/// While a mod is off, its feature is held back where no page shows it: a
+/// key for it does nothing, a layer's menu offers no slot, and a guest is not
+/// placed on their own, though the settings ask. It draws no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn a_mod_off_holds_its_feature_back() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	std::fs::copy(fixture.join("shots/show.toml"), "show.toml").unwrap();
+	std::fs::write("show.stream.toml", "guests_appear = true\n").unwrap();
+	let app = start(launch(&gpu), stream(None), &runtime);
+	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
+	harness.step();
+	let engine = started.get().expect("the studio started").clone();
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		panic!("the studio starts on its first frame")
+	};
+	let controls = studio.controls();
+	studio.build(Side::Layers, Inspect::Layer, None);
+	harness.run_steps(2);
+
+	controls.press(&crate::controls::Action::SaveClip);
+	let saved = controls.fired().expect("the key says how it went");
+	assert!(
+		saved.as_ref().is_err_and(|why| why.contains("Replay & review is off")),
+		"{saved:?}"
+	);
+	assert!(!engine.guests_appear(), "with no slots to place them in");
+	let offered = |harness: &mut Harness<'_, Window>| {
+		harness.get_all_by_label("host").next().unwrap().click_secondary();
+		harness.run_steps(2);
+		let offered = harness.query_by_label("Put in a tile").is_some();
+		harness.key_press(egui::Key::Escape);
+		harness.run_steps(2);
+		offered
+	};
+	assert!(!offered(&mut harness), "no slot in the layer's menu");
+
+	enable(&mut harness, &[Mod::Layout]);
+	assert!(engine.guests_appear(), "as the settings ask");
+	assert!(offered(&mut harness));
+	drop(harness);
+	quit(&engine, &runtime);
+}
+
 /// Switching a mod off in Settings, Mods turns its feature off as one edit,
 /// which undo takes back, switching the mod on again with it: on a show
 /// using each, on a real engine. It draws no view.
@@ -1716,16 +1762,26 @@ fn a_mod_switched_off_turns_its_feature_off() {
 	let _entered = runtime.enter();
 	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
 	let read = |file: &str| std::fs::read_to_string(fixture.join("shots").join(file)).unwrap();
-	// Music the stream leaves out, heard only in the headphones.
+	// Sounds the stream leaves out: music heard only in the headphones, and
+	// a microphone sent nowhere.
 	let mix = read("mix.toml")
 		.replacen(
 			r#"sounds = ["caller", "guest", "mic", "music"]"#,
-			r#"sounds = ["caller", "guest", "mic"]"#,
+			r#"sounds = ["caller", "guest"]"#,
 			1,
 		)
-		.replacen(r#"sounds = ["caller"]"#, r#"sounds = ["caller", "music"]"#, 1);
+		.replacen(r#"sounds = ["caller"]"#, r#"sounds = ["caller", "music"]"#, 1)
+		.replacen(r#"sounds = ["guest", "mic"]"#, r#"sounds = ["guest"]"#, 1);
+	// One mix, which leaves the microphone out.
+	let one = read("mix.toml");
+	let one = one[..one.find("[[audio_scenes]]\nname = \"Headphones\"").unwrap()].replacen(
+		r#"sounds = ["caller", "guest", "mic", "music"]"#,
+		r#"sounds = ["caller", "guest", "music"]"#,
+		1,
+	);
 	let shows = [
 		(mix, Mod::Audio),
+		(one, Mod::Audio),
 		(read("slots.toml"), Mod::Layout),
 		(read("keep.toml"), Mod::Layout),
 		(read("dual.toml"), Mod::Formats),
@@ -1766,12 +1822,17 @@ fn a_mod_switched_off_turns_its_feature_off() {
 					panic!("one audio scene: {:?}", after.audio_scenes)
 				};
 				assert!(program.program && !program.recorded && program.scenes.is_empty());
-				let heard: Vec<&str> = before.heard(before.program_audio().unwrap()).into_iter().collect();
-				assert_eq!(heard, ["caller", "guest", "mic"]);
+				let heard: std::collections::BTreeSet<&str> = before.heard(before.program_audio().unwrap());
 				let all: Vec<&str> = program.sounds.iter().map(String::as_str).collect();
-				assert_eq!(all, ["caller", "guest", "mic", "music"], "every sound, the music too");
+				assert_eq!(
+					all,
+					["caller", "guest", "mic", "music"],
+					"every sound, those left out too"
+				);
 				let muted = |name: &str| after.audio.get(name).is_some_and(|audio| audio.muted);
-				assert!(muted("music"), "muted, as the stream left it out");
+				for left in all.iter().filter(|name| !heard.contains(*name)) {
+					assert!(muted(left), "{left} muted, as the stream left it out");
+				}
 				assert!(
 					heard
 						.iter()
