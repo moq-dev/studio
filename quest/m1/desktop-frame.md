@@ -24,7 +24,9 @@ what is public, and whether a crop is right, takes an alt-tab to the studio.
   also shows placement; shading without editing).
 - **Two levels:** ✅ **View** draws the frames and the dimming and lets every
   click through, so it can stay on while working; **Build** adds the
-  handles and the scope chip, and Escape leaves it. Each has a hotkey, a
+  handles and the scope chip, and Escape leaves it. Build takes the pointer
+  only over the handles, the frame's inside, and the chip; every other click
+  still reaches the app below. Each has a hotkey, a
   palette entry, and a button in the toolbar of a selected display or window
   layer (rejected: Build only, which cannot stay on while working; tying
   Build to the title bar's Editable/Locked toggle, which would put handles
@@ -58,9 +60,13 @@ what is public, and whether a crop is right, takes an alt-tab to the studio.
   pixels beside it is an invisible grab strip: the input region needs no
   paint, and the pointer changes shape over it.
 - **Covered:** recommended: the compositor reports, for each framed layer,
-  how opaque everything above it is, mapped back into the capture's pixels,
-  so a round camera or a half-transparent lower third dims exactly what it
-  hides. Compute it only while the overlay is on, and measure its frame time.
+  how much of the capture still reaches each output pixel, mapped back into
+  the capture's pixels, so a round camera dims exactly what it hides and a
+  half-transparent lower third dims nothing. Opacity alone is wrong: an
+  opaque layer in a blend mode such as Multiply leaves the capture visible.
+  Where a blend mode or filter makes the contribution hard to know, count
+  the pixel as on air, since dimming a live pixel is the error that leaks.
+  Compute it only while the overlay is on, and measure its frame time.
 - **Following a window:** a window's frame follows it as it moves, from
   moq-video's placement notices, and is hidden while the window is
   minimized or off screen.

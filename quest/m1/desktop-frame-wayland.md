@@ -13,12 +13,13 @@ is, and its toolbar button says so.
 Decided 2026-11-22 with the maintainer (/quest-plan).
 
 - **KDE and wlroots:** an overlay surface on wlr-layer-shell's overlay
-  layer, with an input region that covers only the handles in Build and
-  nothing in View. A picked monitor's place on the desktop is the position
+  layer, with an input region that is empty in View and, in Build, covers
+  everything Build takes: the handles, the frame's inside for moving the
+  picture, and the scope chip. A picked monitor's place on the desktop is the position
   the ScreenCast portal reports for that stream, which
   [the display placement pin](/quest/m1/pin-display-placement.md) carries.
 - **GNOME:** ✅ try an XWayland override-redirect window, which Mutter stacks
-  above other windows, with an X11 input shape for click-through. Ship it on
+  above other windows, with an X11 input shape matching the same region. Ship it on
   GNOME only if it holds on a real session at 100% and at a fractional
   scale, where X11 and Wayland coordinates can disagree, and over a game in
   full screen. Otherwise GNOME has no frame and the button says why
