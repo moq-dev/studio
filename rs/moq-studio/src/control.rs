@@ -824,13 +824,18 @@ impl State {
 		}
 	}
 
-	/// Start the next request, if one waits and none is in progress.
+	/// Start the next request, if one waits and none is in progress, dropping
+	/// any whose asker hung up while it waited: it must not act.
 	fn next(&mut self, ctx: &egui::Context) {
 		if self.op.is_some() {
 			return;
 		}
-		let Ok((request, reply)) = self.requests.try_recv() else {
-			return;
+		let (request, reply) = loop {
+			match self.requests.try_recv() {
+				Ok((_, reply)) if reply.is_closed() => continue,
+				Ok(asked) => break asked,
+				Err(_) => return,
+			}
 		};
 		let work = match &request {
 			Request::Snapshot {} => Work::Snapshot,
@@ -1669,6 +1674,25 @@ mod tests {
 				Give::Modifiers(egui::Modifiers::NONE),
 			] if *pos == egui::pos2(20.0, 0.0)
 		));
+	}
+
+	/// A request whose asker hung up while it waited in the queue is dropped
+	/// unstarted, freeing the queue, and the next is started.
+	#[test]
+	fn a_request_abandoned_in_the_queue_never_starts() {
+		let (send, requests) = mpsc::channel(1);
+		let mut state = State::new(requests, hotkeys::Keyboard::default());
+		let ctx = egui::Context::default();
+		let key = || Request::Key { combo: "F9".into() };
+		let (reply, answer) = oneshot::channel();
+		send.try_send((key(), reply)).unwrap();
+		drop(answer);
+		state.next(&ctx);
+		assert!(state.op.is_none());
+		let (reply, _answer) = oneshot::channel();
+		send.try_send((key(), reply)).unwrap();
+		state.next(&ctx);
+		assert!(matches!(state.op, Some(Op { work: Work::Input { .. }, .. })));
 	}
 
 	/// A press where another widget lies over the target fails, naming it,
