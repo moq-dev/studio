@@ -36,9 +36,35 @@ impl Pose {
 /// A border a step brighter than [`LINE`], for what the pointer is on.
 const LINE_HOVER: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x48);
 
+/// Name `response`'s widget `name` for a screen reader, over what it shows,
+/// such as a row's Hide named for the layer it hides.
+pub fn named(response: Response, name: &str) -> Response {
+	response
+		.ctx
+		.accesskit_node_builder(response.id, |node| node.set_label(name));
+	response
+}
+
+/// Make `ui` a group named by the widget `label`, as a form's row is: a
+/// screen reader says the name on entering it, and `--control` finds a
+/// control alone in it by that name.
+pub fn labelled_group(ui: &Ui, label: egui::Id) {
+	ui.ctx().accesskit_node_builder(ui.unique_id(), |node| {
+		node.set_role(egui::accesskit::Role::Group);
+		node.push_labelled_by(label.accesskit_id());
+	});
+}
+
 /// Show `name`, and `key` on a keycap, while the pointer is on `response`,
 /// enabled or not.
 pub fn tip(response: Response, name: &str, key: Option<&str>) -> Response {
+	// What a sighted person reads on hover names it for a screen reader too,
+	// unless it has a name of its own.
+	response.ctx.accesskit_node_builder(response.id, |node| {
+		if node.label().is_none_or(str::is_empty) {
+			node.set_label(name);
+		}
+	});
 	let open = egui::Tooltip::should_show_tooltip(&response, true);
 	tooltip(&response, open, name, key, None);
 	response
@@ -856,6 +882,10 @@ impl Widget for Number<'_> {
 		}
 		// The blank after the text grows, keeping the text at the field's start.
 		let response = child.add(drag.suffix(egui::Atom::grow()));
+		let response = match self.label {
+			Some(label) => named(response, label),
+			None => response,
+		};
 		let stroke = match (response.has_focus() || response.dragged(), response.hovered()) {
 			(true, _) => ACCENT,
 			(false, true) => LINE_HOVER,

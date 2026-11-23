@@ -4867,6 +4867,7 @@ dependencies = [
  "rustix 1.1.6",
  "same-file",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "toml",

@@ -213,6 +213,11 @@
                 alsa-lib
                 # moq-video's and moq-audio's `pipewire` features link libpipewire.
                 pipewire
+                # A real compositor for the window's frame times with no
+                # display (`WLR_BACKENDS=headless sway`), and its screenshots.
+                # `--control` drives the window there, so no input tool.
+                sway
+                grim
               ];
 
             shellHook = ''

@@ -975,14 +975,18 @@ impl Panels {
 		let overridden = stream.overridden();
 		let busy = self.saving.is_some() || self.picker.is_some();
 		let form = self.stream_form.get_or_insert_with(|| Form::new(&stream));
-		let token = |ui: &mut Ui, token: &mut String, forget: &mut bool| {
-			ui.add(
+		let token = |ui: &mut Ui, relay: &str, token: &mut String, forget: &mut bool| {
+			let field = ui.add(
 				egui::TextEdit::singleline(token)
 					.password(true)
 					.hint_text("Token: leave empty to keep the saved one")
 					.desired_width(f32::INFINITY),
 			);
-			ui.checkbox(forget, "Forget the saved token");
+			kit::named(field, &format!("{relay} token"));
+			kit::named(
+				ui.checkbox(forget, "Forget the saved token"),
+				&format!("Forget the saved {relay} token"),
+			);
 		};
 		// The relays flags set over the saved ones this run, which the token
 		// controls key to, and whether each flag's address carries a token of
@@ -997,14 +1001,15 @@ impl Panels {
 			// the relay in effect, which the flag may name, unless the flag's
 			// address carries its own.
 			field_row(ui, "Relay", "Where the program goes live, and its token.", None, |ui| {
-				address(
+				let field = address(
 					ui,
 					&mut form.relay,
 					"https://relay.example/anon",
 					relay_flag.map(|url| ("--connect", url)),
 				);
+				kit::named(field, "Relay address");
 				ui.add_enabled_ui(!overridden.token && !relay_carries, |ui| {
-					token(ui, &mut form.relay_token, &mut form.forget_relay_token);
+					token(ui, "Relay", &mut form.relay_token, &mut form.forget_relay_token);
 				});
 				if overridden.token {
 					super::settings::flag_note(ui, "--connect-token");
@@ -1019,14 +1024,20 @@ impl Panels {
 				 another upload of the whole stream.",
 				None,
 				|ui| {
-					address(
+					let field = address(
 						ui,
 						&mut form.failover,
 						"https://backup.example/anon",
 						failover_flag.map(|url| ("--failover", url)),
 					);
+					kit::named(field, "Failover relay address");
 					ui.add_enabled_ui(!failover_carries, |ui| {
-						token(ui, &mut form.failover_token, &mut form.forget_failover_token);
+						token(
+							ui,
+							"Failover relay",
+							&mut form.failover_token,
+							&mut form.forget_failover_token,
+						);
 					});
 					if failover_carries {
 						super::settings::cue_note(
@@ -1107,24 +1118,23 @@ impl Panels {
 }
 
 /// A relay's address, or the one `flag` sets over it for this run, without
-/// its token, locked with a note. The saved address stays in `text`, as a
-/// flag is never saved.
-fn address(ui: &mut Ui, text: &mut String, hint: &str, flag: Option<(&str, &url::Url)>) {
+/// its token, locked with a note; its field. The saved address stays in
+/// `text`, as a flag is never saved.
+fn address(ui: &mut Ui, text: &mut String, hint: &str, flag: Option<(&str, &url::Url)>) -> egui::Response {
 	match flag {
-		None => {
-			ui.add(
-				egui::TextEdit::singleline(text)
-					.hint_text(hint)
-					.desired_width(f32::INFINITY),
-			);
-		}
+		None => ui.add(
+			egui::TextEdit::singleline(text)
+				.hint_text(hint)
+				.desired_width(f32::INFINITY),
+		),
 		Some((flag, url)) => {
 			let shown = crate::stream::redacted(url);
-			ui.add_enabled(
+			let field = ui.add_enabled(
 				false,
 				egui::TextEdit::singleline(&mut shown.as_str()).desired_width(f32::INFINITY),
 			);
 			super::settings::flag_note(ui, flag);
+			field
 		}
 	}
 }

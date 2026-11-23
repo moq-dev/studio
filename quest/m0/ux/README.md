@@ -144,8 +144,8 @@ reference mock-ups live in [`mock/overhaul.html`](/quest/m0/ux/mock/overhaul.htm
 - **Agent controllability:** ✅ enable AccessKit in `eframe`, fix widget
   labels, add a live/headless Unix-socket control server and `moq-studio ctl`
   CLI, and ship headless `sway` + `grim` in `flake.nix` (rejected: leaving
-  agents on static `shots.rs` enums). See
-  [Agent control harness](/quest/m0/agent-control.md).
+  agents on static `shots.rs` enums). Done: `moq-studio --control` and
+  `moq-studio ctl` in the [README](/README.md#driving-the-studio).
 
 ![Unified Studio](/quest/m0/ux/mock/overhaul-studio.webp)
 

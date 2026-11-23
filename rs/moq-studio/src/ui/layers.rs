@@ -381,7 +381,7 @@ impl Row<'_> {
 				.small()
 				.lit(locked, kit::TEXT)
 				.note(Some("A locked layer stays put: clicks on the picture pass through it"));
-			if ui.put(lock, button).clicked() {
+			if kit::named(ui.put(lock, button), &format!("{name} {}", self.item.source)).clicked() {
 				asked = Some(LayerAction::Lock(!locked));
 			}
 		}
@@ -389,7 +389,8 @@ impl Row<'_> {
 			true => (Icon::Shown, "Hide"),
 			false => (Icon::Hidden, "Show"),
 		};
-		if ui.put(eye, IconButton::new(icon, name).small()).clicked() {
+		let eye = ui.put(eye, IconButton::new(icon, name).small());
+		if kit::named(eye, &format!("{name} {}", self.item.source)).clicked() {
 			asked = Some(LayerAction::Show(!self.item.visible));
 		}
 		(response, asked, opened)
@@ -600,10 +601,10 @@ impl Panels {
 					let gone = IconButton::new(Icon::Remove, "Remove for good")
 						.small()
 						.note(Some("Remove the source from the show; undo brings it back"));
-					if ui.add(gone).clicked() {
+					if kit::named(ui.add(gone), &format!("Remove {name} for good")).clicked() {
 						remove = Some(name.clone());
 					}
-					if source.has_video() && ui.button("Add").clicked() {
+					if source.has_video() && kit::named(ui.button("Add"), &format!("Add {name}")).clicked() {
 						add = Some(name.clone());
 					}
 				});
