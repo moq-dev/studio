@@ -32,6 +32,7 @@ use moq_net::Path;
 use super::{Invite, Room, TOKEN_TRACK};
 use crate::controls::{Action, Controls};
 use crate::engine::OnAir;
+use crate::mods::Mod;
 
 /// The prefix of each remote's desk, which only its token may read.
 pub(super) const DESK: &str = ".remote";
@@ -359,7 +360,7 @@ impl Board for Controls {
 		let collection = state.collection();
 		let mut scenes = Vec::new();
 		let mut sounds = Vec::new();
-		for action in Action::listed(&state) {
+		for action in Action::listed(&state, &self.mods) {
 			match &action {
 				Action::Scene(name) => scenes.push(Pad {
 					name: name.clone(),
@@ -400,6 +401,10 @@ impl Board for Controls {
 	}
 
 	fn press(self: Arc<Self>, action: &Action) -> Result<String, String> {
+		// Pairings outlast the mod, but drive nothing while it is off.
+		if !self.mods.on(Mod::Remote) {
+			return Err(format!("{} is off in the studio's Settings, Mods", Mod::Remote.name()));
+		}
 		let result = self.fire(action).map_err(|err| format!("{err:#}"));
 		// The status bar says what a remote did, as it does a hotkey.
 		self.report(action, result.clone());

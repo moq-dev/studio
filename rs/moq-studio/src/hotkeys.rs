@@ -279,6 +279,8 @@ pub struct Hotkeys {
 	suspended: Arc<AtomicBool>,
 	keyboard: Keyboard,
 	fire: mpsc::Sender<Binding>,
+	/// Which mods are on, whose actions' keys are heard only then.
+	controls: Arc<Controls>,
 }
 
 /// Where bound keys are heard.
@@ -340,8 +342,9 @@ impl Hotkeys {
 		let (fire, pressed) = mpsc::channel::<Binding>();
 		let bound: Arc<Mutex<Bindings>> = Arc::default();
 		let suspended = Arc::new(AtomicBool::new(false));
-		let (held_off, reading) = (suspended.clone(), bound.clone());
+		let (held_off, reading, firing) = (suspended.clone(), bound.clone(), controls.clone());
 		std::thread::spawn(move || {
+			let controls = firing;
 			for key in pressed {
 				// A key the desktop holds on Wayland still fires while the panel
 				// waits for one, and the panel never sees it.
@@ -383,6 +386,7 @@ impl Hotkeys {
 			suspended,
 			keyboard: window.keyboard,
 			fire,
+			controls,
 		};
 		hotkeys.set(bindings);
 		hotkeys
@@ -453,9 +457,16 @@ impl Hotkeys {
 	/// frame too, so the keys follow a layout change.
 	pub fn hear(&mut self) {
 		let bindings = self.bindings();
+		// A key bound to an action of a mod switched off is left to other
+		// programs until it is back on.
+		let mods = &self.controls.mods;
 		let heard: Vec<Binding> = match self.suspended.load(Ordering::Relaxed) {
 			true => Vec::new(),
-			false => bindings.values().cloned().collect(),
+			false => bindings
+				.iter()
+				.filter(|(action, _)| action.needs().is_none_or(|needs| mods.on(needs)))
+				.map(|(_, key)| key.clone())
+				.collect(),
 		};
 		// A rename moves no key, so the platform is left alone.
 		let moved =

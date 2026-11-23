@@ -4456,7 +4456,7 @@ mod tests {
 				Some("`red` has no sound")
 			);
 			assert!(refused(Action::Mute("nobody".into())).is_some());
-			assert!(Action::listed(&state).contains(&Action::Scene("Portrait".into())));
+			assert!(Action::listed(&state, &Default::default()).contains(&Action::Scene("Portrait".into())));
 		}
 		for (action, why) in [
 			(crate::controls::Action::Cut, "nothing is cued"),
@@ -4478,7 +4478,7 @@ mod tests {
 			assert!(portrait.refused.is_some(), "a pad says why it cannot go on");
 			assert_eq!(desk.program.as_deref(), Some("Guest"));
 			assert_eq!(desk.take_refused.as_deref(), Some("nothing is cued"));
-			let mutes: Vec<String> = Action::listed(&engine.state.lock().unwrap())
+			let mutes: Vec<String> = Action::listed(&engine.state.lock().unwrap(), &Default::default())
 				.into_iter()
 				.filter_map(|action| match action {
 					Action::Mute(name) => Some(name),

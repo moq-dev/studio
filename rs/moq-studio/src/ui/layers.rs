@@ -695,7 +695,9 @@ impl Panels {
 			.iter()
 			.map(|scene| scene.name.clone())
 			.collect();
-		let Some(source) = self.add.ui(ui, &scenes) else { return };
+		let Some(source) = self.add.ui(ui, &scenes, &self.controls.mods) else {
+			return;
+		};
 		let name = self.add.name.trim().to_string();
 		let layer = self.scene(&state).ok();
 		let result = add(&mut state, layer, name, source, None);

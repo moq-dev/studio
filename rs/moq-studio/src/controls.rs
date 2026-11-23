@@ -14,6 +14,7 @@ use moq_scene::Source;
 
 use crate::engine::{Engine, OnAir, State};
 use crate::markers::Markers;
+use crate::mods::{Mod, Mods};
 use crate::replay;
 use crate::stream::{Stream, Switched};
 
@@ -181,7 +182,7 @@ impl Action {
 	/// Every action `state`'s show has, by group, in the order the Hotkeys
 	/// pane and the palette list them: the table's, a scene's for each scene,
 	/// and a mute for each sound.
-	pub fn listed(state: &State) -> Vec<Self> {
+	pub fn listed(state: &State, mods: &Mods) -> Vec<Self> {
 		let scenes = state
 			.collection()
 			.scenes
@@ -192,7 +193,11 @@ impl Action {
 			.iter()
 			.filter(|(name, _)| sounds(state, name))
 			.map(|(name, _)| Self::Mute(name.to_string()));
-		let mut listed: Vec<Self> = FIXED.iter().map(|fixed| fixed.action.clone()).collect();
+		let mut listed: Vec<Self> = FIXED
+			.iter()
+			.map(|fixed| fixed.action.clone())
+			.filter(|action| action.needs().is_none_or(|needs| mods.on(needs)))
+			.collect();
 		listed.extend(scenes.chain(sounds));
 		// Stable, so each group keeps its order.
 		listed.sort_by_key(|action| Group::ALL.iter().position(|group| *group == action.group()));
@@ -204,6 +209,15 @@ impl Action {
 			.iter()
 			.find(|fixed| fixed.action == *self)
 			.expect("every action without a name is in the table")
+	}
+
+	/// The mod it belongs to, which must be on for it to be listed or run.
+	pub fn needs(&self) -> Option<Mod> {
+		match self {
+			Self::Cut | Self::Transition | Self::StudioMode => Some(Mod::Studio),
+			Self::Replay | Self::SaveClip | Self::Marker => Some(Mod::Review),
+			Self::Scene(_) | Self::Record | Self::Panic | Self::GoLive | Self::EndStream | Self::Mute(_) => None,
+		}
 	}
 
 	/// What it is for.
@@ -349,9 +363,11 @@ pub struct Controls {
 	pub markers: Markers,
 	/// Whether the next recording gives each source a file of its own too.
 	pub record_sources: AtomicBool,
-	/// Whether Studio mode is on: a scene's pad or key cues it rather than
-	/// taking it.
+	/// Whether Studio mode is switched on, which cues only while its mod is
+	/// on too.
 	studio: AtomicBool,
+	/// The mods switched on, which hotkeys and phones check before they act.
+	pub mods: Mods,
 	/// How the last action a hotkey fired went, until the status bar takes it.
 	fired: Arc<Mutex<Option<Result<String, String>>>>,
 }
@@ -402,18 +418,31 @@ impl Controls {
 			markers,
 			record_sources: AtomicBool::new(false),
 			studio: AtomicBool::new(false),
+			mods: Mods::default(),
 			fired: Arc::default(),
 		}
 	}
 
-	/// Whether Studio mode is on.
+	/// Whether Studio mode is on: a scene's pad or key cues it rather than
+	/// taking it. Never while its mod is off.
 	pub fn studio(&self) -> bool {
-		self.studio.load(Ordering::Relaxed)
+		self.studio.load(Ordering::Relaxed) && self.mods.on(Mod::Studio)
 	}
 
 	/// Turn Studio mode on or off.
 	pub fn set_studio(&self, on: bool) {
 		self.studio.store(on, Ordering::Relaxed);
+	}
+
+	/// Why `action` cannot run while its mod is off, if it is. TAKE and AUTO
+	/// still run, unlisted, as they take only what is cued, which with Studio
+	/// mode off is a scene opened off air, taken live from its banner.
+	fn modded(&self, action: &Action) -> Option<String> {
+		if matches!(action, Action::Cut | Action::Transition) {
+			return None;
+		}
+		let needs = action.needs().filter(|needs| !self.mods.on(*needs))?;
+		Some(format!("{} is off in Settings, Mods", needs.name()))
 	}
 
 	/// Do what a scene's key does to the scene called `name`, under `state`
@@ -427,6 +456,9 @@ impl Controls {
 
 	/// Do `action`, saying what it did.
 	pub fn fire(self: &Arc<Self>, action: &Action) -> anyhow::Result<String> {
+		if let Some(why) = self.modded(action) {
+			anyhow::bail!(why);
+		}
 		match action {
 			Action::Cut => {
 				let scene = self.engine.state.lock().unwrap().take_cued(None)?;
@@ -479,6 +511,9 @@ impl Controls {
 	/// Why `action` cannot run now, under `state` locked by the caller, if it
 	/// cannot, as the palette shows it beside the action.
 	pub fn refused(&self, state: &State, action: &Action) -> Option<String> {
+		if let Some(why) = self.modded(action) {
+			return Some(why);
+		}
 		let collection = state.collection();
 		match action {
 			Action::GoLive if self.engine.on_air() != OnAir::Off => Some("the program is already on air".into()),

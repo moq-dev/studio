@@ -19,6 +19,7 @@ use egui_kittest::kittest::{NodeT, Queryable};
 use moq_scene::Source;
 use moq_scene::source::Status;
 
+use crate::mods::Mod;
 use crate::ui::{Inspect, MixView, Page, Setting, Side};
 use crate::{App, Window, autosave, engine, fx, hotkeys, library, setup, show, stream};
 
@@ -157,6 +158,8 @@ enum View {
 	/// The command palette, open by its key over LIVE with a few keys bound,
 	/// with what is typed into it.
 	Palette(&'static str),
+	/// Settings, Mods, each switched on, as a power user has it.
+	ModsOn,
 }
 
 /// The studio on the dual-format views' show, at the mock-ups' size, turned
@@ -173,6 +176,23 @@ fn dual(page: Page, format: moq_scene::Format) -> Open {
 		size: SIZE,
 		show: "dual.toml",
 		relay: false,
+	}
+}
+
+impl View {
+	/// The mods a view switches on, beyond those its show uses.
+	fn mods(&self) -> Vec<Mod> {
+		match self {
+			Self::Mix(..) | Self::MixMenu => vec![Mod::Audio],
+			Self::Review { .. } => vec![Mod::Review],
+			Self::Cued(_) | Self::Dual { cued: Some(_), .. } => vec![Mod::Studio],
+			Self::Multiview { live: false, .. } => vec![Mod::Multiview],
+			Self::Multiview { live: true, .. } => vec![Mod::Multiview, Mod::Studio],
+			Self::Setting(Setting::Remote) | Self::Paired => vec![Mod::Remote],
+			Self::Graph => vec![Mod::Graph],
+			Self::ModsOn => Mod::ALL.to_vec(),
+			_ => Vec::new(),
+		}
 	}
 }
 
@@ -453,12 +473,15 @@ views! {
 	/// when its link expires, and every phone paired, one removed. Live, as
 	/// each link carries a token of its own.
 	settings_remote_paired: Live, studio(View::Paired);
-	/// Settings, Advanced: published scenes and sources, the virtual camera,
-	/// and the scene graph.
-	settings_advanced: Still, studio(View::Setting(Setting::Advanced));
-	/// Settings, Advanced with a source published: how viewers may treat it,
-	/// as a sound alone, with no layer to inspect, sets it.
-	settings_advanced_published: Still, Open::Studio { view: View::Setting(Setting::Advanced), size: SIZE, show: "published.toml", relay: false };
+	/// Settings, Mods: each feature most streamers never use, off.
+	settings_mods: Still, studio(View::Setting(Setting::Mods));
+	/// Settings, Mods with each switched on: Published scenes keeps its
+	/// scenes and sources here, and Scene graph opens.
+	settings_mods_on: Still, studio(View::ModsOn);
+	/// Settings, Mods on a show with a source published, which switched
+	/// Published scenes on as it opened: how viewers may treat it, as a
+	/// sound alone, with no layer to inspect, sets it.
+	settings_mods_published: Still, Open::Studio { view: View::Setting(Setting::Mods), size: SIZE, show: "published.toml", relay: false };
 	/// The scene graph, in a window of its own.
 	graph: Still, studio(View::Graph);
 	/// The command palette as its key opens it: every action, each with its
@@ -730,6 +753,7 @@ fn a_marker_is_named_where_it_is_typed() {
 	let app = start(launch(&gpu), stream(None), &runtime);
 	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
 	harness.step();
+	enable(&mut harness, &[Mod::Review]);
 	let engine = started.get().expect("the studio started").clone();
 	runtime
 		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
@@ -810,6 +834,7 @@ fn a_marker_is_clipped_around() {
 	let app = start(launch(&gpu), stream(Some(&relay)), &runtime);
 	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
 	harness.step();
+	enable(&mut harness, &[Mod::Review]);
 	let engine = started.get().expect("the studio started").clone();
 	runtime
 		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
@@ -957,7 +982,13 @@ fn the_palette_finds_and_runs_anything() {
 	run(&mut harness, "unmute mic");
 	assert!(!muted("mic"), "and unmuted it");
 
-	// TAKE with nothing cued says why, and Enter leaves it open.
+	// TAKE with nothing cued says why, and Enter leaves it open, with
+	// Studio mode's mod on, as it is not listed otherwise.
+	run(&mut harness, "take the cued");
+	assert!(harness.query_by_label("Take the cued scene").is_none(), "unlisted");
+	harness.key_press(egui::Key::Escape);
+	harness.run_steps(2);
+	enable(&mut harness, &[Mod::Studio]);
 	run(&mut harness, "take the cued");
 	let take = harness.get_by_label("Take the cued scene");
 	assert!(take.accesskit_node().is_disabled(), "it cannot run");
@@ -967,7 +998,8 @@ fn the_palette_finds_and_runs_anything() {
 	harness.run_steps(2);
 	assert!(harness.query_by_role(Role::TextInput).is_none(), "Escape closes it");
 
-	// A setting under a disclosure opens it.
+	// A setting under a disclosure opens it, its mod on.
+	enable(&mut harness, &[Mod::Published]);
 	run(&mut harness, "scene sizes");
 	assert!(
 		harness.query_by_label("Give a scene its own size").is_some(),
@@ -1012,18 +1044,42 @@ fn the_palette_finds_and_runs_anything() {
 		"only the missing source is no such sound"
 	);
 
-	// Each setting the palette finds by name is a row of its pane.
-	for setting in Setting::ALL {
-		let App::Studio(studio) = &mut harness.state_mut().app else {
-			unreachable!("the studio is open")
-		};
-		studio.open(setting);
-		harness.run_steps(2);
-		for (name, _) in setting.rows() {
-			assert!(
-				harness.query_by_label(name).is_some(),
-				"{setting:?} has no row called `{name}`"
+	// Each setting the palette finds by name is a row of its pane while its
+	// mod is on, and absent while off, as is a pane whose mod is off.
+	for all in [false, true] {
+		if all {
+			enable(&mut harness, &Mod::ALL);
+		}
+		for setting in Setting::ALL {
+			let App::Studio(studio) = &mut harness.state_mut().app else {
+				unreachable!("the studio is open")
+			};
+			studio.open(setting);
+			harness.run_steps(2);
+			let shown = all || setting.needs().is_none();
+			assert_eq!(
+				harness.query_all_by_label(setting.name()).next().is_some(),
+				shown,
+				"{setting:?} listed: {all}"
 			);
+			if !shown {
+				continue;
+			}
+			let rows = setting
+				.rows()
+				.iter()
+				.map(|(name, _, needs)| (*name, all || needs.is_none()));
+			let mods = Mod::ALL
+				.iter()
+				.filter(|_| setting == Setting::Mods)
+				.map(|which| (which.name(), true));
+			for (name, on) in rows.chain(mods) {
+				assert_eq!(
+					harness.query_all_by_label(name).next().is_some(),
+					on,
+					"{setting:?}'s row `{name}` shown, with every mod on: {all}"
+				);
+			}
 		}
 	}
 
@@ -1563,6 +1619,7 @@ fn studio_mode_cues_and_takes() {
 		Default::default(),
 	);
 	harness.step();
+	enable(&mut harness, &[Mod::Studio]);
 	let engine = started.get().expect("the studio started").clone();
 	runtime
 		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
@@ -1643,6 +1700,7 @@ fn the_multiview_takes_cues_and_picks() {
 		Default::default(),
 	);
 	harness.step();
+	enable(&mut harness, &[Mod::Multiview, Mod::Studio]);
 	let engine = started.get().expect("the studio started").clone();
 	runtime
 		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
@@ -1721,6 +1779,7 @@ fn mix_sends_and_mutes() {
 		Default::default(),
 	);
 	harness.step();
+	enable(&mut harness, &[Mod::Audio]);
 	let App::Studio(studio) = &mut harness.state_mut().app else {
 		panic!("the studio starts on its first frame")
 	};
@@ -1885,6 +1944,9 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		panic!("the studio starts on its first frame")
 	};
 	let controls = studio.controls();
+	for which in view.mods() {
+		studio.switch(which, true);
+	}
 	match view {
 		View::Page(page) => studio.turn(*page),
 		View::Mix(view, opened) => studio.mix(*view, *opened),
@@ -1893,6 +1955,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		View::KeepClear { .. } => studio.build(Side::Layers, Inspect::Layer, Some(0)),
 		View::Menu | View::Published => studio.build(Side::Layers, Inspect::Layer, Some(1)),
 		View::Setting(setting) | View::OnAirSetting(setting) => studio.open(*setting),
+		View::ModsOn => studio.open(Setting::Mods),
 		View::Restart | View::CustomCanvas => studio.open(Setting::Show),
 		View::GuestsFailed => studio.open(Setting::Guests),
 		View::Paired => studio.open(Setting::Remote),
@@ -2355,6 +2418,17 @@ fn drag(harness: &mut Harness<'_, Window>, engine: &engine::Engine, drop: Drop) 
 			.block_on(kio::clock::timeout(SETTLE, settle(harness, engine)))
 			.expect("the dropped logo's picture settles");
 	}
+}
+
+/// Switch on `mods`, as their switches in Settings, Mods would.
+fn enable(harness: &mut Harness<'_, Window>, mods: &[Mod]) {
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		panic!("the studio is open")
+	};
+	for which in mods {
+		studio.switch(*which, true);
+	}
+	harness.run_steps(2);
 }
 
 /// Mute the first sound, open the health dot's popover, and rest the pointer
