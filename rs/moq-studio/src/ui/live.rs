@@ -1081,16 +1081,6 @@ impl Panels {
 				// A token it could not put back is in use, so a check made
 				// with the one before is stale.
 				self.tokens += u64::from(retokened);
-				// A token sent for an address edited since never goes to the
-				// new one; the form as sent is not tried again until it changes.
-				let stream = self.controls.stream.lock().unwrap().clone();
-				if by_form
-					&& from == Setting::Destinations
-					&& let Some(form) = &mut self.stream_form
-					&& !form.sent(&stream)
-				{
-					form.settle_tokens(false);
-				}
 				self.saved = Some((from, err));
 				return;
 			}
@@ -1129,7 +1119,6 @@ impl Panels {
 			let own = by_form && from == Setting::Destinations;
 			match (own && form.sent(&before)) || (!own && !form.edited(before.saved())) {
 				true => self.stream_form = Some(Form::new(&saved)),
-				false if own => form.settle_tokens(true),
 				false => form.tried = None,
 			}
 		}
@@ -1203,6 +1192,7 @@ impl Panels {
 		let stream = self.controls.stream.lock().unwrap().clone();
 		let overridden = stream.overridden();
 		let form = self.stream_form.get_or_insert_with(|| Form::new(&stream));
+		let addresses = [form.relay.clone(), form.failover.clone()];
 		let mut typing = false;
 		let token = |ui: &mut Ui, relay: &str, token: &mut String, forget: &mut bool, typing: &mut bool| {
 			let field = ui.add(
@@ -1352,6 +1342,9 @@ impl Panels {
 					.font(kit::ui(11.5))
 					.color(kit::DIM),
 			);
+		}
+		if let Some(form) = &mut self.stream_form {
+			form.readdressed([&addresses[0], &addresses[1]]);
 		}
 		self.typing |= typing;
 		self.publish_unsaved(&stream);
@@ -1597,9 +1590,6 @@ pub(super) struct Form {
 	/// The last save it started, which is not tried again until the form
 	/// changes, so one refused waits for the next edit.
 	tried: Option<(Saved, Vec<Token>)>,
-	/// Each relay's address, token field, and forget box as that save sent
-	/// them.
-	sent_tokens: [(String, String, bool); 2],
 }
 
 pub(super) use crate::stream::Token;
@@ -1619,7 +1609,6 @@ impl Form {
 			broadcast: saved.broadcast.clone().unwrap_or_default(),
 			on_demand: saved.on_demand,
 			tried: None,
-			sent_tokens: Default::default(),
 		}
 	}
 
@@ -1664,25 +1653,15 @@ impl Form {
 			return None;
 		}
 		self.tried = Some(next.clone());
-		self.sent_tokens = [
-			(self.relay.clone(), self.relay_token.clone(), self.forget_relay_token),
-			(
-				self.failover.clone(),
-				self.failover_token.clone(),
-				self.forget_failover_token,
-			),
-		];
 		Some(next)
 	}
 
-	/// Let go of the tokens its save sent, once it `landed`, or once their
-	/// relay's address was edited during a save that failed, since they went
-	/// with the address sent, never one edited in since; and let the rest
-	/// save.
-	fn settle_tokens(&mut self, landed: bool) {
-		self.tried = None;
-		let sent = std::mem::take(&mut self.sent_tokens);
-		for ((address, field, forget), (sent_address, sent, sent_forget)) in [
+	/// Clear the token typed, or the forget box ticked, for a relay whose
+	/// address was edited away from `before` (the relay's, then the
+	/// failover's), so a token only ever goes to the address it was typed
+	/// beside, even one a save in flight still sends.
+	fn readdressed(&mut self, before: [&str; 2]) {
+		for ((address, token, forget), before) in [
 			(&self.relay, &mut self.relay_token, &mut self.forget_relay_token),
 			(
 				&self.failover,
@@ -1691,16 +1670,10 @@ impl Form {
 			),
 		]
 		.into_iter()
-		.zip(sent)
+		.zip(before)
 		{
-			if !landed && *address == sent_address {
-				continue;
-			}
-			// Each only while still as sent; one edited since saves next.
-			if *field == sent {
-				field.clear();
-			}
-			if *forget && sent_forget {
+			if address != before {
+				token.clear();
 				*forget = false;
 			}
 		}
@@ -1848,10 +1821,10 @@ mod tests {
 		);
 	}
 
-	/// A token typed for one relay never goes to the address edited in while
-	/// it saved, however the save and the edit race.
+	/// A token typed for one relay never goes to an address edited in
+	/// after it, even while a save still sends it to the first.
 	#[test]
-	fn a_token_stays_with_the_relay_it_was_sent_for() {
+	fn a_token_stays_with_the_relay_it_was_typed_for() {
 		let dir = tempfile::tempdir().unwrap();
 		let stream = Stream::load(
 			&dir.path().join("show.toml"),
@@ -1863,52 +1836,33 @@ mod tests {
 		.unwrap();
 		let mut form = Form::new(&stream);
 		form.relay = "https://a.example/".into();
+		form.readdressed(["", ""]);
 		form.relay_token = "secret".into();
-		let (_, tokens) = form.next(&stream).expect("the edit saves");
-		assert_eq!(tokens, [("https://a.example/".parse().unwrap(), Some("secret".into()))]);
-
-		form.relay = "https://b.example/".into();
-		// The same token typed for the failover while it saved is a new edit.
 		form.failover = "https://c.example/".into();
-		form.failover_token = "secret".into();
-		form.settle_tokens(true);
-		assert!(form.relay_token.is_empty(), "the token went with the relay sent");
-		assert_eq!(form.failover_token, "secret", "and the failover's is kept");
-
-		// Nor with the forget box ticked during the save, which still forgets.
-		let mut ticked = Form::new(&stream);
-		ticked.relay = "https://a.example/".into();
-		ticked.relay_token = "secret".into();
-		ticked.next(&stream).expect("the edit saves");
-		ticked.relay = "https://b.example/".into();
-		ticked.forget_relay_token = true;
-		ticked.settle_tokens(true);
-		assert!(ticked.relay_token.is_empty(), "the token went with the relay sent");
-		let (_, tokens) = ticked.next(&stream).expect("the new address saves");
+		form.readdressed(["https://a.example/", ""]);
+		form.failover_token = "other".into();
+		form.forget_relay_token = true;
+		form.readdressed(["https://a.example/", "https://c.example/"]);
+		let (_, tokens) = form.next(&stream).expect("the edit saves");
 		assert_eq!(
 			tokens,
-			[("https://b.example/".parse().unwrap(), None)],
-			"forgetting B's"
+			[
+				("https://a.example/".parse().unwrap(), Some("secret".into())),
+				("https://c.example/".parse().unwrap(), Some("other".into())),
+			]
 		);
 
-		// Nor after a save that failed, once its address was edited, while
-		// the other relay's token, its address untouched, waits as typed.
-		let mut failed = Form::new(&stream);
-		failed.relay = "https://a.example/".into();
-		failed.relay_token = "secret".into();
-		failed.failover = "https://c.example/".into();
-		failed.failover_token = "other".into();
-		failed.next(&stream).expect("the edit saves");
-		failed.relay = "https://b.example/".into();
-		failed.settle_tokens(false);
-		assert!(failed.relay_token.is_empty(), "A's token never goes to B");
-		assert_eq!(failed.failover_token, "other", "C's stays to save again");
-		let (saved, tokens) = form.next(&stream).expect("the new addresses save");
+		// While that save runs, or after it fails, the relay moves to B.
+		form.relay = "https://b.example/".into();
+		form.readdressed(["https://a.example/", "https://c.example/"]);
+		assert!(form.relay_token.is_empty(), "A's token never goes to B");
+		assert!(!form.forget_relay_token, "nor does forgetting A's");
+		let (saved, tokens) = form.next(&stream).expect("the new address saves");
 		assert_eq!(saved.relay.unwrap().as_str(), "https://b.example/");
 		assert_eq!(
 			tokens,
-			[("https://c.example/".parse().unwrap(), Some("secret".into()))],
-			"with only the failover's token"
+			[("https://c.example/".parse().unwrap(), Some("other".into()))],
+			"with only the failover's token, its address untouched"
 		);
 	}
 }

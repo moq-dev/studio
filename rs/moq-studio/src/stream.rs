@@ -219,14 +219,22 @@ impl Stream {
 			self.write(&saved)
 		})();
 		if let Err(err) = result {
-			for (url, token) in kept.iter().rev() {
-				if let Err(restore) = self.credentials.set(url, token.as_deref()) {
-					return Err(err.context(format!(
-						"and the token kept before for {url} could not be put back: {restore:#}"
-					)));
-				}
-			}
-			return Err(err);
+			// Every one is tried, so one the store refuses leaves the rest put back.
+			let lost: Vec<String> = kept
+				.iter()
+				.rev()
+				.filter_map(|(url, token)| {
+					let restore = self.credentials.set(url, token.as_deref()).err()?;
+					Some(format!("{url} ({restore:#})"))
+				})
+				.collect();
+			return Err(match lost.is_empty() {
+				true => err,
+				false => err.context(format!(
+					"and the tokens kept before could not be put back for {}",
+					lost.join(", ")
+				)),
+			});
 		}
 		self.saved = saved;
 		Ok(())

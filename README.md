@@ -462,7 +462,8 @@ Settings, Destinations holds where the show streams, saved in
 `show.stream.toml` beside `show.toml` rather than in it, since a scene file is
 meant to be shared:
 
-- **Relay**, the one the stream goes to, and its **Token**.
+- **Relay**, the one the stream goes to, and its **Token**. A token goes only
+  to the address it was typed beside: editing the address clears it.
 - **Broadcast name**, the path on the relays, `studio` until set.
 - Under **Advanced**, which says what it holds while closed:
   - **Failover relay** and its token: a second relay the same broadcast goes
