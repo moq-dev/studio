@@ -213,7 +213,10 @@ impl Stream {
 		let mut kept = Vec::new();
 		let result = (|| {
 			for (url, token) in &tokens {
-				kept.push((url, self.credentials.get(url)?));
+				// A store that writes but cannot read still saves; only a
+				// failure then cannot put back what it held.
+				let before = self.credentials.get(url).map_err(|err| format!("{err:#}"));
+				kept.push((url, before));
 				self.credentials.set(url, token.as_deref())?;
 			}
 			self.write(&saved)
@@ -223,8 +226,11 @@ impl Stream {
 			let lost: Vec<String> = kept
 				.iter()
 				.rev()
-				.filter_map(|(url, token)| {
-					let restore = self.credentials.set(url, token.as_deref()).err()?;
+				.filter_map(|(url, before)| {
+					let restore = match before {
+						Ok(token) => self.credentials.set(url, token.as_deref()).err()?,
+						Err(unread) => anyhow::anyhow!("it could not be read: {unread}"),
+					};
 					Some(format!("{url} ({restore:#})"))
 				})
 				.collect();

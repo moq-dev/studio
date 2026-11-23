@@ -461,6 +461,19 @@ impl Panels {
 			self.going = None;
 			return;
 		}
+		// An edit that will not save until it changes, such as an address
+		// that is not one, or one refused, stops the wait with why, rather
+		// than wait for an edit that may never come.
+		let stream = self.controls.stream.lock().unwrap().clone();
+		let stuck = self.saving.is_none() && self.stream_form.as_ref().is_some_and(|form| form.stuck(&stream));
+		if going.armed && stuck {
+			let why = self.controls.unsaved.lock().unwrap().clone();
+			*self.controls.refused.lock().unwrap() = why;
+			if let Some(going) = &mut self.going {
+				going.armed = false;
+			}
+			return;
+		}
 		let unsaved = self.controls.unsaved.lock().unwrap().is_some();
 		if !going.armed || unsaved || self.saving.is_some() || self.controls.going() {
 			return;
@@ -514,6 +527,11 @@ impl Panels {
 	/// the clock on air, which asks before it ends the stream.
 	pub(super) fn live_control(&mut self, ui: &mut Ui) {
 		let on_air = self.engine.on_air();
+		// Asked for from the palette, it holds only while live, so it never
+		// opens on its own at a later stream.
+		if on_air.live().is_none() {
+			self.confirm_end = false;
+		}
 		let font = kit::display_bold(17.0);
 		let clock_font = kit::mono(14.0);
 		let painter = ui.painter().clone();
@@ -1167,6 +1185,47 @@ impl Panels {
 		}
 	}
 
+	/// Save the Destinations and Guests edits still held, even one being
+	/// typed, and wait for every save, on the way out of the show. Fails with
+	/// why when an edit could not be saved.
+	pub(super) fn flush_settings(&mut self) -> anyhow::Result<()> {
+		// Nothing draws once the show closes; a save only asks it for a frame.
+		let ctx = egui::Context::default();
+		loop {
+			if let Some(saving) = &mut self.saving {
+				saving.task.wait();
+			}
+			self.follow_stream_save();
+			self.typing = false;
+			self.autosave_settings(&ctx);
+			if self.saving.is_none() {
+				break;
+			}
+		}
+		let stream = self.controls.stream.lock().unwrap().clone();
+		let held = [
+			self.stream_form
+				.as_ref()
+				.is_some_and(|form| form.edited(stream.saved()))
+				.then_some("Settings, Destinations"),
+			self.guests_form
+				.as_ref()
+				.is_some_and(|form| form.edited(stream.saved()))
+				.then_some("Settings, Guests"),
+		];
+		match held.into_iter().flatten().next() {
+			None => Ok(()),
+			Some(pane) => {
+				let why = self
+					.saved
+					.as_ref()
+					.map(|(_, note)| note.as_str())
+					.unwrap_or("it cannot be saved");
+				anyhow::bail!("{pane} has a change not saved: {why}")
+			}
+		}
+	}
+
 	/// Tell a go-live, from a hotkey too, whether a Destinations edit or
 	/// save is still to land, which it waits for. Called as the pane is
 	/// edited too, so a key pressed before the next frame sees the edit.
@@ -1642,6 +1701,18 @@ impl Form {
 		tokens || self.saved(saved).is_ok_and(|form| form != *saved) || self.saved(saved).is_err()
 	}
 
+	/// Whether the form holds a change that will not save until it is edited
+	/// again: one that cannot be, or one tried as it is and refused.
+	fn stuck(&self, stream: &Stream) -> bool {
+		if !self.edited(stream.saved()) {
+			return false;
+		}
+		match self.saved(stream.saved()) {
+			Err(_) => true,
+			Ok(saved) => self.tried.as_ref() == Some(&(saved, self.tokens(stream))),
+		}
+	}
+
 	/// What to save over `stream`'s settings, if the form holds a change
 	/// that can be saved and was not tried as it is.
 	fn next(&mut self, stream: &Stream) -> Option<(Saved, Vec<Token>)> {
@@ -1819,6 +1890,31 @@ mod tests {
 			!form.sent(&before),
 			"an edit made during the save is kept, back to what it was too"
 		);
+	}
+
+	/// An edit that cannot save, or one refused as it is, is stuck until it
+	/// changes; one not tried yet is not.
+	#[test]
+	fn an_edit_that_cannot_save_is_stuck() {
+		let dir = tempfile::tempdir().unwrap();
+		let stream = Stream::load(
+			&dir.path().join("show.toml"),
+			Default::default(),
+			Default::default(),
+			Default::default(),
+			crate::stream::Credentials::memory(),
+		)
+		.unwrap();
+		let mut form = Form::new(&stream);
+		assert!(!form.stuck(&stream), "nothing to save");
+		form.relay = "not a url".into();
+		assert!(form.stuck(&stream), "an address that is not one");
+		form.relay = "https://relay.example/".into();
+		assert!(!form.stuck(&stream), "an edit not tried yet");
+		form.next(&stream).expect("the edit saves");
+		assert!(form.stuck(&stream), "tried as it is, and not landed");
+		form.broadcast = "other".into();
+		assert!(!form.stuck(&stream), "until it changes");
 	}
 
 	/// A token typed for one relay never goes to an address edited in

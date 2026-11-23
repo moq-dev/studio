@@ -483,6 +483,12 @@ impl Studio {
 		self.panels.controls.reserve_close()
 	}
 
+	/// Save the settings edits still held, even one being typed, on the way
+	/// out of the show, since Settings saves them on its own.
+	pub fn flush_settings(&mut self) -> anyhow::Result<()> {
+		self.panels.flush_settings()
+	}
+
 	/// Give the show back after a close that left it open.
 	pub fn release_close(&self) {
 		self.panels.controls.release_close();
@@ -700,6 +706,9 @@ impl Studio {
 		});
 		if left {
 			self.panels.end_binding();
+			// No field has the keyboard while the window does not, so an
+			// edit left in one saves rather than wait for the window's return.
+			self.panels.typing = false;
 		}
 		// Before each frame, and while the window is hidden, so the keys
 		// follow a keyboard layout change while a game has focus.

@@ -1438,6 +1438,42 @@ fn settings_change_the_show_and_move_the_guests() {
 	quit(&engine, &runtime);
 }
 
+/// A Destinations edit still being typed, which waits to save until no field
+/// has the keyboard, saves on the way out of the show, as Settings has no
+/// Save button. It draws no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn an_edit_being_typed_saves_on_the_way_out() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	std::fs::copy(fixture.join("shots/show.toml"), "show.toml").unwrap();
+	let app = start(launch(&gpu), stream(None), &runtime);
+	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
+	harness.step();
+	let engine = started.get().expect("the studio started");
+	harness.get_by_label("Settings").click();
+	harness.run_steps(2);
+	harness.get_by_label("Destinations").click();
+	harness.run_steps(2);
+	harness.get_by_label("Relay address").focus();
+	harness.run_steps(2);
+	harness
+		.get_by_label("Relay address")
+		.type_text("https://flushed.example/");
+	harness.run_steps(4);
+	let saved = || std::fs::read_to_string("show.stream.toml").unwrap_or_default();
+	assert!(!saved().contains("flushed"), "not while it is typed");
+
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		panic!("the studio starts on its first frame")
+	};
+	studio.flush_settings().expect("the edit saves");
+	assert!(saved().contains("flushed.example"), "saved: {}", saved());
+	drop(harness);
+	quit(&engine, &runtime);
+}
+
 /// Close show, in the show's menu, waits for the stream to end, and then ends
 /// the show as quitting does and returns to the library, where the show is
 /// listed with its picture and opens again, a new engine in place of the old,

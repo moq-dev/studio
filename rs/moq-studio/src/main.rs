@@ -350,6 +350,12 @@ impl eframe::App for Window {
 
 	fn save(&mut self, storage: &mut dyn eframe::Storage) {
 		if let App::Studio(studio) = &mut self.app {
+			// On the way out, a settings edit still being typed saves too.
+			if self.closed.load(Ordering::Relaxed)
+				&& let Err(err) = studio.flush_settings()
+			{
+				tracing::error!(error = format!("{err:#}"), "cannot save the settings on quit");
+			}
 			studio.save(storage);
 		}
 		self.follow_air();
@@ -495,9 +501,11 @@ impl Window {
 		let engine = studio.engine().clone();
 		// Claimed against a go-live first, which the engine being off air
 		// alone would not refuse while it reads tokens or checks encoders.
-		let ready = studio
-			.reserve_close()
-			.and_then(|()| engine.save().inspect_err(|_| studio.release_close()));
+		let ready = studio.flush_settings().and_then(|()| {
+			studio
+				.reserve_close()
+				.and_then(|()| engine.save().inspect_err(|_| studio.release_close()))
+		});
 		if let Err(err) = ready {
 			studio.refuse(err.context("cannot close the show"));
 			self.app = App::Studio(studio);
@@ -613,6 +621,9 @@ impl winit::application::ApplicationHandler<eframe::UserEvent> for Events<'_> {
 	}
 
 	fn exiting(&mut self, event_loop: &ActiveEventLoop) {
+		// Quitting from the macOS app menu asks no window to close first, and
+		// the window's last save flushes the settings only once it is closing.
+		self.closed.store(true, Ordering::Relaxed);
 		self.eframe.exiting(event_loop);
 		// Here rather than once the loop returns: quitting from the macOS app
 		// menu or Dock, or logging out, ends the process as this returns.
