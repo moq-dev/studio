@@ -234,12 +234,13 @@ impl Autosave {
 			None => (Collection::new(), None),
 		};
 		// A history beside no scene file is a removed show's, which a new one
-		// starts without, however it reads.
-		let kept = disk.scene.as_ref().and(disk.history.as_deref());
+		// starts without, however it reads, and writes over with its own.
+		let orphan = disk.scene.is_none() && disk.history.is_some();
+		let kept = disk.history.as_deref().filter(|_| !orphan);
 		let loaded = load_history(&history, kept, collection)?;
 		let written = Written {
 			collection: written,
-			history: Some(loaded.history.to_toml()?),
+			history: (!orphan).then(|| loaded.history.to_toml()).transpose()?,
 			disk,
 			rewrite: Rewrite::default(),
 		};
@@ -1296,10 +1297,13 @@ mod tests {
 		drop(autosave);
 		std::fs::remove_file(&path).unwrap();
 		std::fs::write(&history, b"\xff not even text").unwrap();
-		let (autosave, loaded) = Autosave::open(path).unwrap();
+		let (autosave, loaded) = Autosave::open(path.clone()).unwrap();
 		assert!(!autosave.exists());
 		assert_eq!(loaded.collection, Collection::new());
-		let (mut history, mut collection) = (loaded.history, loaded.collection);
+		let (mut history, mut collection) = (loaded.history, loaded.collection.clone());
 		assert!(history.undo(&mut collection).unwrap().is_none(), "nothing to undo");
+		// Saving the new show replaces it, so the show opens again.
+		autosave.save(&Doc::new(loaded.collection)).unwrap();
+		Autosave::open(path).expect("the new show opens again");
 	}
 }
