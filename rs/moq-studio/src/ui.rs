@@ -432,9 +432,11 @@ impl Studio {
 		self.panels.desk = mixer::Desk::new(view, opened);
 	}
 
-	/// List `listing` as this machine's devices, as a refresh would.
+	/// List `listing` as this machine's devices, in place of any listing
+	/// under way, as a refresh would.
 	pub(crate) fn seed_devices(&mut self, listing: Listing) {
 		self.panels.devices.listing = Some(listing);
+		self.panels.devices.pending = None;
 	}
 
 	/// Open Settings at `setting`, as the gear would.

@@ -722,8 +722,8 @@ mod tests {
 	}
 
 	/// A scene file another program creates after the studio found none, such
-	/// as a second studio finishing setup first, is an outside edit, not
-	/// replaced by the collection setup proposed.
+	/// as a second studio creating the same new show first, is an outside
+	/// edit, not replaced by the new show's collection.
 	#[test]
 	fn leaves_a_file_created_since_it_found_none() {
 		let dir = tempfile::tempdir().unwrap();

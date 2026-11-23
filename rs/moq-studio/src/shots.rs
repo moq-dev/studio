@@ -1282,6 +1282,8 @@ fn the_show_menu_switches_shows() {
 
 	// Each switch ends the open show, and opens the next.
 	let switch = |harness: &mut Harness<'_, Window>, closed: Arc<engine::Engine>| {
+		// Outside the runtime, which ending the show blocks on.
+		harness.run_steps(2);
 		runtime
 			.block_on(kio::clock::timeout(SETTLE, async {
 				while started.get().is_none_or(|open| Arc::ptr_eq(&open, &closed)) {
@@ -1293,10 +1295,11 @@ fn the_show_menu_switches_shows() {
 		harness.step();
 		assert!(matches!(harness.state().app, App::Studio(_)));
 		// Nothing of the show outlives it: not its tasks, its threads, its hotkeys.
-		let closed = Arc::downgrade(&closed);
+		let weak = Arc::downgrade(&closed);
+		drop(closed);
 		runtime
 			.block_on(kio::clock::timeout(SETTLE, async {
-				while closed.upgrade().is_some() {
+				while weak.upgrade().is_some() {
 					kio::clock::sleep(Duration::from_millis(20)).await;
 				}
 			}))

@@ -526,8 +526,8 @@ impl Hotkeys {
 }
 
 impl Drop for Hotkeys {
-	/// Leave the window's keyboard as the library, which has no show to fire
-	/// on, finds it: its keys act on nothing.
+	/// Leave the window's keyboard as the next show, while it opens, finds
+	/// it: its keys act on nothing.
 	fn drop(&mut self) {
 		self.keyboard.take(Taking::Nothing);
 	}

@@ -37,11 +37,12 @@ cd studio
 cargo run --release -p moq-studio --features capture,openh264
 ```
 
-- With no arguments, the window opens on [your shows](#your-shows). Name a
-  show to open it at once: `moq-studio show.toml`. A show is its scene file;
-  if it does not exist yet, [guided setup](#first-launch) proposes one and
-  creates it. Changes are saved to it a second after you stop editing, with
-  no save step.
+- With no arguments, the window reopens the last show, or on
+  [first launch](#first-launch) creates one in the app's storage, and opens
+  straight into the studio. Name a show to open it instead:
+  `moq-studio show.toml`. A show is its scene file, created as a new show if
+  it does not exist yet. Changes are saved to it a second after you stop
+  editing, with no save step.
 - Nothing is published until you [go live](#going-live) from the window, and
   you end the stream from it too. Until then the studio composes, previews,
   and records, and broadcast sources and guests play through the show's
@@ -51,7 +52,8 @@ cargo run --release -p moq-studio --features capture,openh264
   for a single run, over the show's own, and is never saved: `--connect` (the
   relay) with `--connect-token`, `--failover`, `--broadcast`, `--on-demand`,
   `--recordings <dir>`, where recordings and clips go (by default beside the
-  show), and the guest flags.
+  show, or your Videos folder for a show in the app's storage), and the guest
+  flags.
 - A failover relay publishes the same broadcast to a second relay under the
   same broadcast instance, so a viewer linked to both resumes mid-group from
   it when the first fails. Both relays must speak the one `--connect-version`,
@@ -93,60 +95,55 @@ cargo run --release -p moq-studio --features capture,openh264
 - `moq-studio --watch <url>` opens no scene file and plays a studio broadcast
   instead, as a viewer sees it; see [Watching](#watching).
 
-## Your shows
-
-Opened with no show, or after **Close show**, the window lists the shows you
-have opened, the latest first, each with the last picture of its program, its
-shape, and when it was last live and for how long. Click one to pick up where it ended; nothing goes
-live until you say so. **New show** asks where to keep a new show's file and
-starts [guided setup](#first-launch) there, and **Open a show file** opens
-any other. Right-click a show to forget it; one whose file has moved says so.
-The list and the pictures are yours, kept with the app's settings rather than
-beside any show, and a show's picture is saved as the window closes or the
-show does.
-
 ## First launch
 
-Opening a show whose scene file does not exist yet starts guided setup instead
-of the studio. It runs three checks, and a check that fails shows its reason:
+The first launch opens no dialog and runs no setup screen: the window opens on
+a new show, **My Show**, already saved in the app's storage
+(`~/.local/share/moq-studio/shows` on Linux,
+`~/Library/Application Support/moq-studio/shows` on macOS,
+`%APPDATA%\moq-studio\data\shows` on Windows), with one empty scene. While it
+opens, the studio picks its canvas: 1080p at 60 fps when a hardware encoder
+keeps up with it over a short burst of moving frames (three quarters of each
+frame's period at most, leaving the rest for sources and the compositor), and
+1080p at 30 fps otherwise. If the system has a microphone, the show hears it
+as **Mic** in the sound. Its recordings go to your Videos folder. Change the
+canvas in Settings, Show, and where recordings go in Settings, Recording.
 
-- **Devices:** the cameras, displays, and audio inputs this machine has.
-- **Encoders:** for each canvas setup can propose (1080p and 720p at 60 or 30
-  fps, and 360p at 30 fps), the encoder the program would pick, whether it
-  reads the GPU, the bitrate it encodes at, and how long a frame takes over a
-  short burst of moving frames. An encoder keeps up when a frame takes at most
-  three quarters of the frame period, leaving the rest for sources and the
-  compositor.
-- **Uplink:** with a relay, from `--connect` or the show's stream settings,
-  setup publishes a probe at the broadcast's path for about six seconds and
-  subscribes to it through the relay, so the relay pulls it. The congestion
-  controller's send-rate estimate is the measurement. With a failover relay,
-  only the first is measured, since only its link is probed toward the
-  stream's rate. A connection that reports no estimate, such as WebSocket,
-  fails the check.
+While the scene has no layers, the picture shows the quick start: one click
+on **Camera** (naming the camera it adds), **Screen**, **Media** (an image or
+video file), or **Web / Text** (a web address, or a text to edit) adds the
+scene's first layer, and the picture becomes the scene. Anything dropped or
+pasted on the picture lands there too (see
+[Dropping and pasting](#dropping-and-pasting)).
 
-Setup then proposes a scene named Main and a canvas, explaining each choice.
-The scene has the first display filling the canvas, the first camera in the
-bottom-right corner over it (or filling the canvas alone), and the first audio
-input. Swap any of them for another device or leave it out. The canvas is the
-largest one whose encoder keeps up and whose video and audio fit in two thirds
-of the measured uplink, the most the [Health](#health) window grades healthy. Without a
-measurement, it is the default 1080p at 30 fps. If no encoder keeps up, it is
-the canvas closest to keeping up.
+The go-live sheet times the encoder again before you go live, and offers a
+smaller canvas if it cannot keep up (see [Going live](#going-live)).
 
-Nothing is written until you start the studio, so quitting during setup runs
-it again on the next launch. **Start with this scene** and **Start with an
-empty scene** both create the scene file at once, the second with the chosen
-canvas and no sources. The proposed scene is the first edit in the history, so
-undoing it leaves that empty scene.
+## Your shows
 
-Setup writes an ordinary scene file. Change its sources and scenes on the
-BUILD page, its canvas in Settings, and where it streams in Settings, Stream.
-The health dot shows how the uplink holds up once you are live.
+Every later launch reopens the last show you had open. If it is gone, the
+studio creates a new one, and if it cannot be opened, the studio creates a new
+one and says why. The show's name in the title bar opens its menu, which
+lists the other shows you have opened, the latest first, with when each was
+last live under the pointer, and:
 
-Your shows and setup sit in the desktop's own window frame, and the studio
-then draws its own (see [The window](#the-window)); closing the show brings the
-desktop's back. On macOS the system's title bar stays until the next launch.
+- **New show** creates another show in the app's storage, named **My Show 2**
+  and so on, and opens it.
+- **Open show file…** opens any scene file, where it is.
+- **Rename show…** renames the show's scene file, its history, and its stream
+  settings, and opens it again. Its recordings keep their names.
+- **Export show copy…** saves the scenes as a scene file of its own, to share
+  or keep under version control. Each file a source reads is named from the
+  root, so the copy reads the same files wherever it is kept; its history and
+  stream settings stay with the show.
+
+Each but the export ends the open show as quitting does (saving it, finishing
+a recording, and letting go of its relays, sources, and keys) before opening
+the next, so they are dimmed while the stream is on air or going on or off:
+end the stream first. A show that cannot be saved, because its scene file
+changed outside the studio, stays open and says so, and one that cannot open
+brings back the show you left, saying why. The list is yours, kept with the
+app's settings rather than beside any show.
 
 ## The window
 
@@ -165,14 +162,10 @@ The **title bar** is the window's own: drag it to move the window,
 double-click it to maximize, and drag the window's edges to resize it. On
 macOS the system's buttons and edges stay. It holds, from the left:
 
-- The show's name. Its menu has the scene file's path, **Reload the scene
-  file**, **Copy the selected layer**, **Paste**, **Open the multiview** (see
-  [Multiview](#multiview)), and **Close show**, which
-  ends the show as quitting does (saving it, finishing a recording, and
-  letting go of its relays, sources, and keys) and returns the window to [your
-  shows](#your-shows). It is dimmed while the stream is on air or going on or
-  off: end the stream first. A close that cannot save the show, because the
-  scene file changed outside the studio, stays open and says so.
+- The show's name. Its menu has the scene file's path, [your
+  shows](#your-shows) with New show, Open show file, Rename, and Export a
+  copy, **Reload the scene file**, **Copy the selected layer**, **Paste**, and
+  **Open the multiview** (see [Multiview](#multiview)).
 - Undo and redo, each naming under the pointer the edit it would step, and
   the history (the clock), which lists every edit, newest first: pick one to
   undo or redo back to just after it.
@@ -420,9 +413,12 @@ window, so there the desktop picks where it opens.
   relay carries both broadcasts.
 - **Checks**, filled in as they finish: whether each camera has a picture,
   whether a microphone's level moves, whether the encoder keeps up with the
-  canvas (timed as [setup](#first-launch) times it), and whether the
-  connection to the first relay switched on carries the program (measured as
-  setup measures it; published scenes and sources share what is left). A show
+  canvas (timed over a short burst of moving frames, keeping up when a frame
+  takes at most three quarters of its period), and whether the connection to
+  the first relay switched on carries the program (the congestion
+  controller's send-rate estimate while a probe publishes at the broadcast's
+  path for about six seconds, which a connection without one, such as
+  WebSocket, fails; published scenes and sources share what is left). A show
   going out in both formats times both encoders at once, each its own
   picture, so the encoder check passes when each keeps up beside the other, and
   needs two videos' bitrate. If a second encoder cannot open, such as a GPU
@@ -1071,8 +1067,8 @@ source opens the desktop's screen-sharing picker (xdg-desktop-portal) the
 first time it opens, and shows whichever display or window you choose there.
 It is the way to share a screen or window on a Wayland desktop, where the
 studio cannot list them itself. BUILD's Add, among this machine's devices,
-and guided setup offer them as **Picked display** and **Picked window**, first
-on a Wayland desktop, and Add's form for any source as **Display (system
+and the quick start's Screen offer them as **Picked display** and **Picked
+window**, first on a Wayland desktop, and Add's form for any source as **Display (system
 picker)** and **Window (system picker)**.
 
 The scene file records only that the source is picked, not what you picked,
@@ -1988,9 +1984,8 @@ published scene, or a recording:
   relay, the record dot pulses, and each cut or transition, from a pad, the
   panic key, or a hotkey, bursts on the frame. Studio mode's TAKE is polished
   metal that ripples under the pointer.
-- Settings, Hotkeys shows each bound key on a dark plastic keycap, the title
-  bar, the strip, and BUILD's columns have a faint grain, and first launch
-  draws its screen over a soft gradient.
+- Settings, Hotkeys shows each bound key on a dark plastic keycap, and the
+  title bar, the strip, and BUILD's columns have a faint grain.
 - The health dot pulses amber while the worst problem is degraded, and
   flickers red with electricity while it is unhealthy.
 
@@ -2224,8 +2219,7 @@ just shots   # Render views of the window to PNG in target/shots
 
 `just shots studio audio` renders only the views named, each a test in
 `rs/moq-studio/src/shots.rs` that draws one state of the window, the studio
-views on `rs/moq-studio/shots/show.toml` and `setup` as a first launch shows
-it. They draw on Mesa's software Vulkan driver, so need no display or GPU, and
+views on `rs/moq-studio/shots/show.toml` and `first_launch` on a new show. They draw on Mesa's software Vulkan driver, so need no display or GPU, and
 run on Linux only, where that driver builds. `SHOTS_DIR` picks another output
 directory; a full run clears old PNGs only from the default one.
 

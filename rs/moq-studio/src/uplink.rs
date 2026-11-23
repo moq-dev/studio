@@ -1,10 +1,10 @@
-//! Measure the uplink to the relay, for guided setup.
+//! Measure the uplink to the relay, for the go-live sheet's check.
 //!
 //! The bandwidth grant alone measures nothing: a congestion controller only
 //! learns what the path carries while something is sent. So this publishes a
 //! short probe broadcast, subscribes to it back through the relay so the relay
-//! pulls it, reserves the most setup could propose so the transport probes up
-//! to that, and reads the congestion controller's send-rate estimate.
+//! pulls it, reserves the most the stream could need so the transport probes
+//! up to that, and reads the congestion controller's send-rate estimate.
 
 use std::time::Duration;
 

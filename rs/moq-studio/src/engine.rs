@@ -1169,8 +1169,7 @@ pub(crate) const AUDIO_PERIOD: Duration = Duration::from_millis(10);
 /// Each relay session bounds its own drain at about a second.
 const CLOSE: Duration = Duration::from_secs(3);
 
-/// Everything starting the engine takes besides the scene file, which guided
-/// setup holds back until the creator has settled on a collection.
+/// Everything starting the engine takes besides the scene file.
 #[derive(Clone)]
 pub struct Launch {
 	pub gpu: Gpu,
