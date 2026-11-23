@@ -74,9 +74,9 @@ Decided 2026-11-09 (maintainer, /quest-audit):
 
 Changed 2026-11-09 (maintainer, /quest-plan): going live and stopping, as
 actions and as hotkeys, are
-the go-live sheet and live control the studio has, which land them for MoQ
-relays. This quest adds its destinations to that sheet rather than
-building a second way to start a stream.
+the Go live popover and live control the studio has, which land them for MoQ
+relays. This quest adds its destinations to that popover and to Settings,
+Destinations rather than building a second way to start a stream.
 
 Proposed 2026-11-17 by
 [Landscape and portrait at once](https://github.com/moq-dev/studio/pull/200),

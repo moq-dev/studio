@@ -19,6 +19,9 @@ use crate::guests;
 /// The broadcast path a show without one goes live at.
 pub const BROADCAST: &str = "studio";
 
+/// A token to keep for a relay, or `None` to forget its saved one.
+pub type Token = (Url, Option<String>);
+
 /// What `<show>.stream.toml` holds.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -96,7 +99,8 @@ pub struct Overridden {
 	pub guest_expiry: bool,
 }
 
-/// Which relays a stream goes to, as the go-live sheet switches them.
+/// Which of a stream's relays to dial: both to go live, and each on its own to
+/// follow them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Switched {
 	pub relay: bool,
@@ -191,24 +195,64 @@ impl Stream {
 		}
 	}
 
-	/// The credential store the tokens are kept in.
-	pub fn credentials(&self) -> &Credentials {
-		&self.credentials
-	}
-
-	/// Write `saved` to the stream file, all at once, so a crash leaves the
-	/// old file or the new one. A token in either relay's address moves to
-	/// the credential store first, so the file never holds one.
+	/// Keep `tokens` and write `saved` to the stream file, all at once, so a
+	/// crash leaves the old file or the new one. A token in either relay's
+	/// address moves to the credential store first, so the file never holds
+	/// one. A failure puts back every token it replaced, so a save never
+	/// half lands.
 	///
 	/// Blocks on the credential store: call it off the window's thread, and
 	/// outside an async task.
-	pub fn save(&mut self, mut saved: Saved) -> anyhow::Result<()> {
+	pub fn save(&mut self, mut saved: Saved, tokens: &[Token]) -> anyhow::Result<()> {
+		let mut tokens = tokens.to_vec();
 		for url in [&mut saved.relay, &mut saved.failover].into_iter().flatten() {
 			if let Some(token) = take_token(url) {
-				self.credentials.set(url, Some(&token))?;
+				tokens.push((url.clone(), Some(token)));
 			}
 		}
-		let text = toml::to_string(&saved).context("cannot write the stream settings")?;
+		let mut kept = Vec::new();
+		let result = (|| {
+			for (url, token) in &tokens {
+				// A store that writes but cannot read still saves; only a
+				// failure then cannot put back what it held.
+				let before = self.credentials.get(url).map_err(|err| format!("{err:#}"));
+				kept.push((url, before));
+				self.credentials.set(url, token.as_deref())?;
+			}
+			self.write(&saved)
+		})();
+		if let Err(err) = result {
+			// Every one is tried, so one the store refuses leaves the rest put back.
+			let lost: Vec<String> = kept
+				.iter()
+				.rev()
+				.filter_map(|(url, before)| {
+					let restore = match before {
+						Ok(token) => self.credentials.set(url, token.as_deref()).err()?,
+						Err(unread) => anyhow::anyhow!("it could not be read: {unread}"),
+					};
+					// Never the query, which could carry a token.
+					let mut shown = (*url).clone();
+					shown.set_query(None);
+					shown.set_fragment(None);
+					Some(format!("{shown} ({restore:#})"))
+				})
+				.collect();
+			return Err(match lost.is_empty() {
+				true => err,
+				false => err.context(format!(
+					"and the tokens kept before could not be put back for {}",
+					lost.join(", ")
+				)),
+			});
+		}
+		self.saved = saved;
+		Ok(())
+	}
+
+	/// Write `saved` to the stream file, all at once.
+	fn write(&self, saved: &Saved) -> anyhow::Result<()> {
+		let text = toml::to_string(saved).context("cannot write the stream settings")?;
 		let dir = self
 			.path
 			.parent()
@@ -220,7 +264,6 @@ impl Stream {
 			.with_context(|| format!("writing {}", self.path.display()))?;
 		file.persist(&self.path)
 			.with_context(|| format!("writing {}", self.path.display()))?;
-		self.saved = saved;
 		Ok(())
 	}
 
@@ -385,10 +428,7 @@ impl Stream {
 			self.check_failover()?;
 		}
 		let relays = self.relays(switched)?;
-		anyhow::ensure!(
-			!relays.is_empty(),
-			"no relay is switched on; set one in Settings, Stream"
-		);
+		anyhow::ensure!(!relays.is_empty(), "no relay is set; set one in Settings, Destinations");
 		Ok(Destination {
 			relays,
 			broadcast: self.broadcast().to_string(),
@@ -561,6 +601,29 @@ mod tests {
 		.unwrap()
 	}
 
+	/// A save that cannot write its file leaves every token as it was, the
+	/// ones given and the one an address carries alike.
+	#[test]
+	fn a_failed_save_puts_back_the_tokens() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut stream = stream(dir.path(), Flags::default());
+		let a: Url = "https://a.example/".parse().unwrap();
+		let b: Url = "https://b.example/".parse().unwrap();
+		stream.credentials.set(&a, Some("old")).unwrap();
+		// No file can be written where a directory stands.
+		std::fs::create_dir(&stream.path).unwrap();
+		let saved = Saved {
+			relay: Some("https://b.example/?jwt=new".parse().unwrap()),
+			..Default::default()
+		};
+		stream
+			.save(saved, &[(a.clone(), Some("newer".into()))])
+			.expect_err("the file cannot be written");
+		assert_eq!(stream.credentials.get(&a).unwrap().as_deref(), Some("old"));
+		assert_eq!(stream.credentials.get(&b).unwrap(), None);
+		assert_eq!(stream.saved, Saved::default(), "and the settings are as they were");
+	}
+
 	/// The settings round-trip through the file beside the scene file, which
 	/// a token in a relay's address never reaches: the credential store takes
 	/// it, and the address keeps the rest of its query.
@@ -577,7 +640,7 @@ mod tests {
 			guest_expiry: Some(Duration::from_secs(3600)),
 			..Default::default()
 		};
-		first.save(saved).unwrap();
+		first.save(saved, &[]).unwrap();
 		let text = std::fs::read_to_string(first.path()).unwrap();
 		assert!(!text.contains("secret"), "the token reached the file: {text}");
 
@@ -586,7 +649,7 @@ mod tests {
 			Flags::default(),
 			Default::default(),
 			Default::default(),
-			first.credentials().clone(),
+			first.credentials.clone(),
 		)
 		.unwrap();
 		let relay = second.relay().unwrap().clone();
@@ -597,7 +660,7 @@ mod tests {
 			second.guests().guest_expiry.map(Duration::from),
 			Some(Duration::from_secs(3600))
 		);
-		assert_eq!(second.credentials().get(&relay).unwrap().as_deref(), Some("secret"));
+		assert_eq!(second.credentials.get(&relay).unwrap().as_deref(), Some("secret"));
 	}
 
 	/// A flag wins over the saved setting for its run, and saving another
@@ -610,7 +673,7 @@ mod tests {
 			broadcast: Some("saved".into()),
 			..Default::default()
 		};
-		stream(dir.path(), Flags::default()).save(saved.clone()).unwrap();
+		stream(dir.path(), Flags::default()).save(saved.clone(), &[]).unwrap();
 		let flags = Flags {
 			relay: Some("https://flag.example/".parse().unwrap()),
 			on_demand: true,
@@ -624,10 +687,13 @@ mod tests {
 		assert!(overridden.relay && overridden.on_demand && !overridden.broadcast);
 
 		flagged
-			.save(Saved {
-				broadcast: Some("renamed".into()),
-				..flagged.saved().clone()
-			})
+			.save(
+				Saved {
+					broadcast: Some("renamed".into()),
+					..flagged.saved().clone()
+				},
+				&[],
+			)
 			.unwrap();
 		let reread = stream(dir.path(), Flags::default());
 		assert_eq!(reread.relay().unwrap().as_str(), "https://saved.example/");
@@ -773,7 +839,7 @@ mod tests {
 			stream.dials(Switched::default()).unwrap(),
 			[(relay.clone(), Vec::new())]
 		);
-		let refused = stream.credentials().set(&relay, Some("secret")).unwrap_err();
+		let refused = stream.credentials.set(&relay, Some("secret")).unwrap_err();
 		assert!(format!("{refused:#}").contains("no Secret Service"), "{refused:#}");
 	}
 
@@ -797,10 +863,13 @@ mod tests {
 		)
 		.unwrap();
 		stream
-			.save(Saved {
-				relay: Some(relay.clone()),
-				..Default::default()
-			})
+			.save(
+				Saved {
+					relay: Some(relay.clone()),
+					..Default::default()
+				},
+				&[],
+			)
 			.unwrap();
 		let only = Switched {
 			relay: true,
@@ -815,11 +884,14 @@ mod tests {
 		// pair is refused, whichever is switched on.
 		let mut paired = stream.clone();
 		paired
-			.save(Saved {
-				relay: Some(relay),
-				failover: Some("https://b.example/".parse().unwrap()),
-				..Default::default()
-			})
+			.save(
+				Saved {
+					relay: Some(relay),
+					failover: Some("https://b.example/".parse().unwrap()),
+					..Default::default()
+				},
+				&[],
+			)
 			.unwrap();
 		let refused = paired.relays(only).err().expect("a fixed port with a failover");
 		assert!(format!("{refused:#}").contains("--connect-bind"), "{refused:#}");

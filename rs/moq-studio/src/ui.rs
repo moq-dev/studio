@@ -117,7 +117,7 @@ pub(crate) enum Setting {
 	#[default]
 	Show,
 	/// Where the show streams: its relays, their tokens, and the broadcast.
-	Stream,
+	Destinations,
 	/// The folder, and what a recording holds.
 	Recording,
 	Hotkeys,
@@ -132,7 +132,7 @@ pub(crate) enum Setting {
 impl Setting {
 	pub(crate) const ALL: [Self; 7] = [
 		Self::Show,
-		Self::Stream,
+		Self::Destinations,
 		Self::Recording,
 		Self::Hotkeys,
 		Self::Guests,
@@ -151,7 +151,7 @@ impl Setting {
 	pub(crate) fn name(self) -> &'static str {
 		match self {
 			Self::Show => "Show",
-			Self::Stream => "Stream",
+			Self::Destinations => "Destinations",
 			Self::Recording => "Recording",
 			Self::Hotkeys => "Hotkeys",
 			Self::Guests => "Guests",
@@ -163,7 +163,7 @@ impl Setting {
 	fn icon(self) -> Icon {
 		match self {
 			Self::Show => Icon::Media,
-			Self::Stream => Icon::Broadcast,
+			Self::Destinations => Icon::Broadcast,
 			Self::Recording => Icon::Record,
 			Self::Hotkeys => Icon::Hotkeys,
 			Self::Guests => Icon::Guests,
@@ -184,7 +184,7 @@ impl Setting {
 				("Frame rate", &["fps"], None),
 				(settings::SCENE_SIZES, &[], Some(Mod::Published)),
 			],
-			Self::Stream => &[
+			Self::Destinations => &[
 				("Relay", &["token", "server", "url"], None),
 				("Failover relay", &["backup"], None),
 				("Broadcast name", &["path"], None),
@@ -213,7 +213,7 @@ impl Setting {
 	fn words(self) -> &'static [&'static str] {
 		match self {
 			Self::Show => &["canvas"],
-			Self::Stream => &["relay", "token"],
+			Self::Destinations => &["relay", "token", "stream"],
 			Self::Recording => &["folder", "record"],
 			Self::Hotkeys => &["keys", "shortcuts", "bind"],
 			Self::Guests => &["invite", "join", "room"],
@@ -226,10 +226,15 @@ impl Setting {
 	fn lead(self) -> &'static str {
 		match self {
 			Self::Show => "The shape of the picture. It is saved in the show file.",
-			Self::Stream => "Where the stream goes. Tokens stay in the system's credential store, never in a file.",
+			Self::Destinations => {
+				"Where the stream goes, saved as you change it. Tokens stay in the system's credential store, never in a \
+				 file."
+			}
 			Self::Recording => "What the record button saves, from any page.",
 			Self::Hotkeys => "Kept on this computer, not in the show.",
-			Self::Guests => "People who join from a web page, appearing as sources. Kept beside the show.",
+			Self::Guests => {
+				"People who join from a web page, appearing as sources. Saved as you change it, beside the show."
+			}
 			Self::Remote => {
 				"Phones that drive the show from a page their code opens: the scenes, TAKE, and the mutes. Kept beside the room key."
 			}
@@ -328,9 +333,13 @@ impl Studio {
 			side: Side::default(),
 			inspect: Inspect::default(),
 			going: None,
-			ending: None,
+			confirm_end: false,
+			ready: None,
+			tokens: 0,
+			dialing: None,
 			stream_form: None,
 			guests_form: None,
+			typing: false,
 			saving: None,
 			saved: None,
 			picker: None,
@@ -474,6 +483,12 @@ impl Studio {
 		self.panels.controls.reserve_close()
 	}
 
+	/// Save the settings edits still held, even one being typed, on the way
+	/// out of the show, since Settings saves them on its own.
+	pub fn flush_settings(&mut self) -> anyhow::Result<()> {
+		self.panels.flush_settings()
+	}
+
 	/// Give the show back after a close that left it open.
 	pub fn release_close(&self) {
 		self.panels.controls.release_close();
@@ -542,14 +557,18 @@ impl Studio {
 		self.panels.details = true;
 	}
 
-	/// Open the go-live sheet, as GO LIVE would.
-	pub(crate) fn going(&mut self) {
-		self.panels.open_going();
+	/// Scroll Settings to the row called `name` and light it, opening what
+	/// holds it, as the palette does for a setting it found.
+	#[cfg(test)]
+	pub(crate) fn seek(&self, ctx: &egui::Context, name: &str) {
+		settings::seek(ctx, name);
 	}
 
-	/// Whether the go-live sheet's checks have finished, or it is closed.
-	pub(crate) fn checked(&self) -> bool {
-		self.panels.going.as_ref().is_none_or(live::Going::done)
+	/// Press GO LIVE, as its button would, with the check it waits on
+	/// started over, as a change to what it checks does.
+	pub(crate) fn going(&mut self) {
+		self.panels.ready = None;
+		self.panels.press_go_live();
 	}
 
 	/// What the buttons and hotkeys do, such as going live.
@@ -687,6 +706,9 @@ impl Studio {
 		});
 		if left {
 			self.panels.end_binding();
+			// No field has the keyboard while the window does not, so an
+			// edit left in one saves rather than wait for the window's return.
+			self.panels.typing = false;
 		}
 		// Before each frame, and while the window is hidden, so the keys
 		// follow a keyboard layout change while a game has focus.
@@ -694,6 +716,8 @@ impl Studio {
 			hotkeys.hear();
 		}
 		self.panels.follow_stream_save();
+		self.panels.autosave_settings(ctx);
+		self.panels.follow_ready();
 	}
 
 	/// Draw the window, with `fx` drawing its effects.
@@ -843,14 +867,26 @@ struct Panels {
 	/// The BUILD page's left column and inspector tabs.
 	side: Side,
 	inspect: Inspect,
-	/// The go-live sheet, while open.
+	/// The Go live popover, while open.
 	going: Option<live::Going>,
-	/// Since when END STREAM has been held down.
-	ending: Option<kio::clock::Instant>,
-	/// The Stream pane's form, while it has edits not yet saved.
+	/// Whether the clock's End stream popover opens on the next frame, as the
+	/// palette asks.
+	confirm_end: bool,
+	/// The check going live waits on, kept fresh in the background off air.
+	ready: Option<live::Ready>,
+	/// How many saves set a relay's token, which a check made before is
+	/// stale after.
+	tokens: u64,
+	/// Since when the preferred relay has been on its first dial, which the
+	/// check waits out a while.
+	dialing: Option<kio::clock::Instant>,
+	/// The Destinations pane's form, holding edits until they save.
 	stream_form: Option<live::Form>,
-	/// The Guests pane's form, while it has edits not yet saved.
+	/// The Guests pane's form, holding edits until they save.
 	guests_form: Option<settings::GuestForm>,
+	/// Whether a field of the Settings pane shown had the keyboard last
+	/// frame, which holds its edits from saving.
+	typing: bool,
 	/// A save of the stream file under way.
 	saving: Option<live::Saving>,
 	/// How the last save of the stream file went, for the pane that asked.

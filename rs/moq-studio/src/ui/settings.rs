@@ -10,7 +10,6 @@ use std::path::PathBuf;
 
 use egui::{Align, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
 
-use super::live::Saving;
 use super::*;
 use crate::setup::Task;
 use crate::stream::Saved;
@@ -84,13 +83,16 @@ pub(super) struct Picker {
 	task: Task<Option<PathBuf>>,
 }
 
-/// The Guests pane's form, until saved.
+/// The Guests pane's form, holding edits until they save.
 pub(super) struct GuestForm {
 	room: String,
 	key: String,
 	page: String,
 	expiry: Duration,
 	appear: bool,
+	/// The last save it started, which is not tried again until the form
+	/// changes, so one refused waits for the next edit.
+	tried: Option<Saved>,
 }
 
 impl GuestForm {
@@ -106,11 +108,12 @@ impl GuestForm {
 			page: saved.join_page.as_ref().map(ToString::to_string).unwrap_or_default(),
 			expiry: saved.guest_expiry.unwrap_or(crate::guests::DEFAULT_EXPIRY),
 			appear: saved.guests_appear,
+			tried: None,
 		}
 	}
 
 	/// What the form would save over `saved`, or why it cannot.
-	fn saved(&self, saved: &Saved) -> Result<Saved, String> {
+	pub(super) fn saved(&self, saved: &Saved) -> Result<Saved, String> {
 		let text = |text: &str| Some(text.trim().to_string()).filter(|text| !text.is_empty());
 		let page = match text(&self.page) {
 			None => None,
@@ -119,7 +122,11 @@ impl GuestForm {
 					.map_err(|err| format!("The join page is not a URL: {err}."))?,
 			),
 		};
-		let expiry = (self.expiry != crate::guests::DEFAULT_EXPIRY).then_some(self.expiry);
+		// A lifetime the file sets, even to the default, stays set until changed.
+		let expiry = match saved.guest_expiry {
+			Some(set) if set == self.expiry => Some(set),
+			_ => (self.expiry != crate::guests::DEFAULT_EXPIRY).then_some(self.expiry),
+		};
 		Ok(Saved {
 			room: text(&self.room),
 			room_key: text(&self.key).map(PathBuf::from),
@@ -131,8 +138,33 @@ impl GuestForm {
 	}
 
 	/// Whether the form holds anything to save over `saved`.
-	fn edited(&self, saved: &Saved) -> bool {
+	pub(super) fn edited(&self, saved: &Saved) -> bool {
 		self.saved(saved).is_ok_and(|form| form != *saved) || self.saved(saved).is_err()
+	}
+
+	/// What to save over `saved`, if the form holds a change that can be
+	/// saved and was not tried as it is.
+	pub(super) fn next(&mut self, saved: &Saved) -> Option<Saved> {
+		if !self.edited(saved) {
+			return None;
+		}
+		let next = self.saved(saved).ok()?;
+		if self.tried.as_ref() == Some(&next) {
+			return None;
+		}
+		self.tried = Some(next.clone());
+		Some(next)
+	}
+
+	/// Whether the form, after its save over `before`, still holds just
+	/// what it sent.
+	pub(super) fn sent(&self, before: &Saved) -> bool {
+		self.saved(before).ok().is_some_and(|now| Some(now) == self.tried)
+	}
+
+	/// Let the next change save, once a save of another finished.
+	pub(super) fn retry(&mut self) {
+		self.tried = None;
 	}
 }
 
@@ -141,6 +173,8 @@ impl Panels {
 	/// the one picked on the right.
 	pub(super) fn settings(&mut self, ctx: &egui::Context, fx: &mut Fx) {
 		self.follow_picker(ctx);
+		// Set again by the pane drawn, while one of its fields has the keyboard.
+		self.typing = false;
 		let Some(mut setting) = self.setting else { return };
 		let frame = egui::Frame::new()
 			.fill(kit::P1)
@@ -183,7 +217,7 @@ impl Panels {
 						.auto_shrink([false, false])
 						.show(ui, |ui| match setting {
 							Setting::Show => self.show_pane(ui),
-							Setting::Stream => self.stream_settings(ui),
+							Setting::Destinations => self.destinations_pane(ui),
 							Setting::Recording => self.recording(ui),
 							Setting::Hotkeys => self.hotkeys(ui, fx),
 							Setting::Guests => self.guest_settings(ui),
@@ -935,11 +969,12 @@ impl Panels {
 	fn guest_settings(&mut self, ui: &mut Ui) {
 		let stream = self.controls.stream.lock().unwrap().clone();
 		let overridden = stream.overridden();
-		let busy = self.saving.is_some() || self.picker.is_some();
+		let busy = self.picker.is_some();
 		let layout = self.controls.mods.on(Mod::Layout);
 		let saved = stream.saved().clone();
 		let form = self.guests_form.get_or_insert_with(|| GuestForm::new(&saved));
 		let mut pick_key = false;
+		let mut typing = false;
 
 		// Where guests stand now.
 		let room = self.engine.room();
@@ -967,7 +1002,10 @@ impl Panels {
 		// tries it again.
 		if failure.is_some() && self.engine.on_air() == crate::engine::OnAir::Off {
 			ui.add_space(6.0);
-			if ui.add_enabled(!busy, egui::Button::new("Try again")).clicked() {
+			if ui
+				.add_enabled(!busy && self.saving.is_none(), egui::Button::new("Try again"))
+				.clicked()
+			{
 				self.controls.retry_room();
 			}
 		}
@@ -980,12 +1018,13 @@ impl Panels {
 				"A path under the relay's address, such as `guests`.",
 				overridden.room.then_some("--room"),
 				|ui| {
-					ui.add(
+					let field = ui.add(
 						egui::TextEdit::singleline(&mut form.room)
 							.id_salt("guests room")
 							.hint_text("guests")
 							.desired_width(f32::INFINITY),
 					);
+					typing |= field.has_focus();
 				},
 			);
 			field_row(
@@ -1003,7 +1042,7 @@ impl Panels {
 								.hint_text("room.jwk")
 								.desired_width(f32::INFINITY),
 						);
-						kit::named(field, "Room key file");
+						typing |= kit::named(field, "Room key file").has_focus();
 					});
 				},
 			);
@@ -1013,12 +1052,13 @@ impl Panels {
 				"The page a guest's link opens. It must be https://.",
 				overridden.join_page.then_some("--join-page"),
 				|ui| {
-					ui.add(
+					let field = ui.add(
 						egui::TextEdit::singleline(&mut form.page)
 							.id_salt("guests join page")
 							.hint_text("https://join.studio.moq.dev/")
 							.desired_width(f32::INFINITY),
 					);
+					typing |= field.has_focus();
 				},
 			);
 			let mut lifetimes: Vec<(Duration, String)> = LIFETIMES
@@ -1053,25 +1093,26 @@ impl Panels {
 			}
 		});
 
-		let edited = form.edited(&saved);
-		let result = form.saved(&saved);
-		let mut revert = false;
-		let mut save = false;
+		let invalid = form.saved(&saved).err();
 		rule(ui);
 		ui.add_space(12.0);
-		ui.horizontal(|ui| {
-			save = ui.add_enabled(edited && !busy, egui::Button::new("Save")).clicked();
-			revert = ui.add_enabled(edited && !busy, egui::Button::new("Revert")).clicked();
-		});
-		self.saved_note(ui, Setting::Guests);
-		if save {
-			match result {
-				Ok(next) => self.save_stream(Setting::Guests, stream.clone(), next, Vec::new(), ui.ctx()),
-				Err(err) => self.saved = Some((Setting::Guests, err)),
-			}
+		if let Some(invalid) = invalid {
+			ui.add(egui::Label::new(RichText::new(invalid).font(kit::ui(12.0)).color(kit::ERR)).wrap());
 		}
-		if revert {
-			self.guests_form = Some(GuestForm::new(&saved));
+		self.typing |= typing;
+		self.saved_note(ui, Setting::Guests);
+		// A save refused, such as for a room key not there yet, is not tried
+		// again on its own until the form changes; this tries it as it is.
+		let refused = self.saving.is_none()
+			&& self
+				.guests_form
+				.as_ref()
+				.is_some_and(|form| form.tried.is_some() && form.edited(&saved));
+		if refused
+			&& ui.button("Try saving again").clicked()
+			&& let Some(form) = &mut self.guests_form
+		{
+			form.retry();
 		}
 		if pick_key {
 			let from = stream
@@ -1100,7 +1141,7 @@ impl Panels {
 		let spawned = std::thread::Builder::new().name("save".into()).spawn(move || {
 			let result = (|| -> anyhow::Result<crate::stream::Stream> {
 				let moving = engine.recorder.moving(&saved.folder(engine.autosave.path()))?;
-				stream.save(saved)?;
+				stream.save(saved, &[])?;
 				moving.finish();
 				Ok(stream)
 			})();
@@ -1112,6 +1153,7 @@ impl Panels {
 		self.saving = Some(super::live::Saving {
 			from: Setting::Recording,
 			retokened: false,
+			form: false,
 			task: match spawned {
 				Ok(_) => Task::Running(recv),
 				Err(err) => Task::Done(Err(format!("cannot save: {err}"))),
@@ -1119,26 +1161,9 @@ impl Panels {
 		});
 	}
 
-	/// Save `saved` as the show's stream file, keeping `tokens`, for the
-	/// `from` pane, which shows how it went.
-	pub(super) fn save_stream(
-		&mut self,
-		from: Setting,
-		stream: crate::stream::Stream,
-		saved: Saved,
-		tokens: Vec<super::live::Token>,
-		ctx: &egui::Context,
-	) {
-		if self.refuse_overlap(from) {
-			return;
-		}
-		self.saved = None;
-		self.saving = Some(Saving::start(from, stream, saved, tokens, ctx));
-	}
-
 	/// Refuse a save for the `from` pane while another runs, which would
 	/// lose its result and write the file from settings it has not seen.
-	fn refuse_overlap(&mut self, from: Setting) -> bool {
+	pub(super) fn refuse_overlap(&mut self, from: Setting) -> bool {
 		let running = self.saving.is_some();
 		if running {
 			self.saved = Some((
@@ -1608,7 +1633,7 @@ pub(super) const SCENE_SIZES: &str = "Scene sizes";
 
 /// Whether the palette found the setting called `name`, which its pane has
 /// yet to light.
-fn seeking(ctx: &egui::Context, name: &str) -> bool {
+pub(super) fn seeking(ctx: &egui::Context, name: &str) -> bool {
 	let sought = ctx.data(|data| data.get_temp::<Sought>(egui::Id::new("sought setting")));
 	sought.is_some_and(|sought| sought.name == name)
 }
@@ -1873,6 +1898,21 @@ fn upload(canvas: Canvas, both: bool) -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A lifetime the file sets to the default is no edit, so opening the
+	/// pane never rewrites the file, while picking another still saves.
+	#[test]
+	fn a_set_default_lifetime_is_not_an_edit() {
+		let saved = Saved {
+			guest_expiry: Some(crate::guests::DEFAULT_EXPIRY),
+			..Default::default()
+		};
+		let mut form = GuestForm::new(&saved);
+		assert!(form.next(&saved).is_none(), "nothing to save");
+		form.expiry = crate::guests::DEFAULT_EXPIRY * 2;
+		let next = form.next(&saved).expect("a new lifetime saves");
+		assert_eq!(next.guest_expiry, Some(crate::guests::DEFAULT_EXPIRY * 2));
+	}
 
 	fn canvas(width: u32, height: u32, framerate: u32) -> Canvas {
 		Canvas {

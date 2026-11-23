@@ -643,6 +643,19 @@ impl<T: Send + 'static> Task<T> {
 		Ok(Self::Running(recv))
 	}
 
+	/// The result, waiting for it to arrive.
+	///
+	/// Panics if the task did, rather than waiting forever.
+	pub(crate) fn wait(&mut self) -> &T {
+		if let Self::Running(recv) = self {
+			*self = Self::Done(recv.recv().expect("a setup task stopped without a result"));
+		}
+		match self {
+			Self::Running(_) => unreachable!("received above"),
+			Self::Done(done) => done,
+		}
+	}
+
 	/// The result, once it arrived.
 	///
 	/// Panics if the task did, rather than waiting forever on a result that
@@ -772,7 +785,7 @@ impl Setup {
 					let measured = Task::spawn(&self.runtime, move || async move {
 						uplink::measure(&client, url, &path, ceiling, uplink::WINDOW)
 							.await
-							.map_err(|err| format!("{err:#}"))
+							.map_err(|err| err.to_string())
 					});
 					measured.unwrap_or_else(|err| Task::Done(Err(format!("cannot start the probe: {err}"))))
 				}

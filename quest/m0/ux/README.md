@@ -53,8 +53,8 @@ shows those pictures beside the frames they implement.
 - **Studio mode:** ✅ cue and take, off by default (rejected: a Preview and
   Program split, which halves the live picture; no mode at all). A scene click
   cues, and TAKE or AUTO puts it on air.
-- **One control per state:** the live control reads LIVE with the clock and
-  becomes END STREAM under the pointer. One health dot stands for every
+- **One control per state:** the live control reads LIVE with the clock,
+  which asks before it ends the stream. One health dot stands for every
   destination, the viewers, and the encoder, which its hover lists. Undo,
   record, and settings are icons with tooltips.
 - **Not on the home page:** the format, canvas size, and frame rate, which a
@@ -139,8 +139,7 @@ reference mock-ups live in [`mock/overhaul.html`](/quest/m0/ux/mock/overhaul.htm
   auto-saving across every Settings pane, clear REC label, and hiding
   unavailable actions in the command palette (rejected: blocking preflight
   probes on every Go Live click; 8-step Settings detour; manual Save/Revert
-  buttons in Stream and Guests). See
-  [Streamlined Go Live and Settings](/quest/m0/ux/golive-settings.md).
+  buttons in Stream and Guests).
 - **Agent controllability:** ✅ enable AccessKit in `eframe`, fix widget
   labels, add a live/headless Unix-socket control server and `moq-studio ctl`
   CLI, and ship headless `sway` + `grim` in `flake.nix` (rejected: leaving
@@ -218,4 +217,4 @@ what to look at, rather than waiting on it:
 ## Related
 
 - [m1](/quest/m1/README.md) - the features that follow the redesign
-- [Destinations](/quest/m0/destinations.md) - RTMP and WHIP rows in the go-live sheet this epic builds
+- [Destinations](/quest/m0/destinations.md) - RTMP and WHIP rows in the Go live popover and the Destinations pane this epic builds

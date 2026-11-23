@@ -6185,8 +6185,8 @@ mod tests {
 			.expect("the studio closes");
 	}
 
-	/// A go-live, from a hotkey as from the sheet, waits out an encoder check
-	/// still running, such as a closed sheet's, whose hardware session the
+	/// A go-live, from a hotkey as from GO LIVE, waits out an encoder check
+	/// still running, such as a stale check's, whose hardware session the
 	/// program's encoders would count against, before it opens anything, and
 	/// admits no new one, such as a canvas change's, until it ends.
 	#[tokio::test(flavor = "multi_thread")]
@@ -6508,7 +6508,7 @@ mod tests {
 					crate::stream::Credentials::memory(),
 				)
 				.unwrap();
-				stream.save(saved).unwrap();
+				stream.save(saved, &[]).unwrap();
 				crate::show::follow(&engine, &stream)
 			})
 		};
@@ -6567,7 +6567,7 @@ mod tests {
 			..Default::default()
 		};
 		let saving = tokio::task::spawn_blocking(move || {
-			stream.save(relay(9)).unwrap();
+			stream.save(relay(9), &[]).unwrap();
 			stream
 		});
 		let mut stream = saving.await.unwrap();
@@ -6577,9 +6577,10 @@ mod tests {
 			tokio::runtime::Handle::current(),
 		));
 		let first = controls.follow_relays().expect("the follow starts");
+		let saving = controls.clone();
 		let saved = tokio::task::spawn_blocking(move || {
-			stream.save(relay(10)).unwrap();
-			controls.set_stream(stream, true);
+			stream.save(relay(10), &[]).unwrap();
+			saving.set_stream(stream, true);
 			first.join().expect("the first follow ran");
 		});
 		saved.await.unwrap();
@@ -6587,7 +6588,8 @@ mod tests {
 		let followed = kio::clock::timeout(TIMEOUT, async {
 			loop {
 				let watched: Vec<String> = engine.watched().into_iter().map(|(relay, _)| relay.endpoint).collect();
-				if watched == ["https://127.0.0.1:10"] {
+				// And no follow is left pending once it lands.
+				if watched == ["https://127.0.0.1:10"] && !controls.refollowing() {
 					return;
 				}
 				kio::clock::sleep(Duration::from_millis(10)).await;

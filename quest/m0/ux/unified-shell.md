@@ -59,5 +59,4 @@ Decided 2026-11-22 with the maintainer (/quest-plan):
 ## Related
 
 - [Essential layer inspector](/quest/m0/ux/essential-inspector.md) - contextual right-hand inspector for selected layers
-- [Streamlined Go Live and Settings](/quest/m0/ux/golive-settings.md) - title bar Go Live / End Stream and Settings polish
 - [Zero-gate first run](/quest/m0/ux/first-run.md) - empty-canvas quick-start inside this workspace

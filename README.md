@@ -46,8 +46,8 @@ cargo run --release -p moq-studio --features capture,openh264
   you end the stream from it too. Until then the studio composes, previews,
   and records, and broadcast sources and guests play through the show's
   relays.
-- Where a show streams is in Settings, Stream (see
-  [Stream settings](#stream-settings)), kept beside the show. A flag sets one
+- Where a show streams is in Settings, Destinations (see
+  [Destinations](#destinations)), kept beside the show. A flag sets one
   for a single run, over the show's own, and is never saved: `--connect` (the
   relay) with `--connect-token`, `--failover`, `--broadcast`, `--on-demand`,
   `--recordings <dir>`, where recordings and clips go (by default beside the
@@ -62,7 +62,7 @@ cargo run --release -p moq-studio --features capture,openh264
   `--connect` relay only. The stream's tracks claim their bitrate on the first
   relay's link alone, so only that link is probed toward the stream's rate,
   and the video follows that link's estimate alone.
-- Quitting while live ends the stream as **END STREAM** does: every track
+- Quitting while live ends the stream as **End stream** does: every track
   ends after its last pictures and sound, then each relay session closes once
   the relay has them, waiting up to about a second, so viewers and recordings
   on the relay see the broadcast end rather than cut off.
@@ -144,7 +144,8 @@ canvas and no sources. The proposed scene is the first edit in the history, so
 undoing it leaves that empty scene.
 
 Setup writes an ordinary scene file. Change its sources and scenes on the
-BUILD page, its canvas in Settings, and where it streams in Settings, Stream.
+BUILD page, its canvas in Settings, and where it streams in Settings,
+Destinations.
 The health dot shows how the uplink holds up once you are live.
 
 Your shows and setup sit in the desktop's own window frame, and the studio
@@ -184,17 +185,19 @@ macOS the system's buttons and edges stay. It holds, from the left:
 - The health dot, the stream's worst grade at a glance. Click it for the
   worst problem first, then each destination, who is watching, and the
   encoder, and **Details** for the [Health](#health) window. Off air it reads
-  **Ready** once the show has a relay, and **No relay** until then. While a
+  **Ready** once the show has a relay, and **No relay** until then; when the
+  check going live waits on fails, it says what failed in amber, such as
+  **Encoder too slow**, and its popover offers the fix. While a
   capture a live scene shows has [gone dark](#a-capture-gone-dark), or a
   camera or broadcast it shows [stopped sending pictures](#a-picture-that-stalls),
   and those are among the worst problems, it counts them, as **1 layer dark**,
   **1 layer stalled**, or **2 layers dark or stalled**.
-- Record, which starts or stops a [recording](#recording) from any page, with
-  the picks in Settings, Recording. Its dot pulses while recording, with
-  how long it has been recording beside it.
-- The live control: **GO LIVE** off air, which opens the
-  [go-live sheet](#going-live); on air, **LIVE** and how long the stream has
-  run, which reads **END STREAM** under the pointer.
+- **● REC**, which starts or stops a [recording](#recording) from any page,
+  with the picks in Settings, Recording. While recording it reads **■** and
+  how long it has been recording, the square pulsing.
+- The live control: **GO LIVE** off air (see [Going live](#going-live)); on
+  air, **LIVE** and how long the stream has run, which asks before it ends
+  the stream.
 - Search, which opens the [command palette](#command-palette).
 - The gear, which opens [Settings](#settings).
 - Minimize, maximize, and close, except on macOS.
@@ -368,10 +371,11 @@ it. It lists:
 - Every action a [hotkey](#hotkeys) can do, by what it is for, each with the
   key bound to it: going live, ending the stream, the panic key, recording,
   Studio mode, TAKE and AUTO, taking or cueing each scene, muting or
-  unmuting each sound, and replay and clips. One that cannot run now stays
-  listed, dimmed, saying why, such as TAKE with nothing cued or a scene that
-  cannot go on program. **Go live** opens the go-live sheet, as GO LIVE does;
-  the rest act at once, as their keys do.
+  unmuting each sound, and replay and clips. One that cannot run now, such as
+  **End stream** off air or TAKE with nothing cued, is left out of the list
+  as it opens; typed for, it comes last, dimmed, saying why. **Go live** does
+  what GO LIVE does and **End stream** asks first, as clicking the clock
+  does; the rest act at once, as their keys do.
 - Selecting each layer of the scene BUILD edits, by its source's name.
 - Adding a camera, screen, window, or input: the first time, **Find cameras,
   screens, windows, and inputs to add** lists them, then each is a row of its
@@ -417,48 +421,61 @@ window, so there the desktop picks where it opens.
 
 ### Going live
 
-**GO LIVE** opens a sheet that says which scene the stream opens on, then:
+Off air, the studio checks in the background what going live needs, as
+[setup](#first-launch) does: whether the encoder keeps up with the canvas,
+and whether the connection to the relay carries what it sends (published
+scenes and sources share what is left). A show going out in both formats
+times both encoders at once, each its own picture, and needs two videos'
+bitrate. The check runs again whenever the canvas, the relays, a token, or
+the network path changes (a relay's session reconnecting), never on a timer,
+and its result stays quiet in the health dot unless it fails.
 
-- **Where it goes:** the show's relay and its failover relay, each with a
-  switch and its state, such as *Connected, 18 ms away*. A relay switched off
-  is left out of this stream. A show going out in both formats says each
-  relay carries both broadcasts.
-- **Checks**, filled in as they finish: whether each camera has a picture,
-  whether a microphone's level moves, whether the encoder keeps up with the
-  canvas (timed as [setup](#first-launch) times it), and whether the
-  connection to the first relay switched on carries the program (measured as
-  setup measures it; published scenes and sources share what is left). A show
-  going out in both formats times both encoders at once, each its own
-  picture, so the encoder check passes when each keeps up beside the other, and
-  needs two videos' bitrate. If a second encoder cannot open, such as a GPU
-  encoder at its session limit, the encoder check fails and says why. A failed
-  check is one sentence and its fix,
-  such as **Send 720p instead**, which changes the canvas, or **Check again**.
-- **GO LIVE TO** the number of destinations switched on. A failed check never
-  stops you; only having none switched on does.
+**GO LIVE** then:
 
-Going live dials each relay, failing with why if none answers within 15
-seconds, then opens the program's encoders and announces its broadcast. Each
-time on air is a broadcast of its own. On air, the live control is the clock;
-under the pointer it reads **END STREAM**, and holding it down for a moment
-ends the stream, handing the relays its tail first, as quitting does. The
-**Go live** and **End stream** hotkeys do the same at once, going live to the
-relays switched on without the sheet.
+- goes live at once when the check passed;
+- opens a popover under it while the check runs, showing each part as it
+  finishes, and goes live as soon as it passes;
+- opens the popover with what failed when it fails, as one sentence and its
+  fix, such as **Send 720p instead**, which changes the canvas and checks
+  again, or **Check again**. A failed check never stops you: **Go live
+  anyway** goes live past it;
+- on a show with no relay yet, asks for one in the popover: its address and
+  token, then **Go live now**, which saves them to Settings, Destinations,
+  checks, and goes live once the check passes. Next time GO LIVE starts at
+  once.
+
+The popover also shows each relay and its state, such as *Connected, 18 ms
+away*. Going live dials each relay, failing with why if none answers within
+15 seconds, then opens the program's encoders and announces its broadcast.
+Each time on air is a broadcast of its own. On air, the live control is the
+clock; click it, then **End stream** to end the stream, handing the relays its
+tail first, as quitting does, or **Keep live** to stay on air. The **Go live**
+and **End stream** hotkeys act at once, going live without waiting on the
+check, though never to a destination edit that has not saved yet: the Go live
+hotkey refuses, saying why, until it does.
 
 Off air, the program has no past to replay, and a replay of it says so.
 
-### Stream settings
+### Destinations
 
-Settings, Stream holds where the show streams, saved in `show.stream.toml`
-beside `show.toml` rather than in it, since a scene file is meant to be
-shared:
+Settings, Destinations holds where the show streams, saved in
+`show.stream.toml` beside `show.toml` rather than in it, since a scene file is
+meant to be shared:
 
-- **Relay**, the one the stream goes to, and its **Token**.
-- **Failover relay** and its token: a second relay the same broadcast goes
-  to, which needs one `--connect-version` with broadcast instances.
+- **Relay**, the one the stream goes to, and its **Token**. A token goes only
+  to the address it was typed beside: editing the address clears it.
 - **Broadcast name**, the path on the relays, `studio` until set.
-- **Encode only while someone watches** (on demand), which encodes the
-  canvas size only while someone watches (see [Output](#output)).
+- Under **Advanced**, which says what it holds while closed:
+  - **Failover relay** and its token: a second relay the same broadcast goes
+    to, which needs one `--connect-version` with broadcast instances.
+  - **Encode only while someone watches** (on demand), which encodes the
+    canvas size only while someone watches (see [Output](#output)).
+
+Every change saves on its own, with no Save button: a toggle at once, and
+text once no field of the pane is being typed in (a click elsewhere, or
+closing Settings), so a relay is never dialed at a half-typed address. A change that
+cannot be saved, such as an address that is not a URL, says why under the
+pane and waits for your next edit. Settings, Guests saves the same way.
 
 Tokens are kept in the system's credential store (the Secret Service on Linux,
 the login keychain on macOS, the Credential Manager on Windows), one per relay
@@ -476,12 +493,13 @@ in the same file, as `recordings`, `room`, `room_key`, `join_page`,
 
 The gear opens Settings, one window over the pages: the categories down the
 left, and the one picked on the right. Each line of help names what the
-setting costs. Escape or a click outside closes it.
+setting costs. Every pane saves as you change it; Escape or a click outside
+closes it.
 
 | Pane | Use it to |
 | --- | --- |
 | Show | Pick the canvas size as 720p, 1080p, 1440p, or 4K, with the upload each wants, or **Custom** for exact numbers, and the frame rate as 30, 60, or **Custom**. With **Both formats** on, pick the format, landscape or portrait, which swaps the canvas's sides, and **Both at once**, which sends a portrait picture beside a landscape one (see [Both formats at once](#both-formats-at-once)), the canvas size then covering both pictures. With **Published scenes** on, give a scene its own size under **Scene sizes** (see [Published scenes](#published-scenes)). Saved in the scene file, and undone like any edit. |
-| Stream | Set the relay, its token, the failover relay, the broadcast's name, and on demand (see [Stream settings](#stream-settings)), and turn the program's [virtual camera](#virtual-camera) on. |
+| Destinations | Set the relay, its token, and the broadcast's name, and under **Advanced** the failover relay and on demand (see [Destinations](#destinations)), and turn the program's [virtual camera](#virtual-camera) on. |
 | Recording | Change or open the recordings folder, and pick the picture a recording holds, and its audio scene with **Audio scenes & routes** on, and whether each source records a file of its own too (see [Recording](#recording)). |
 | Hotkeys | Bind keys, by what they are for: going live, ending the stream, the panic key, and recording; each scene; each sound's mute; and, with their mods on, Studio mode, TAKE, and AUTO, and replay, clips, and markers (see [Hotkeys](#hotkeys)). |
 | Guests | Set the room guests join, its key, the join page, how long a link lasts, and, with **Smart layout** on, whether guests appear on their own (see [Guests](#guests)). |
@@ -1151,9 +1169,10 @@ moq-studio show.toml --connect 'https://relay.example.com/show?jwt=...' \
 ```
 
 Settings, Guests, sets the room, its key, the join page, and how long a link
-lasts, and keeps them in the show's [stream settings](#stream-settings) file as
+lasts, and keeps them in the show's [destinations](#destinations) file as
 `room`, `room_key`, `join_page`, and `guest_expiry`. It refuses a room guests
-could not join, saying why, before it saves. A saved room is joined at once
+could not join, saying why, before it saves. Like every pane, it saves as you
+change it. A saved room is joined at once
 off air; on air, the guests already in the old room stay until the stream
 ends, and the new room is joined then. The guest flags set the room for one
 run instead, and the pane shows a field a flag sets as the flag's. A room
@@ -2214,7 +2233,7 @@ Each catalog asks viewers to report beneath its broadcast, under
 
 ## Virtual camera
 
-The **Virtual camera** toggle in Settings, Stream, shows the program as a
+The **Virtual camera** toggle in Settings, Destinations, shows the program as a
 camera that video-call and conferencing apps can pick, at the canvas size and
 frame rate, with each [published source](#published-independently) drawn
 over it as viewers see it. Each published scene has a toggle of its own in

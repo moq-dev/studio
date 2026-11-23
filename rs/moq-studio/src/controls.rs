@@ -41,7 +41,8 @@ pub enum Action {
 	Record,
 	/// Cut to the safe scene and mute every microphone and guest.
 	Panic,
-	/// Go live to the relays switched on, skipping the go-live sheet's checks.
+	/// Go live to the show's relays at once, without waiting on the check GO
+	/// LIVE waits on.
 	GoLive,
 	/// End the stream, handing the relays its tail first.
 	EndStream,
@@ -109,7 +110,7 @@ const FIXED: [Fixed; 10] = [
 		group: Group::Live,
 		id: "end-stream",
 		name: "End stream",
-		detail: Some("held"),
+		detail: None,
 		words: &["stop", "off air", "finish"],
 	},
 	Fixed {
@@ -329,15 +330,16 @@ pub struct Controls {
 	runtime: tokio::runtime::Handle,
 	/// Where the show streams, as Settings edits it.
 	pub stream: Mutex<Stream>,
-	/// Which relays going live sends to, as the go-live sheet switches them.
-	pub switched: Mutex<Switched>,
-	/// Why the last go-live failed, until the go-live sheet or the status bar
-	/// shows it.
+	/// Why the last go-live failed, until the Go live popover or the status
+	/// bar shows it.
 	pub refused: Mutex<Option<String>>,
 	/// Whether a go-live is under way, from the press until it is live or
 	/// refused, which covers reading the tokens before the engine says
 	/// Starting, so a second press is refused at once.
 	going: AtomicBool,
+	/// Why Settings, Destinations holds an edit not saved yet, which a
+	/// go-live waits for rather than going to the relay before it.
+	pub unsaved: Mutex<Option<String>>,
 	/// Whether the show is closing, which refuses a go-live. Closing holds
 	/// [`Self::going`] too, so the two are claimed by one atomic swap: a
 	/// press that a go-live won is one closing refuses, and the reverse.
@@ -353,9 +355,9 @@ pub struct Controls {
 	/// The relay and guest settings of the room last joined, and whether it
 	/// could be.
 	joined: Mutex<Option<(JoinedAt, Result<(), String>)>>,
-	/// The encoder checks running, which a go-live waits out, a closed
-	/// go-live sheet's included, whose check runs to its end, and admits no
-	/// more of until it is live or refused.
+	/// The encoder checks running, which a go-live waits out, a stale one's
+	/// included, which runs to its end, and admits no more of until it is
+	/// live or refused.
 	probes: Arc<tokio::sync::watch::Sender<Probes>>,
 	/// REVIEW's replay picks, which a replay or clip from a hotkey takes too.
 	pub replay: Mutex<Replay>,
@@ -405,9 +407,9 @@ impl Controls {
 			engine,
 			runtime,
 			stream: Mutex::new(stream),
-			switched: Mutex::default(),
 			refused: Mutex::default(),
 			going: AtomicBool::new(false),
+			unsaved: Mutex::default(),
 			closing: AtomicBool::new(false),
 			rewatch: AtomicBool::new(false),
 			following: Mutex::new(()),
@@ -553,16 +555,19 @@ impl Controls {
 		}
 	}
 
-	/// Go live to the relays switched on, in the background: reading their
+	/// Go live to the show's relays, in the background: reading their
 	/// tokens blocks on the credential store, and dialing them takes a while.
-	/// How it went shows in the status bar, and a refusal in the go-live
-	/// sheet too.
+	/// How it went shows in the status bar, and a refusal in the Go live
+	/// popover too.
 	pub fn go_live(self: &Arc<Self>) -> anyhow::Result<String> {
 		anyhow::ensure!(
 			self.engine.on_air() == OnAir::Off,
 			"the program is already on air, or on its way on or off"
 		);
 		anyhow::ensure!(!self.closing.load(Ordering::Acquire), "the show is closing");
+		if let Some(why) = self.unsaved.lock().unwrap().clone() {
+			anyhow::bail!(why);
+		}
 		anyhow::ensure!(!self.going.swap(true, Ordering::AcqRel), "already going live");
 		*self.refused.lock().unwrap() = None;
 		let controls = self.clone();
@@ -580,8 +585,7 @@ impl Controls {
 			};
 			// Wait out the encoder checks still running before opening anything.
 			controls.runtime.block_on(controls.probed());
-			let switched = *controls.switched.lock().unwrap();
-			let destination = stream.destination(switched);
+			let destination = stream.destination(Switched::default());
 			let result = destination.and_then(|destination| {
 				let to = destination.broadcast.clone();
 				controls.runtime.block_on(controls.engine.go_live(destination))?;
@@ -619,6 +623,11 @@ impl Controls {
 			admitted
 		});
 		admitted.then(|| Probing(self.probes.clone()))
+	}
+
+	/// Whether an encoder check is running, a stale one's included.
+	pub fn probes_running(&self) -> bool {
+		self.probes.borrow().running > 0
 	}
 
 	/// Admit no more encoder checks until this go-live ends, and wait out
@@ -777,6 +786,12 @@ impl Controls {
 	fn snapshot(&self) -> (Stream, bool) {
 		let stream = self.stream.lock().unwrap();
 		(stream.clone(), self.rewatch.swap(false, Ordering::AcqRel))
+	}
+
+	/// Whether a follow waits or runs, so the relays being watched may not be
+	/// the ones the settings name yet, such as just after a save.
+	pub fn refollowing(&self) -> bool {
+		self.rewatch.load(Ordering::Acquire) || self.following.try_lock().is_err()
 	}
 
 	/// Follow broadcast sources, guests, and viewers' reports through the
