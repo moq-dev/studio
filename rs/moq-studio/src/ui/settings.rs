@@ -448,12 +448,13 @@ impl Panels {
 		if seeking(ui.ctx(), SCENE_SIZES) {
 			sizes.set_open(true);
 		}
-		let (toggle, ..) = sizes
+		let (toggle, label, _) = sizes
 			.show_header(ui, |ui| {
-				ui.label(RichText::new(SCENE_SIZES).font(kit::ui_strong(13.5)).color(kit::TEXT));
+				let label = ui.label(RichText::new(SCENE_SIZES).font(kit::ui_strong(13.5)).color(kit::TEXT));
 				ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
 					ui.label(RichText::new(count).font(kit::ui(12.0)).color(kit::DIM));
 				});
+				label.id
 			})
 			.body(|ui| {
 				for (index, scene) in scenes.iter().enumerate() {
@@ -512,7 +513,7 @@ impl Panels {
 					"A scene of another size cannot go on air. Publish it as its own broadcast instead, under Advanced.",
 				);
 			});
-		kit::named(toggle, SCENE_SIZES);
+		toggle.labelled_by(label.inner);
 		let rect = Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=ui.cursor().top());
 		sought(ui, SCENE_SIZES, rect);
 		action

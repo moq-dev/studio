@@ -2376,10 +2376,8 @@ fn picture(ui: &mut Ui, texture: egui::TextureId, canvas: Canvas, sense: egui::S
 	if size.y > available.y {
 		size = egui::vec2(available.y * aspect, available.y);
 	}
-	let response = ui
-		.vertical_centered(|ui| ui.add(egui::Image::new((texture, size)).sense(sense)))
-		.inner;
-	kit::named(response, "Picture")
+	ui.vertical_centered(|ui| ui.add(egui::Image::new((texture, size)).sense(sense)))
+		.inner
 }
 
 /// How the live picture snaps a dragged item, kept in this user's settings.

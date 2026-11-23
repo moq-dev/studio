@@ -192,10 +192,10 @@ async fn an_agent_builds_a_show() {
 	assert_eq!(state["show"]["scenes"][0]["items"][0]["source"], "tone", "{state:#}");
 	assert_eq!(state["sources"]["tone"]["track"], "live", "{state:#}");
 
-	// Select it on the picture, and inspect it.
+	// Select it on the canvas, and inspect it.
 	studio.ctl(&["key", "Escape"]);
 	studio.until("/studio/selection", "null");
-	studio.ctl(&["click", "Picture"]);
+	studio.ctl(&["click", "Canvas"]);
 	studio.until("/studio/selection/source", "\"tone\"");
 	studio.ctl(&["wait", "--shown", "Slot"]);
 	studio.audit("the inspector");

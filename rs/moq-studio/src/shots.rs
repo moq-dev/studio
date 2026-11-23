@@ -1777,7 +1777,11 @@ fn mix_sends_and_mutes() {
 	assert!(harness.query_by_label("Delay").is_none(), "closed");
 
 	// The mute, and putting another audio scene on the stream.
-	harness.get_all(by().label_contains("Mute ")).next().expect("a mute").click();
+	harness
+		.get_all(by().label_contains("Mute "))
+		.next()
+		.expect("a mute")
+		.click();
 	harness.run_steps(2);
 	assert_eq!(undo().as_deref(), Some("Mute `guest`"));
 	harness

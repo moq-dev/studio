@@ -230,7 +230,7 @@ impl Panels {
 		let response = ui
 			.scope_builder(builder, |ui| {
 				frame.show(ui, Some(fx), |ui| {
-					picture(ui, id, canvas, egui::Sense::click_and_drag())
+					kit::named(picture(ui, id, canvas, egui::Sense::click_and_drag()), "Canvas")
 				})
 			})
 			.inner;
