@@ -98,29 +98,80 @@ shows those pictures beside the frames they implement.
 - **Dropped:** a rundown that fills overlays, one-click looks and a brand kit,
   active-speaker layouts, control surfaces, and a rehearsal mode. Not planned.
 
+### 2026-11-22 UX Simplification Overhaul
+
+Decided 2026-11-22 with the maintainer (/quest-plan) after auditing the
+implemented 4-page UI (`just shots` and source). The redesign cuts interaction
+counts for common operations and removes mode switching and chrome tax. Its
+reference mock-ups live in [`mock/overhaul.html`](/quest/m0/ux/mock/overhaul.html):
+
+- **Workspace & pages:** ✅ single unified Studio workspace merging LIVE and
+  BUILD, with a directly editable canvas, an Editable/Locked toggle, a
+  collapsible Layers rail, inline audio volume sliders in a slimmer bottom
+  dock, and MIX / REVIEW hidden unless their Mods are enabled (rejected:
+  two-page Studio + Mix layout; keeping all four top-level tabs LIVE, BUILD,
+  MIX, REVIEW). See [Unified Studio shell](/quest/m0/ux/unified-shell.md).
+- **Startup & shows:** ✅ zero-gate startup that auto-creates or reopens the
+  last show in app data immediately with a clean empty-canvas one-click
+  quick-start prompt, moving show switching, creation, and export into the
+  title bar's Show menu (rejected: one-screen quick starter wizard on first
+  launch; keeping the Library landing screen and 4-step wizard). See
+  [First run](/quest/m0/ux/first-run.md).
+- **Adding sources & editing layers:** ✅ one-click immediate Add from an
+  auto-populated modal/popover with smart non-overlapping placement and native
+  file pickers, plus a contextual right-hand Inspector that opens only while a
+  layer is selected, removes controls duplicated from the canvas toolbar, binds
+  `Delete`/`Backspace`, and tucks advanced geometry, crop %, blend, and filters
+  under a collapsed `More` section (rejected: keeping all layer fields visible
+  in accordions; canvas-only editing with no inspector; two-click select then
+  Add). See [Adding a source](/quest/m0/ux/add.md) and
+  [Essential layer inspector](/quest/m0/ux/essential-inspector.md).
+- **Audio & bottom dock:** ✅ horizontal volume sliders, live meters, mute, and
+  per-source options popovers (headphones monitor, delay, pan, filters) inline
+  in the bottom dock; multi-bus Audio Scenes & Routes, Replay & Review, and
+  Smart Layout (Slots + Keep out of the way) move behind Settings > Mods;
+  off-air Panic/Clip/Marker chrome stays hidden when unused (rejected: keeping
+  a dedicated simplified Mix page always visible; keeping Audio Scenes on by
+  default). See [Mods](/quest/m0/ux/mods.md) and
+  [Unified Studio shell](/quest/m0/ux/unified-shell.md).
+- **Go Live, Settings & Palette:** ✅ background encoder/uplink health checks,
+  one-click Go Live once configured, inline destination URL/key setup on first
+  use, click-to-confirm End Stream popover replacing the hidden 1.2s hold,
+  auto-saving across every Settings pane, clear REC label, and hiding
+  unavailable actions in the command palette (rejected: blocking preflight
+  probes on every Go Live click; 8-step Settings detour; manual Save/Revert
+  buttons in Stream and Guests). See
+  [Streamlined Go Live and Settings](/quest/m0/ux/golive-settings.md).
+- **Agent controllability:** ✅ enable AccessKit in `eframe`, fix widget
+  labels, add a live/headless Unix-socket control server and `moq-studio ctl`
+  CLI, and ship headless `sway` + `grim` in `flake.nix` (rejected: leaving
+  agents on static `shots.rs` enums). See
+  [Agent control harness](/quest/m0/agent-control.md).
+
+![Unified Studio](/quest/m0/ux/mock/overhaul-studio.webp)
+
 ### What is where
 
-The first column holds on every page, not only LIVE. The bottom strip of
-scene pads, panic key, and sound is on all four. On MIX, which is the sound,
-its sound slot holds a small live picture instead, and on REVIEW the
-program's card is the live picture.
+The default window holds one directly editable canvas, a collapsible Layers
+rail, and a slim bottom dock of scene pads and inline audio sliders. Extra
+pages (`MIX`, `REVIEW`) and power-user tools appear only when enabled in
+Settings > Mods.
 
-| Always on screen | On a page | In Settings |
+| Default workspace | Popovers & modals | In Settings |
 | --- | --- | --- |
-| The live picture and its tally frame | BUILD: layers, adding a source, the inspector, keyframes | Format, canvas size, frame rate, scene sizes |
-| Scene pads with live thumbnails | MIX: every strip, sends, filters, delay | Where the stream goes, keys, failover |
-| A meter and a mute for each sound on air | REVIEW: replay, clips, recordings | Recording folder and contents |
-| The live control, health dot, and record | Health details, from the health dot | Hotkeys, virtual camera, guests' room |
-| The panic key | Guests, from Add | Edit history; Mods: both formats, Studio mode, multiview, phone remote, published scenes, the scene graph |
+| Live directly editable canvas + Editable/Locked toggle | Add modal: auto-populated devices/screens, file pickers, web URL, audio, guests | Show: format, canvas size, frame rate, transition |
+| Collapsible Layers rail & contextual layer Inspector (when selected) | Per-source audio popover: headphones monitor, delay, pan, filters | Destinations: MoQ/RTMP/WHIP (auto-saved, failover under Advanced) |
+| Slim bottom dock: scene pads (`+` switches immediately) + inline volume sliders & meters | Go Live popover (inline URL setup on first use) & End Stream confirm popover | Recording, Hotkeys, Guests (all auto-saved) |
+| Slim title bar: Show menu (switch/new/export/history), undo/redo, health pill, REC, GO LIVE, gear | Command palette (`Ctrl+K`, available actions only) | Mods: Audio Scenes & Routes, Replay & Review, Studio Mode, Smart Layout, Both formats, Multiview, Phone remote, Published scenes, Scene graph |
 
 ### The frames
 
 | Frame | Shows |
 | --- | --- |
-| [live](/quest/m0/ux/mock/shell-live.webp), [hover](/quest/m0/ux/mock/shell-hover.webp) | The LIVE page, and what the health dot, the live control, and an icon show under the pointer |
-| [build](/quest/m0/ux/mock/shell-build.webp), [offair](/quest/m0/ux/mock/shell-offair.webp) | The BUILD page on air, and editing a scene that is not |
-| [studio](/quest/m0/ux/mock/shell-studio.webp) | Studio mode: a cued scene, NEXT, TAKE, and AUTO |
-| [portrait](/quest/m0/ux/mock/shell-portrait.webp), [compact](/quest/m0/ux/mock/shell-compact.webp) | The layout following a portrait show, and a window snapped beside a game |
+| [first](/quest/m0/ux/mock/overhaul-first.webp), [studio](/quest/m0/ux/mock/overhaul-studio.webp) | Zero-gate first launch with empty-canvas quick-start, and the unified Studio workspace on air |
+| [edit](/quest/m0/ux/mock/overhaul-edit.webp), [add](/quest/m0/ux/mock/overhaul-add.webp) | Selected layer with non-duplicated toolbar and minimal contextual inspector, and the 1-click Add modal |
+| [popovers](/quest/m0/ux/mock/overhaul-popovers.webp), [mods](/quest/m0/ux/mock/overhaul-mods.webp) | Inline per-source audio options and inline Go Live setup, and Settings > Mods |
+| [studio](/quest/m0/ux/mock/shell-studio.webp), [portrait](/quest/m0/ux/mock/shell-portrait.webp), [compact](/quest/m0/ux/mock/shell-compact.webp) | Reference layouts when Studio mode or portrait/compact modes are active |
 
 `add.html`, `firstrun.html`, `mix.html`, `settings.html`, `review.html`, and
 `golive.html` hold the other m0 pages, and `later.html` the m1 features; each

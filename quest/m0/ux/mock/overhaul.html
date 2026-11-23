@@ -1,0 +1,1139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kixel.live Studio: Simplified UX Overhaul</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #09090c;
+    color: #f3f3f6;
+    font-family: Inter, system-ui, -apple-system, sans-serif;
+  }
+
+  .bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 12px 16px;
+    background: #111116;
+    border-bottom: 1px solid #2a2a35;
+  }
+  .bar button {
+    font: 600 13px/1 Inter, system-ui, sans-serif;
+    padding: 8px 12px;
+    border-radius: 7px;
+    border: 1px solid #2e2e3a;
+    background: transparent;
+    color: #9c9cae;
+    cursor: pointer;
+  }
+  .bar button[aria-selected="true"] {
+    background: #4f8cff;
+    color: #fff;
+    border-color: transparent;
+  }
+  body.shot .bar { display: none; }
+
+  svg.ic {
+    width: 18px;
+    height: 18px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.9;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    flex: none;
+    display: inline-block;
+    vertical-align: middle;
+  }
+  svg.ic.sm { width: 15px; height: 15px; }
+  svg.ic.lg { width: 26px; height: 26px; }
+
+  .frame {
+    --bg: #09090c;
+    --p1: #111116;
+    --p2: #18181f;
+    --p3: #22222b;
+    --line: #2a2a35;
+    --text: #f3f3f6;
+    --dim: #8d8d9c;
+    --faint: #5b5b69;
+    --accent: #4f8cff;
+    --cue: #ffb020;
+    --ok: #35d07f;
+    --err: #ff3b52;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+    width: 1440px;
+    height: 900px;
+    background: var(--bg);
+    color: var(--text);
+    display: none;
+    flex-direction: column;
+    overflow: hidden;
+    font-size: 14px;
+    line-height: 1.35;
+  }
+  .frame.active { display: flex; }
+
+  .topbar {
+    height: 52px;
+    padding: 0 18px;
+    background: var(--p1);
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex: none;
+  }
+  .logo {
+    width: 24px;
+    height: 24px;
+    border-radius: 7px;
+    background: conic-gradient(from 210deg, #ff2d46, #ff8a3d, #ff2d46);
+    flex: none;
+  }
+  .show-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 8px;
+    font-weight: 600;
+    font-size: 15px;
+    color: var(--text);
+  }
+  .pill-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    height: 32px;
+    padding: 0 12px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: var(--p2);
+    color: var(--dim);
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  .pill-btn.active { background: var(--p3); color: var(--text); border-color: #3c3c4c; }
+  .pill-btn.accent { background: var(--accent); color: #fff; border-color: transparent; font-weight: 600; }
+  .pill-btn.live {
+    background: var(--accent);
+    color: #fff;
+    border-color: transparent;
+    font-weight: 700;
+    letter-spacing: .04em;
+    box-shadow: 0 0 22px rgba(79, 140, 255, .45);
+  }
+  .pill-btn.golive {
+    background: #f3f3f6;
+    color: #09090c;
+    border-color: transparent;
+    font-weight: 700;
+    letter-spacing: .05em;
+  }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); flex: none; }
+  .dot.rec { background: var(--err); }
+  .dot.dim { background: var(--faint); }
+  .spacer { flex: 1; min-width: 8px; }
+  .ib {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--dim);
+    border: 1px solid transparent;
+  }
+  .ib.boxed { background: var(--p2); border-color: var(--line); }
+  .ib.on { background: var(--p3); color: var(--text); border-color: #3c3c4c; }
+
+  .body-row {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    position: relative;
+  }
+
+  .rail-left {
+    width: 248px;
+    flex: none;
+    background: var(--p1);
+    border-right: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    padding: 14px;
+    gap: 8px;
+  }
+  .sec-cap {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--dim);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .layer-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 13.5px;
+  }
+  .layer-row.sel {
+    background: rgba(79, 140, 255, .16);
+    outline: 1.5px solid rgba(79, 140, 255, .6);
+  }
+  .layer-ico {
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
+    background: var(--p3);
+    color: var(--dim);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+  }
+  .layer-row.sel .layer-ico { background: var(--accent); color: #fff; }
+  .layer-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .layer-sub { display: block; font-size: 11px; color: var(--dim); }
+  .add-big {
+    margin-top: auto;
+    height: 38px;
+    border-radius: 9px;
+    border: 1px solid rgba(79, 140, 255, .5);
+    background: rgba(79, 140, 255, .14);
+    color: #c4daff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    font-weight: 600;
+    font-size: 13.5px;
+  }
+
+  .stage {
+    flex: 1;
+    min-width: 0;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: radial-gradient(120% 90% at 50% 0%, #15151e, var(--bg));
+  }
+  .canvas-16-9 {
+    position: relative;
+    width: 100%;
+    max-width: 1120px;
+    aspect-ratio: 16 / 9;
+    border-radius: 12px;
+    background: #0d0e14;
+    border: 2px solid var(--line);
+    overflow: hidden;
+    box-shadow: 0 18px 54px rgba(0, 0, 0, .5);
+  }
+  .canvas-16-9.onair {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent), 0 0 54px rgba(79, 140, 255, .24);
+  }
+
+  .scene-game {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg, #1b0b3a 0%, #581e6c 42%, #ff7a3d 58%, #130721 58.5%, #090412 100%);
+  }
+  .scene-game .sun {
+    position: absolute;
+    left: 41%;
+    top: 21%;
+    width: 18%;
+    aspect-ratio: 1;
+    border-radius: 50%;
+    background: linear-gradient(#ffd166, #ff3d7f);
+  }
+  .scene-game .grid {
+    position: absolute;
+    left: -15%;
+    right: -15%;
+    top: 58.5%;
+    bottom: 0;
+    background:
+      repeating-linear-gradient(90deg, rgba(255,61,240,.35) 0 1px, transparent 1px 46px),
+      repeating-linear-gradient(0deg, rgba(255,61,240,.35) 0 1px, transparent 1px 28px);
+  }
+  .cam-pip {
+    position: absolute;
+    right: 4%;
+    bottom: 7%;
+    width: 21%;
+    aspect-ratio: 1;
+    border-radius: 50%;
+    background: linear-gradient(155deg, #2b3556, #141928);
+    box-shadow: 0 0 0 3px #fff, 0 12px 32px rgba(0,0,0,.6);
+    overflow: hidden;
+  }
+  .cam-pip::before {
+    content: "";
+    position: absolute;
+    left: 32%;
+    top: 20%;
+    width: 36%;
+    aspect-ratio: 1;
+    border-radius: 50%;
+    background: #ebb894;
+  }
+  .cam-pip::after {
+    content: "";
+    position: absolute;
+    left: 16%;
+    top: 58%;
+    width: 68%;
+    height: 55%;
+    border-radius: 45% 45% 0 0;
+    background: #4f8cff;
+  }
+  .lower-third {
+    position: absolute;
+    left: 4%;
+    bottom: 8%;
+    padding: 9px 15px;
+    border-radius: 8px;
+    background: rgba(15, 16, 22, .84);
+    border-left: 4px solid var(--accent);
+    color: #fff;
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: .04em;
+  }
+  .lower-third span {
+    display: block;
+    font-weight: 400;
+    font-size: 12px;
+    color: #c5c6d4;
+    letter-spacing: 0;
+  }
+
+  .stage-badge {
+    position: absolute;
+    left: 14px;
+    top: 14px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .08em;
+    background: rgba(255, 176, 32, .94);
+    color: #1a1200;
+    z-index: 3;
+  }
+  .stage-badge.live { background: var(--accent); color: #fff; }
+
+  .sel-frame {
+    position: absolute;
+    right: 4%;
+    bottom: 7%;
+    width: 21%;
+    aspect-ratio: 1;
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+    z-index: 4;
+  }
+  .sel-frame i {
+    position: absolute;
+    width: 10px;
+    height: 10px;
+    background: #fff;
+    border: 2px solid var(--accent);
+    border-radius: 2px;
+  }
+  .sel-frame i:nth-child(1) { left: -7px; top: -7px; }
+  .sel-frame i:nth-child(2) { right: -7px; top: -7px; }
+  .sel-frame i:nth-child(3) { left: -7px; bottom: -7px; }
+  .sel-frame i:nth-child(4) { right: -7px; bottom: -7px; }
+
+  .float-bar {
+    position: absolute;
+    right: 3%;
+    top: 38%;
+    z-index: 6;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 5px;
+    border-radius: 10px;
+    background: rgba(24, 24, 31, .96);
+    border: 1px solid #383847;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, .6);
+  }
+  .float-bar span {
+    padding: 6px 10px;
+    border-radius: 7px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text);
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .float-bar span.del { color: #ff6b7c; }
+
+  .empty-prompt {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    padding: 32px;
+    text-align: center;
+    background: radial-gradient(circle at 50% 40%, #171822, #0b0b10);
+  }
+  .empty-prompt h3 { margin: 0; font-size: 28px; font-weight: 700; color: var(--text); }
+  .empty-prompt p { margin: 0; font-size: 15px; color: var(--dim); max-width: 520px; }
+  .quick-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    width: 100%;
+    max-width: 720px;
+    margin-top: 8px;
+  }
+  .quick-card {
+    background: var(--p2);
+    border: 1.5px solid var(--line);
+    border-radius: 12px;
+    padding: 20px 14px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    color: var(--text);
+    font-size: 15px;
+    font-weight: 600;
+  }
+  .quick-card.hi {
+    border-color: rgba(79, 140, 255, .65);
+    background: rgba(79, 140, 255, .13);
+  }
+  .quick-card .qico {
+    width: 48px;
+    height: 48px;
+    border-radius: 12px;
+    background: var(--p3);
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .quick-card.hi .qico { background: var(--accent); color: #fff; }
+  .quick-card small { font-size: 12px; font-weight: 400; color: var(--dim); }
+
+  .inspector {
+    width: 288px;
+    flex: none;
+    background: var(--p1);
+    border-left: 1px solid var(--line);
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .insp-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--line);
+    font-weight: 700;
+    font-size: 15px;
+  }
+  .insp-group { display: flex; flex-direction: column; gap: 10px; }
+  .shape-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .shape-btn {
+    height: 38px;
+    border-radius: 8px;
+    background: var(--p2);
+    border: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .shape-btn.on { background: rgba(79, 140, 255, .18); border-color: var(--accent); }
+  .sh { width: 16px; height: 16px; background: var(--dim); }
+  .shape-btn.on .sh { background: var(--accent); }
+  .sh.r { border-radius: 4px; }
+  .sh.c { border-radius: 50%; }
+  .sh.a { border-radius: 8px 8px 2px 2px; }
+
+  .ctrl-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 13.5px;
+    color: var(--text);
+  }
+  .slider-track {
+    flex: 1;
+    height: 5px;
+    border-radius: 3px;
+    background: var(--p3);
+    position: relative;
+  }
+  .slider-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--accent); }
+  .slider-thumb {
+    position: absolute;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 2px 5px rgba(0,0,0,.5);
+  }
+  .toggle {
+    width: 38px;
+    height: 20px;
+    border-radius: 10px;
+    background: var(--p3);
+    border: 1px solid var(--line);
+    position: relative;
+    flex: none;
+  }
+  .toggle::after {
+    content: "";
+    position: absolute;
+    left: 2px;
+    top: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--dim);
+  }
+  .toggle.on { background: var(--accent); border-color: var(--accent); }
+  .toggle.on::after { left: 20px; background: #fff; }
+  .select-box {
+    height: 36px;
+    padding: 0 10px;
+    border-radius: 8px;
+    background: var(--p2);
+    border: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 13px;
+    color: var(--text);
+  }
+  .disclosure {
+    margin-top: 4px;
+    padding-top: 12px;
+    border-top: 1px solid var(--line);
+    color: var(--dim);
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .dock {
+    height: 112px;
+    background: var(--p1);
+    border-top: 1px solid var(--line);
+    display: flex;
+    align-items: stretch;
+    flex: none;
+  }
+  .scenes-strip {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+  }
+  .scene-pad {
+    width: 138px;
+    flex: none;
+    background: var(--p2);
+    border: 2px solid var(--line);
+    border-radius: 9px;
+    padding: 4px;
+  }
+  .scene-pad.on {
+    border-color: var(--accent);
+    box-shadow: 0 0 18px rgba(79, 140, 255, .28);
+  }
+  .scene-pad .thumb {
+    height: 60px;
+    border-radius: 5px;
+    overflow: hidden;
+    position: relative;
+    background: #14151e;
+  }
+  .scene-pad .sname {
+    padding: 6px 4px 2px;
+    font-size: 11.5px;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--text);
+  }
+  .scene-pad.add-pad {
+    width: 62px;
+    height: 88px;
+    border-style: dashed;
+    background: transparent;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--dim);
+  }
+
+  .audio-dock {
+    width: 420px;
+    flex: none;
+    border-left: 1px solid var(--line);
+    padding: 10px 16px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 9px;
+  }
+  .aud-row { display: flex; align-items: center; gap: 10px; }
+  .aud-mute {
+    width: 26px;
+    height: 26px;
+    border-radius: 6px;
+    background: var(--p2);
+    border: 1px solid var(--line);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text);
+    flex: none;
+  }
+  .aud-mute.muted { background: var(--cue); border-color: var(--cue); color: #1a1200; }
+  .aud-name { width: 68px; font-size: 13px; font-weight: 500; color: var(--text); flex: none; }
+  .aud-slider-wrap { flex: 1; display: flex; flex-direction: column; gap: 4px; }
+  .meter-bar { height: 4px; border-radius: 2px; background: var(--p3); overflow: hidden; }
+  .meter-bar i {
+    display: block;
+    height: 100%;
+    border-radius: 2px;
+    background: linear-gradient(90deg, var(--ok) 0%, var(--ok) 75%, var(--cue) 100%);
+  }
+  .aud-db {
+    width: 48px;
+    text-align: right;
+    font: 500 12px/1 var(--mono);
+    color: var(--dim);
+    white-space: nowrap;
+    flex: none;
+  }
+  .aud-gear {
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--faint);
+    flex: none;
+  }
+  .aud-gear.open { background: var(--p3); color: var(--text); }
+
+  .dim-scrim {
+    position: absolute;
+    inset: 0;
+    background: rgba(5, 5, 8, .72);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+    padding: 24px;
+  }
+  .modal {
+    width: 100%;
+    max-width: 820px;
+    background: var(--p1);
+    border: 1px solid #353545;
+    border-radius: 14px;
+    box-shadow: 0 28px 70px rgba(0, 0, 0, .8);
+    overflow: hidden;
+  }
+  .modal-head {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .modal-tabs { display: flex; gap: 6px; }
+  .modal-tabs span {
+    padding: 7px 12px;
+    border-radius: 8px;
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--dim);
+  }
+  .modal-tabs span.on { background: var(--p3); color: var(--text); }
+  .modal-body { padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+  .card-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .src-card { background: var(--p2); border: 1.5px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .src-card.hi { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(79, 140, 255, .35); }
+  .src-thumb {
+    height: 126px;
+    position: relative;
+    background: #131520;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .src-meta { padding: 10px 12px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .src-meta b { font-size: 14px; font-weight: 600; display: block; }
+  .src-meta small { font-size: 12px; color: var(--dim); display: block; }
+  .click-pill { font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 6px; background: var(--accent); color: #fff; }
+
+  .popover {
+    position: absolute;
+    background: #16161e;
+    border: 1px solid #3a3a4d;
+    border-radius: 12px;
+    padding: 16px 18px;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, .75);
+    z-index: 12;
+  }
+  .input-box {
+    height: 36px;
+    padding: 0 12px;
+    border-radius: 8px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    color: var(--text);
+    font: 500 13px/36px var(--mono);
+    display: flex;
+    align-items: center;
+  }
+  .input-box.placeholder { font-family: Inter, system-ui, sans-serif; color: var(--faint); }
+
+  .settings-grid { display: grid; grid-template-columns: 200px 1fr; height: 520px; }
+  .settings-nav {
+    background: #0e0e13;
+    border-right: 1px solid var(--line);
+    padding: 18px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .snav-item { padding: 9px 12px; border-radius: 8px; font-size: 14px; font-weight: 500; color: var(--dim); }
+  .snav-item.on { background: var(--p3); color: var(--text); font-weight: 600; }
+  .settings-pane { padding: 22px 26px; display: flex; flex-direction: column; gap: 14px; }
+  .mod-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 12px 0;
+    border-bottom: 1px solid #1f1f29;
+  }
+  .mod-row:last-child { border-bottom: none; }
+  .mod-row b { font-size: 14.5px; display: block; margin-bottom: 2px; }
+  .mod-row small { font-size: 12.5px; color: var(--dim); display: block; }
+</style>
+</head>
+<body>
+<div class="bar" role="tablist">
+  <button data-v="first" aria-selected="true">First Launch</button>
+  <button data-v="studio" aria-selected="false">Unified Studio</button>
+  <button data-v="edit" aria-selected="false">Selected Layer</button>
+  <button data-v="add" aria-selected="false">1-Click Add</button>
+  <button data-v="popovers" aria-selected="false">Audio &amp; Go Live</button>
+  <button data-v="mods" aria-selected="false">Mods &amp; Settings</button>
+</div>
+<div id="mount"></div>
+
+<script>
+const I = {
+  cam: `<svg class="ic" viewBox="0 0 24 24"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>`,
+  screen: `<svg class="ic" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>`,
+  img: `<svg class="ic" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/></svg>`,
+  globe: `<svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>`,
+  mic: `<svg class="ic sm" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>`,
+  vol: `<svg class="ic sm" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/></svg>`,
+  mute: `<svg class="ic sm" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="22" y1="9" x2="16" y2="15"/><line x1="16" y1="9" x2="22" y2="15"/></svg>`,
+  gear: `<svg class="ic sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.85 1 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`,
+  eye: `<svg class="ic sm" viewBox="0 0 24 24"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>`,
+  unlock: `<svg class="ic sm" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>`,
+  lock: `<svg class="ic sm" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`,
+  trash: `<svg class="ic sm" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg>`,
+  plus: `<svg class="ic" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`,
+  undo: `<svg class="ic sm" viewBox="0 0 24 24"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>`,
+  redo: `<svg class="ic sm" viewBox="0 0 24 24"><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13"/></svg>`,
+  layers: `<svg class="ic sm" viewBox="0 0 24 24"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>`,
+  type: `<svg class="ic sm" viewBox="0 0 24 24"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg>`,
+  win: `<svg class="ic lg" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/></svg>`,
+  x: `<svg class="ic sm" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`,
+  chev: `<svg class="ic sm" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>`
+};
+
+function audRow(icon, name, pct, meter, db, opts={}) {
+  return `<div class="aud-row">
+    <span class="aud-mute ${opts.muted?'muted':''}">${opts.muted?I.mute:icon}</span>
+    <span class="aud-name" ${opts.muted?'style="color:var(--dim)"':''}>${name}</span>
+    <div class="aud-slider-wrap">
+      <div class="slider-track"><div class="slider-fill" style="width:${pct}%;${opts.muted?'background:var(--faint)':''}"></div><div class="slider-thumb" style="left:${pct}%"></div></div>
+      <div class="meter-bar"><i style="width:${opts.muted?0:meter}%"></i></div>
+    </div>
+    <span class="aud-db">${db}</span>
+    <span class="aud-gear ${opts.open?'open':''}">${I.gear}</span>
+  </div>`;
+}
+
+function dockHtml(scenes, audio, dim=false) {
+  return `<div class="dock" ${dim?'style="opacity:.38"':''}>
+    <div class="scenes-strip">${scenes}<div class="scene-pad add-pad">${I.plus}</div></div>
+    <div class="audio-dock">${audio}</div>
+  </div>`;
+}
+
+const SCENES_FULL = `
+  <div class="scene-pad on"><div class="thumb"><div class="scene-game"><div class="sun"></div></div></div><div class="sname">Main</div></div>
+  <div class="scene-pad"><div class="thumb" style="background:linear-gradient(135deg,#2a1638,#111a2b)"></div><div class="sname">Chatting</div></div>
+  <div class="scene-pad"><div class="thumb" style="background:repeating-linear-gradient(-45deg,#181822 0 8px,#21212d 8px 16px)"></div><div class="sname">BRB</div></div>`;
+
+const FRAMES = {
+  first: `
+    <div class="topbar">
+      <span class="logo"></span>
+      <span class="show-btn">My Show ${I.chev}</span>
+      <span class="spacer"></span>
+      <span class="pill-btn"><span class="dot dim"></span>Ready</span>
+      <span class="pill-btn"><span class="dot rec"></span>REC</span>
+      <span class="pill-btn golive">GO LIVE</span>
+      <span class="ib boxed">${I.gear}</span>
+    </div>
+    <div class="body-row">
+      <div class="stage">
+        <div class="canvas-16-9">
+          <div class="empty-prompt">
+            <h3>Start your scene in one click</h3>
+            <p>Your show is ready and auto-saved. Pick a source below, or drop any image, video, or URL onto the canvas.</p>
+            <div class="quick-grid">
+              <div class="quick-card hi"><div class="qico">${I.cam}</div><span>Camera</span><small>Sony A6400</small></div>
+              <div class="quick-card"><div class="qico">${I.screen}</div><span>Screen</span><small>Display or app</small></div>
+              <div class="quick-card"><div class="qico">${I.img}</div><span>Media</span><small>Image or video</small></div>
+              <div class="quick-card"><div class="qico">${I.globe}</div><span>Web / Text</span><small>URL or overlay</small></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    ${dockHtml(
+      `<div class="scene-pad on"><div class="thumb" style="display:flex;align-items:center;justify-content:center;color:var(--faint);font-size:12px">Empty</div><div class="sname">Scene 1</div></div>`,
+      audRow(I.mic,'Mic',76,42,'0 dB') + audRow(I.vol,'Desktop',62,24,'-6 dB')
+    )}`,
+
+  studio: `
+    <div class="topbar">
+      <span class="logo"></span>
+      <span class="show-btn">Friday Stream ${I.chev}</span>
+      <span class="ib">${I.undo}</span>
+      <span class="ib">${I.redo}</span>
+      <span class="spacer"></span>
+      <span class="pill-btn active">${I.layers} Layers</span>
+      <span class="pill-btn">${I.unlock} Editable</span>
+      <span class="spacer"></span>
+      <span class="pill-btn"><span class="dot"></span>6.0 Mb/s</span>
+      <span class="pill-btn"><span class="dot rec"></span>REC</span>
+      <span class="pill-btn live">LIVE · 00:42:18</span>
+      <span class="ib boxed">${I.gear}</span>
+    </div>
+    <div class="body-row">
+      <div class="rail-left">
+        <div class="sec-cap"><span>Layers</span><span style="color:var(--faint)">Main</span></div>
+        <div class="layer-row"><span class="layer-ico">${I.cam}</span><span class="layer-name">Facecam<span class="layer-sub">Circle · PiP</span></span><span style="color:var(--dim)">${I.eye}</span></div>
+        <div class="layer-row"><span class="layer-ico">${I.type}</span><span class="layer-name">Title bar<span class="layer-sub">Overlay</span></span><span style="color:var(--dim)">${I.eye}</span></div>
+        <div class="layer-row"><span class="layer-ico">${I.screen}</span><span class="layer-name">Game capture<span class="layer-sub">1920x1080</span></span><span style="color:var(--dim)">${I.eye}</span></div>
+        <div class="add-big">${I.plus} Add source</div>
+      </div>
+      <div class="stage">
+        <div class="canvas-16-9 onair">
+          <span class="stage-badge live">ON AIR</span>
+          <div class="scene-game"><div class="sun"></div><div class="grid"></div></div>
+          <div class="lower-third">FRIDAY RANKED<span>Live over MoQ · 1080p60</span></div>
+          <div class="cam-pip"></div>
+        </div>
+      </div>
+    </div>
+    ${dockHtml(
+      SCENES_FULL,
+      audRow(I.mic,'Mic',82,74,'+2 dB') + audRow(I.vol,'Game',55,52,'-8 dB') + audRow(I.vol,'Music',35,0,'-16 dB',{muted:true})
+    )}`,
+
+  edit: `
+    <div class="topbar">
+      <span class="logo"></span>
+      <span class="show-btn">Friday Stream ${I.chev}</span>
+      <span class="ib">${I.undo}</span>
+      <span class="ib">${I.redo}</span>
+      <span class="spacer"></span>
+      <span class="pill-btn active">${I.layers} Layers</span>
+      <span class="pill-btn">${I.unlock} Editable</span>
+      <span class="spacer"></span>
+      <span class="pill-btn"><span class="dot"></span>Ready</span>
+      <span class="pill-btn"><span class="dot rec"></span>REC</span>
+      <span class="pill-btn golive">GO LIVE</span>
+      <span class="ib boxed">${I.gear}</span>
+    </div>
+    <div class="body-row">
+      <div class="rail-left">
+        <div class="sec-cap"><span>Layers</span><span style="color:var(--faint)">Main</span></div>
+        <div class="layer-row sel"><span class="layer-ico">${I.cam}</span><span class="layer-name">Facecam<span class="layer-sub">Circle · PiP</span></span><span>${I.eye}</span></div>
+        <div class="layer-row"><span class="layer-ico">${I.type}</span><span class="layer-name">Title bar</span><span style="color:var(--dim)">${I.eye}</span></div>
+        <div class="layer-row"><span class="layer-ico">${I.screen}</span><span class="layer-name">Game capture</span><span style="color:var(--dim)">${I.eye}</span></div>
+        <div class="add-big">${I.plus} Add source</div>
+      </div>
+      <div class="stage">
+        <div class="canvas-16-9">
+          <span class="stage-badge">OFF AIR</span>
+          <div class="scene-game"><div class="sun"></div><div class="grid"></div></div>
+          <div class="lower-third">FRIDAY RANKED<span>Live over MoQ · 1080p60</span></div>
+          <div class="cam-pip"></div>
+          <div class="sel-frame"><i></i><i></i><i></i><i></i></div>
+          <div class="float-bar">
+            <span>Crop</span><span>Fit</span><span>Fill</span><span>${I.lock}</span><span class="del">${I.trash}</span>
+          </div>
+        </div>
+      </div>
+      <div class="inspector">
+        <div class="insp-head"><span>Facecam</span><span style="color:var(--dim)">${I.x}</span></div>
+        <div class="insp-group">
+          <span class="sec-cap">Source</span>
+          <div class="select-box"><span style="display:flex;align-items:center;gap:7px">${I.cam} Sony A6400</span><span style="color:var(--dim)">${I.chev}</span></div>
+        </div>
+        <div class="insp-group">
+          <span class="sec-cap">Shape</span>
+          <div class="shape-row">
+            <div class="shape-btn"><div class="sh"></div></div>
+            <div class="shape-btn"><div class="sh r"></div></div>
+            <div class="shape-btn on"><div class="sh c"></div></div>
+            <div class="shape-btn"><div class="sh a"></div></div>
+          </div>
+          <div class="ctrl-row">
+            <span style="color:var(--dim);width:54px">Border</span>
+            <div class="slider-track"><div class="slider-fill" style="width:30%"></div><div class="slider-thumb" style="left:30%"></div></div>
+            <span style="width:18px;height:18px;border-radius:4px;background:#fff;border:1px solid var(--line)"></span>
+          </div>
+          <div class="ctrl-row">
+            <span style="color:var(--dim);width:54px">Shadow</span>
+            <div class="slider-track"><div class="slider-fill" style="width:55%"></div><div class="slider-thumb" style="left:55%"></div></div>
+          </div>
+        </div>
+        <div class="insp-group">
+          <div class="ctrl-row"><span>Remove background</span><div class="toggle on"></div></div>
+          <div class="ctrl-row">
+            <span style="color:var(--dim);width:54px">Opacity</span>
+            <div class="slider-track"><div class="slider-fill" style="width:100%"></div><div class="slider-thumb" style="left:100%"></div></div>
+            <span style="font:500 12px/1 var(--mono);color:var(--dim)">100%</span>
+          </div>
+        </div>
+        <div class="disclosure">▸ More (Position, Crop, Blend, Filters)</div>
+      </div>
+    </div>
+    ${dockHtml(SCENES_FULL, audRow(I.mic,'Mic',76,45,'0 dB') + audRow(I.vol,'Game',58,30,'-7 dB'))}`,
+
+  add: `
+    <div class="topbar">
+      <span class="logo"></span>
+      <span class="show-btn">Friday Stream ${I.chev}</span>
+      <span class="spacer"></span>
+      <span class="pill-btn"><span class="dot"></span>Ready</span>
+      <span class="pill-btn golive">GO LIVE</span>
+      <span class="ib boxed">${I.gear}</span>
+    </div>
+    <div class="body-row">
+      <div class="stage">
+        <div class="canvas-16-9" style="opacity:.25"><div class="scene-game"><div class="sun"></div><div class="grid"></div></div></div>
+        <div class="dim-scrim">
+          <div class="modal">
+            <div class="modal-head">
+              <strong style="font-size:17px">Add to Main</strong>
+              <div class="modal-tabs">
+                <span class="on">Devices &amp; Screens</span><span>Media &amp; Web</span><span>Audio</span><span>Guests</span>
+              </div>
+              <span class="spacer"></span>
+              <span style="color:var(--dim)">${I.x}</span>
+            </div>
+            <div class="modal-body">
+              <div class="sec-cap"><span>Click any card to add immediately (auto-detected)</span></div>
+              <div class="card-grid">
+                <div class="src-card hi">
+                  <div class="src-thumb" style="background:linear-gradient(155deg,#2b3556,#131726)">
+                    <div style="width:62px;height:62px;border-radius:50%;background:#ebb894;margin-top:12px"></div>
+                  </div>
+                  <div class="src-meta"><div><b>Sony A6400</b><small>Camera · 1080p60</small></div><span class="click-pill">+ Add</span></div>
+                </div>
+                <div class="src-card">
+                  <div class="src-thumb"><div class="scene-game"><div class="sun"></div></div></div>
+                  <div class="src-meta"><div><b>Display 1</b><small>2560x1440 · Primary</small></div></div>
+                </div>
+                <div class="src-card">
+                  <div class="src-thumb" style="background:#171c2b;flex-direction:column;gap:8px;color:var(--dim)">
+                    ${I.win}<span style="font-size:12.5px">Choose app window…</span>
+                  </div>
+                  <div class="src-meta"><div><b>App Window</b><small>System picker</small></div></div>
+                </div>
+              </div>
+              <div style="display:flex;gap:10px;padding-top:10px;border-top:1px solid var(--line)">
+                <span class="pill-btn" style="flex:1;justify-content:center;color:var(--text);height:38px">${I.img} Image or video file…</span>
+                <span class="pill-btn" style="flex:1;justify-content:center;color:var(--text);height:38px">${I.globe} Web page URL…</span>
+                <span class="pill-btn" style="justify-content:center;height:38px;padding:0 18px">Color</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    ${dockHtml(SCENES_FULL, audRow(I.mic,'Mic',76,0,'0 dB') + audRow(I.vol,'Game',55,0,'-8 dB'), true)}`,
+
+  popovers: `
+    <div class="topbar">
+      <span class="logo"></span>
+      <span class="show-btn">Friday Stream ${I.chev}</span>
+      <span class="spacer"></span>
+      <span class="pill-btn"><span class="dot"></span>Encoder OK</span>
+      <span class="pill-btn"><span class="dot rec"></span>REC</span>
+      <span class="pill-btn golive" style="box-shadow:0 0 0 2px var(--accent)">GO LIVE</span>
+      <span class="ib boxed">${I.gear}</span>
+    </div>
+    <div class="body-row">
+      <div class="stage">
+        <div class="canvas-16-9" style="opacity:.45">
+          <div class="scene-game"><div class="sun"></div><div class="grid"></div></div>
+          <div class="cam-pip"></div>
+        </div>
+
+        <div class="popover" style="top:18px;right:24px;width:410px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+            <strong style="font-size:16px">Go Live</strong>
+            <span style="font-size:12.5px;color:var(--ok)">● NVENC 1080p60 ready</span>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <div style="font-size:12.5px;color:var(--dim)">Destination URL (MoQ, RTMP, or WHIP)</div>
+            <div class="input-box">https://relay.kixel.live/anon</div>
+            <div class="input-box placeholder">Stream key / token (optional)</div>
+            <span class="pill-btn accent" style="justify-content:center;height:38px;margin-top:4px;font-size:14px">Go Live Now</span>
+            <div style="font-size:12px;color:var(--dim);text-align:center">Once saved, clicking GO LIVE starts immediately.</div>
+          </div>
+        </div>
+
+        <div class="popover" style="bottom:18px;right:24px;width:360px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+            <strong style="font-size:15px;display:flex;align-items:center;gap:7px">${I.mic} Mic Options</strong>
+            <span style="font-size:12px;color:var(--dim)">Auto-saved</span>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:11px">
+            <div class="ctrl-row"><span>Monitor in headphones</span><div class="toggle on"></div></div>
+            <div class="ctrl-row">
+              <span style="color:var(--dim);width:50px">Delay</span>
+              <div class="slider-track"><div class="slider-fill" style="width:18%"></div><div class="slider-thumb" style="left:18%"></div></div>
+              <span style="font:500 12px/1 var(--mono);color:var(--dim)">40 ms</span>
+            </div>
+            <div class="ctrl-row">
+              <span style="color:var(--dim);width:50px">Pan</span>
+              <div class="slider-track"><div class="slider-fill" style="width:50%"></div><div class="slider-thumb" style="left:50%"></div></div>
+              <span style="font:500 12px/1 var(--mono);color:var(--dim)">Center</span>
+            </div>
+            <div style="padding-top:8px;border-top:1px solid var(--line);display:flex;justify-content:space-between;align-items:center">
+              <span style="font-size:12.5px;color:var(--dim)">Noise gate, EQ…</span>
+              <span class="pill-btn" style="height:28px;font-size:12px">+ Filter</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    ${dockHtml(SCENES_FULL, audRow(I.mic,'Mic',78,65,'0 dB',{open:true}) + audRow(I.vol,'Game',55,38,'-8 dB'))}`,
+
+  mods: `
+    <div class="topbar">
+      <span class="logo"></span>
+      <span class="show-btn">Friday Stream ${I.chev}</span>
+      <span class="spacer"></span>
+      <span class="pill-btn golive">GO LIVE</span>
+      <span class="ib on">${I.gear}</span>
+    </div>
+    <div class="body-row">
+      <div class="stage">
+        <div class="dim-scrim" style="background:rgba(5,5,8,.82)">
+          <div class="modal" style="max-width:860px">
+            <div class="settings-grid">
+              <div class="settings-nav">
+                <div class="sec-cap" style="padding:4px 12px 10px">Settings</div>
+                <div class="snav-item">Show</div>
+                <div class="snav-item">Destinations</div>
+                <div class="snav-item">Recording</div>
+                <div class="snav-item">Hotkeys</div>
+                <div class="snav-item">Guests</div>
+                <div class="snav-item on">Mods</div>
+              </div>
+              <div class="settings-pane">
+                <div style="display:flex;justify-content:space-between;align-items:center">
+                  <div>
+                    <strong style="font-size:19px">Mods</strong>
+                    <div style="font-size:13px;color:var(--dim);margin-top:2px">Power-user tools stay hidden until turned on. All settings auto-save.</div>
+                  </div>
+                  <span style="color:var(--dim)">${I.x}</span>
+                </div>
+                <div>
+                  <div class="mod-row"><div><b>Audio Scenes &amp; Routes</b><small>Multi-bus audio desk (separate mixes for Stream, Headphones, Recording)</small></div><div class="toggle"></div></div>
+                  <div class="mod-row"><div><b>Replay &amp; Review</b><small>Instant replay buffer, clip trimming, and live stream markers</small></div><div class="toggle"></div></div>
+                  <div class="mod-row"><div><b>Studio Mode</b><small>Cue scenes off-air before cutting or transitioning live</small></div><div class="toggle"></div></div>
+                  <div class="mod-row"><div><b>Smart Layout (Slots &amp; Keep Clear)</b><small>Auto-tiling guest slots and automatic facecam dodging</small></div><div class="toggle"></div></div>
+                  <div class="mod-row"><div><b>Dual Format · Multiview · Phone Remote · Published Scenes · Scene Graph</b><small>Simultaneous portrait stream, multi-window monitor, mobile remote, independent broadcasts</small></div><div class="toggle"></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    ${dockHtml(SCENES_FULL, audRow(I.mic,'Mic',76,0,'0 dB'), true)}`
+};
+
+const mount = document.getElementById('mount');
+const buttons = document.querySelectorAll('.bar button');
+Object.entries(FRAMES).forEach(([id, html]) => {
+  const el = document.createElement('div');
+  el.className = 'frame';
+  el.id = 'f-' + id;
+  el.innerHTML = html;
+  mount.appendChild(el);
+});
+
+function show(id) {
+  buttons.forEach(b => b.setAttribute('aria-selected', String(b.dataset.v === id)));
+  mount.querySelectorAll('.frame').forEach(f => f.classList.toggle('active', f.id === 'f-' + id));
+}
+
+buttons.forEach(b => b.addEventListener('click', () => show(b.dataset.v)));
+if (location.hash.startsWith('#shot:')) {
+  document.body.classList.add('shot');
+  show(location.hash.slice(6));
+} else {
+  show('studio');
+}
+</script>
+</body>
+</html>
