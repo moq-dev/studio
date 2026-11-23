@@ -1203,26 +1203,35 @@ impl Panels {
 			}
 		}
 		let stream = self.controls.stream.lock().unwrap().clone();
+		let saved = stream.saved();
+		// Why each pane still holds its edit: it is not valid, or its last
+		// save, the pane's own note, was refused.
+		let refused = |pane: Setting| {
+			self.saved
+				.as_ref()
+				.filter(|(from, _)| *from == pane)
+				.map(|(_, note)| note.clone())
+				.unwrap_or_else(|| "it was refused".into())
+		};
 		let held = [
-			self.stream_form
-				.as_ref()
-				.is_some_and(|form| form.edited(stream.saved()))
-				.then_some("Settings, Destinations"),
-			self.guests_form
-				.as_ref()
-				.is_some_and(|form| form.edited(stream.saved()))
-				.then_some("Settings, Guests"),
+			self.stream_form.as_ref().filter(|form| form.edited(saved)).map(|form| {
+				(
+					"Settings, Destinations",
+					form.saved(saved)
+						.err()
+						.unwrap_or_else(|| refused(Setting::Destinations)),
+				)
+			}),
+			self.guests_form.as_ref().filter(|form| form.edited(saved)).map(|form| {
+				(
+					"Settings, Guests",
+					form.saved(saved).err().unwrap_or_else(|| refused(Setting::Guests)),
+				)
+			}),
 		];
 		match held.into_iter().flatten().next() {
 			None => Ok(()),
-			Some(pane) => {
-				let why = self
-					.saved
-					.as_ref()
-					.map(|(_, note)| note.as_str())
-					.unwrap_or("it cannot be saved");
-				anyhow::bail!("{pane} has a change not saved: {why}")
-			}
+			Some((pane, why)) => anyhow::bail!("{pane} has a change not saved: {why}"),
 		}
 	}
 

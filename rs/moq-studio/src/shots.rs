@@ -1470,6 +1470,19 @@ fn an_edit_being_typed_saves_on_the_way_out() {
 	};
 	studio.flush_settings().expect("the edit saves");
 	assert!(saved().contains("flushed.example"), "saved: {}", saved());
+
+	// One that cannot save says why, not the note of the save before it.
+	harness.run_steps(2);
+	harness.get_by_label("Relay address").focus();
+	harness.run_steps(2);
+	harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+	harness.get_by_label("Relay address").type_text("not a url");
+	harness.run_steps(2);
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		unreachable!("still the studio")
+	};
+	let refused = studio.flush_settings().expect_err("an address that is not one");
+	assert!(format!("{refused:#}").contains("not a URL"), "says why: {refused:#}");
 	drop(harness);
 	quit(&engine, &runtime);
 }

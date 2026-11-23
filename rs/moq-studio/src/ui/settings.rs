@@ -113,7 +113,7 @@ impl GuestForm {
 	}
 
 	/// What the form would save over `saved`, or why it cannot.
-	fn saved(&self, saved: &Saved) -> Result<Saved, String> {
+	pub(super) fn saved(&self, saved: &Saved) -> Result<Saved, String> {
 		let text = |text: &str| Some(text.trim().to_string()).filter(|text| !text.is_empty());
 		let page = match text(&self.page) {
 			None => None,

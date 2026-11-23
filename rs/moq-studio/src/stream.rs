@@ -231,7 +231,11 @@ impl Stream {
 						Ok(token) => self.credentials.set(url, token.as_deref()).err()?,
 						Err(unread) => anyhow::anyhow!("it could not be read: {unread}"),
 					};
-					Some(format!("{url} ({restore:#})"))
+					// Never the query, which could carry a token.
+					let mut shown = (*url).clone();
+					shown.set_query(None);
+					shown.set_fragment(None);
+					Some(format!("{shown} ({restore:#})"))
 				})
 				.collect();
 			return Err(match lost.is_empty() {
