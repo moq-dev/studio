@@ -224,15 +224,21 @@ async fn an_agent_builds_a_show() {
 	studio.ctl(&["wait", "--shown", "Scene sizes"]);
 	studio.audit("the settings");
 
-	// Hotkeys runs past the dialog's foot, so a scroll moves it up.
+	// A key pressed binds a hotkey, as the desktop's would.
 	studio.ctl(&["click", "Hotkeys"]);
+	studio.ctl(&["click", "Bind Go live"]);
+	studio.ctl(&["key", "F9"]);
+	studio.ctl(&["wait", "--shown", "Rebind Go live: F9"]);
+	studio.audit("the hotkeys");
+
+	// Hotkeys runs past the dialog's foot, so a scroll moves it up.
 	let top = |studio: &Studio| {
-		find(&studio.snapshot()["tree"], "Bind Go live").expect("a Go live hotkey")["rect"][1]
+		find(&studio.snapshot()["tree"], "Bind Panic").expect("a Panic hotkey")["rect"][1]
 			.as_f64()
 			.unwrap()
 	};
 	let before = top(&studio);
-	studio.ctl(&["scroll", "Bind Go live", "--dy", "40"]);
+	studio.ctl(&["scroll", "Bind Panic", "--dy", "40"]);
 	assert_eq!(top(&studio), before - 40.0, "scrolled by the points asked");
 
 	// A target that names nothing fails, and says so.

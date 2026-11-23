@@ -41,7 +41,8 @@ pub fn run(app: App, opener: show::Opener, socket: Socket) -> anyhow::Result<()>
 			cc.egui_ctx.set_request_repaint_callback(move |info| {
 				let _ = wake.send(info.delay);
 			});
-			let control = socket.serve(&cc.egui_ctx, &runtime);
+			let keyboard = hotkeys::Keyboard::default();
+			let control = socket.serve(&cc.egui_ctx, &runtime, keyboard.clone());
 			Window {
 				app,
 				fx: fx::Fx::new(&render, &cc.egui_ctx, &runtime),
@@ -53,7 +54,7 @@ pub fn run(app: App, opener: show::Opener, socket: Socket) -> anyhow::Result<()>
 				// storage, which a window would.
 				pictures: None,
 				aired: None,
-				keyboard: hotkeys::Keyboard::default(),
+				keyboard,
 				framed,
 				closed,
 				control: Some(control),

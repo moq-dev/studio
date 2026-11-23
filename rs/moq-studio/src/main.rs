@@ -337,7 +337,7 @@ impl eframe::App for Window {
 			studio.logic(ctx, frame);
 		}
 		if let Some(control) = &self.control {
-			control.describe(|| self.describe());
+			control.logic(ctx, || self.describe());
 		}
 	}
 
@@ -703,7 +703,7 @@ fn run(app: App, opener: show::Opener, socket: Option<control::Socket>) -> anyho
 			kit::install(&cc.egui_ctx);
 			let fx = fx::Fx::new(&render, &cc.egui_ctx, &opener.runtime);
 			let recent = library::Recent::load(cc.storage);
-			let control = socket.map(|socket| socket.serve(&cc.egui_ctx, &opener.runtime));
+			let control = socket.map(|socket| socket.serve(&cc.egui_ctx, &opener.runtime, window_keyboard.clone()));
 			Ok(Box::new(Window {
 				app,
 				render,

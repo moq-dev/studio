@@ -23,6 +23,8 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::hotkeys;
+
 #[cfg(unix)]
 mod ctl;
 pub mod headless;
@@ -227,6 +229,8 @@ const ACTIONS: [(accesskit::Action, &str); 5] = [
 #[derive(Default)]
 struct Tree {
 	nodes: BTreeMap<accesskit::NodeId, accesskit::Node>,
+	/// Each node's parent.
+	parents: BTreeMap<accesskit::NodeId, accesskit::NodeId>,
 	root: Option<accesskit::NodeId>,
 	focus: Option<accesskit::NodeId>,
 }
@@ -234,6 +238,11 @@ struct Tree {
 impl Tree {
 	fn update(&mut self, update: &accesskit::TreeUpdate) {
 		self.nodes = update.nodes.iter().cloned().collect();
+		self.parents = self
+			.nodes
+			.iter()
+			.flat_map(|(id, node)| node.children().iter().map(move |child| (*child, *id)))
+			.collect();
 		if let Some(tree) = &update.tree {
 			self.root = Some(tree.root);
 		}
@@ -347,26 +356,57 @@ impl Tree {
 			.collect()
 	}
 
-	/// Where a press on `target` lands: a point, or the middle of its widget,
-	/// which must be enabled and have bounds.
+	/// Where a press on `target` lands: a point in the window, or the middle
+	/// of its widget, which must be enabled and in view.
 	fn point(&self, target: &Target, screen: egui::Rect) -> anyhow::Result<egui::Pos2> {
-		let pos = match target {
-			Target::At([x, y]) => egui::pos2(*x, *y),
-			_ => {
-				let (_, node) = self.one(target)?;
-				anyhow::ensure!(!node.is_disabled(), "{} is disabled", describe(target));
-				let rect = node
-					.bounds()
-					.with_context(|| format!("{} has no bounds", describe(target)))?;
-				egui::pos2(((rect.x0 + rect.x1) / 2.0) as f32, ((rect.y0 + rect.y1) / 2.0) as f32)
-			}
+		let Target::At([x, y]) = target else {
+			let (id, node) = self.one(target)?;
+			anyhow::ensure!(!node.is_disabled(), "{} is disabled", describe(target));
+			let pos = self
+				.middle(id)
+				.with_context(|| format!("{} has no bounds", describe(target)))?;
+			anyhow::ensure!(
+				self.visible(id, screen),
+				"{} is at {pos:?}, out of view",
+				describe(target)
+			);
+			return Ok(pos);
 		};
+		let pos = egui::pos2(*x, *y);
 		anyhow::ensure!(
 			screen.contains(pos),
-			"{} is at {pos:?}, outside the window's {screen:?}",
+			"{} is outside the window's {screen:?}",
 			describe(target)
 		);
 		Ok(pos)
+	}
+
+	/// The middle of `id`'s widget.
+	fn middle(&self, id: accesskit::NodeId) -> Option<egui::Pos2> {
+		let rect = self.nodes.get(&id)?.bounds()?;
+		Some(egui::pos2(
+			((rect.x0 + rect.x1) / 2.0) as f32,
+			((rect.y0 + rect.y1) / 2.0) as f32,
+		))
+	}
+
+	/// Whether the middle of `id`'s widget shows: within the window and every
+	/// widget holding it, as a scrolled pane holds what it clips.
+	fn visible(&self, id: accesskit::NodeId, screen: egui::Rect) -> bool {
+		let Some(middle) = self.middle(id) else {
+			return false;
+		};
+		let point = accesskit::Point::new(middle.x.into(), middle.y.into());
+		let mut at = id;
+		while let Some(parent) = self.parents.get(&at) {
+			if let Some(bounds) = self.nodes.get(parent).and_then(|node| node.bounds())
+				&& !bounds.contains(point)
+			{
+				return false;
+			}
+			at = *parent;
+		}
+		screen.contains(middle)
 	}
 }
 
@@ -436,29 +476,28 @@ impl Socket {
 	}
 
 	/// Serve requests to the window drawn by `ctx` until the process ends,
-	/// returning what the window answers them with.
-	pub fn serve(self, ctx: &egui::Context, runtime: &tokio::runtime::Handle) -> Control {
+	/// pressing keys through `keyboard` as the desktop's are.
+	pub fn serve(self, ctx: &egui::Context, runtime: &tokio::runtime::Handle, keyboard: hotkeys::Keyboard) -> Control {
 		// The tree is drawn only once something asks for it; a screen reader
 		// turns it on the same way.
 		ctx.enable_accesskit();
-		let (send, receive) = mpsc::channel(1);
-		let shared = Arc::new(Mutex::new(Shared::default()));
+		let (send, requests) = mpsc::channel(1);
+		let state = Arc::new(Mutex::new(State::new(requests, keyboard)));
 		ctx.add_plugin(Plugin {
-			requests: receive,
-			op: None,
-			tree: Tree::default(),
-			shared: shared.clone(),
-			screenshots: 0,
+			state: state.clone(),
+			passes: Vec::new(),
 		});
 		let listener = self.listener;
-		let ctx = ctx.clone();
+		let wake = Wake(Arc::new(Mutex::new(Some(ctx.clone()))));
+		let waking = wake.clone();
 		runtime.spawn(async move {
-			if let Err(err) = accept(listener, send, ctx).await {
+			if let Err(err) = accept(listener, send, waking).await {
 				tracing::error!(error = format!("{err:#}"), "the control socket failed");
 			}
 		});
 		Control {
-			shared,
+			state,
+			wake,
 			_path: self.path,
 		}
 	}
@@ -477,7 +516,7 @@ impl Socket {
 		)
 	}
 
-	pub fn serve(self, _: &egui::Context, _: &tokio::runtime::Handle) -> Control {
+	pub fn serve(self, _: &egui::Context, _: &tokio::runtime::Handle, _: hotkeys::Keyboard) -> Control {
 		match self {}
 	}
 }
@@ -491,39 +530,56 @@ impl Drop for Unlink {
 	}
 }
 
-/// The window's side of the control socket: the state a snapshot or a wait
-/// asks the studio for.
+/// The window's side of the control socket.
 pub struct Control {
-	shared: Arc<Mutex<Shared>>,
+	state: Arc<Mutex<State>>,
+	wake: Wake,
 	_path: Unlink,
 }
 
-impl Control {
-	/// Give the studio's state, as `describe` says it, to the request that
-	/// asks for it this frame.
-	pub fn describe(&self, describe: impl FnOnce() -> serde_json::Value) {
-		let mut shared = self.shared.lock().unwrap();
-		if shared.wanted {
-			shared.state = Some(describe());
+impl Drop for Control {
+	fn drop(&mut self) {
+		// Here, on the window's thread, rather than on the runtime's.
+		let ctx = self.wake.0.lock().unwrap().take();
+		drop(ctx);
+	}
+}
+
+/// Wakes the window from the socket's task while there is a window.
+/// [`Control`] takes it on the way out, so the task, which the runtime drops
+/// as it ends, never holds egui's last reference: egui's teardown lets go of
+/// what blocks on the runtime, such as a D-Bus proxy, which panics there.
+#[derive(Clone)]
+struct Wake(Arc<Mutex<Option<egui::Context>>>);
+
+impl Wake {
+	fn wake(&self) {
+		if let Some(ctx) = &*self.0.lock().unwrap() {
+			ctx.request_repaint_of(egui::ViewportId::ROOT);
 		}
 	}
 }
 
-/// What the window and its plugin share within a frame.
-#[derive(Default)]
-struct Shared {
-	/// Whether this frame's request reads the studio's state.
-	wanted: bool,
-	state: Option<serde_json::Value>,
+impl Control {
+	/// Run in every frame of the window, drawn or not: give the studio's
+	/// state, as `describe` says it, to a request that reads it, and answer
+	/// what an undrawn window cannot.
+	pub fn logic(&self, ctx: &egui::Context, describe: impl FnOnce() -> serde_json::Value) {
+		let mut state = self.state.lock().unwrap();
+		if state.wanted {
+			state.studio = Some(describe());
+		}
+		// eframe runs only this, and no pass, so none of the plugin's hooks, for
+		// a minimized or hidden window.
+		if !state.drawing {
+			state.undrawn(ctx);
+		}
+	}
 }
 
 #[cfg(unix)]
 /// Take connections one at a time from this user's processes.
-async fn accept(
-	listener: tokio::net::UnixListener,
-	send: mpsc::Sender<Asked>,
-	ctx: egui::Context,
-) -> anyhow::Result<()> {
+async fn accept(listener: tokio::net::UnixListener, send: mpsc::Sender<Asked>, wake: Wake) -> anyhow::Result<()> {
 	let uid = rustix::process::getuid().as_raw();
 	loop {
 		let (stream, _) = listener.accept().await?;
@@ -538,7 +594,7 @@ async fn accept(
 				continue;
 			}
 		}
-		if let Err(err) = connection(stream, &send, &ctx).await {
+		if let Err(err) = connection(stream, &send, &wake).await {
 			tracing::debug!(error = format!("{err:#}"), "a control connection ended");
 		}
 	}
@@ -546,11 +602,7 @@ async fn accept(
 
 #[cfg(unix)]
 /// Answer one connection's requests in turn until it closes.
-async fn connection(
-	stream: tokio::net::UnixStream,
-	send: &mpsc::Sender<Asked>,
-	ctx: &egui::Context,
-) -> anyhow::Result<()> {
+async fn connection(stream: tokio::net::UnixStream, send: &mpsc::Sender<Asked>, wake: &Wake) -> anyhow::Result<()> {
 	let (read, mut write) = stream.into_split();
 	let mut read = tokio::io::BufReader::new(read);
 	let mut line = Vec::new();
@@ -568,7 +620,7 @@ async fn connection(
 			return respond(&mut write, reply).await;
 		}
 		let reply = match serde_json::from_slice::<Request>(&line) {
-			Ok(request) => ask(request, send, ctx, &mut read).await?,
+			Ok(request) => ask(request, send, wake, &mut read).await?,
 			Err(err) => Reply::Error(format!("not a request: {err}")),
 		};
 		respond(&mut write, reply).await?;
@@ -581,18 +633,22 @@ async fn connection(
 async fn ask(
 	request: Request,
 	send: &mpsc::Sender<Asked>,
-	ctx: &egui::Context,
+	wake: &Wake,
 	read: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
 ) -> anyhow::Result<Reply> {
 	let (reply, answer) = oneshot::channel();
 	send.send((request, reply)).await.context("the window is gone")?;
 	// The window draws only when asked to, as when nothing moves in it.
-	ctx.request_repaint();
+	wake.wake();
 	tokio::select! {
 		answer = answer => Ok(answer.unwrap_or_else(|_| Reply::error("the window closed"))),
 		// Nothing more is read until this is answered, so anything is a hang-up
 		// or a request out of turn.
-		_ = read.fill_buf() => anyhow::bail!("the asker hung up or sent a request out of turn"),
+		_ = read.fill_buf() => {
+			// A frame to let go of what the request pressed.
+			wake.wake();
+			anyhow::bail!("the asker hung up or sent a request out of turn")
+		}
 	}
 }
 
@@ -618,10 +674,8 @@ enum Work {
 	Snapshot,
 	/// Waiting for the picture asked for with this number.
 	Screenshot { asked: Option<u64> },
-	/// Input to give, a frame's events at a time, once its targets are found.
+	/// Input to give, a frame's at a time, once its targets are found.
 	Input {
-		/// Targets still to find; the first scrolled into view a frame
-		/// before.
 		find: Option<Find>,
 		frames: VecDeque<Frame>,
 		/// Frames left to draw once every event is given.
@@ -648,42 +702,102 @@ struct Find {
 	request: Request,
 }
 
-/// How far finding an input's targets has come, a frame each.
+/// How far finding an input's targets has come, a frame or more each.
 #[derive(Clone, Copy, PartialEq)]
 enum Stage {
 	/// Drawing a frame with the tree on, which a screen reader leaving may
 	/// have turned off since the last request.
 	Look,
-	/// Scrolling the first target into view, where a person would scroll to
-	/// it first.
+	/// Scrolling the first target into view if it is out of it, as a person
+	/// would scroll to it first.
 	Reveal,
-	/// Pointing at where the targets are now.
-	Point,
+	/// Waiting for the scroll to land: the frame after it lays out at the old
+	/// offset, and an animated one moves over several. Its bounds when last
+	/// seen, and the frames waited.
+	Scrolling { seen: Option<accesskit::Rect>, frames: u8 },
 }
 
-/// The events of one frame.
-struct Frame(Vec<egui::Event>);
+/// The longest a target is waited for to scroll into view, a second of
+/// frames, past egui's longest scroll animation.
+const SCROLLING: u8 = 60;
+
+/// What one frame gives egui.
+#[derive(Debug)]
+struct Frame(Vec<Give>);
 
 impl Frame {
 	fn of(events: impl IntoIterator<Item = egui::Event>) -> Self {
-		Self(events.into_iter().collect())
+		Self(events.into_iter().map(Give::Event).collect())
 	}
 }
 
-/// The egui plugin that turns requests into input and reads the window back.
+/// One thing a frame gives egui.
+#[derive(Debug)]
+enum Give {
+	Event(egui::Event),
+	/// The modifiers held from now on, which the studio's keyboard hears too.
+	Modifiers(egui::Modifiers),
+	/// A key pressed, which the studio's keyboard hears first, as it hears the
+	/// desktop's, so a bound hotkey fires or binds rather than reaching egui.
+	Press(Press),
+}
+
+/// A key pressed: the key egui names, where it sits, and what a US layout
+/// prints on it.
+#[derive(Clone, Debug, PartialEq)]
+struct Press {
+	key: egui::Key,
+	physical: winit::keyboard::KeyCode,
+	name: winit::keyboard::Key,
+	modifiers: egui::Modifiers,
+}
+
+/// The egui plugin that turns requests into input and reads the window back,
+/// its state shared with [`Control`], which runs when it does not.
 struct Plugin {
+	state: Arc<Mutex<State>>,
+	/// The windows whose passes are under way, the innermost last: egui's own
+	/// stack is popped before a pass's output reaches plugins.
+	passes: Vec<egui::ViewportId>,
+}
+
+struct State {
 	requests: mpsc::Receiver<Asked>,
 	op: Option<Op>,
 	tree: Tree,
-	shared: Arc<Mutex<Shared>>,
 	/// Screenshots asked for so far, to tell this one's picture by.
 	screenshots: u64,
+	keyboard: hotkeys::Keyboard,
+	/// Where the pointer was put last, where a canceled press lets go.
+	pointer: Option<egui::Pos2>,
+	/// Releases owed by a request its asker gave up on, given next frame.
+	owed: Option<Frame>,
+	/// Whether the window's pass is under way, between its begin and output.
+	drawing: bool,
+	/// Whether this frame's request reads the studio's state, and the state.
+	wanted: bool,
+	studio: Option<serde_json::Value>,
 }
 
 /// A screenshot's tag, which egui hands back with its picture.
 struct Shot(u64);
 
-impl Plugin {
+impl State {
+	fn new(requests: mpsc::Receiver<Asked>, keyboard: hotkeys::Keyboard) -> Self {
+		Self {
+			requests,
+			op: None,
+			tree: Tree::default(),
+			screenshots: 0,
+			keyboard,
+			pointer: None,
+			owed: None,
+			drawing: false,
+			wanted: false,
+			studio: None,
+		}
+	}
+
 	/// Start the next request, if one waits and none is in progress.
 	fn next(&mut self, ctx: &egui::Context) {
 		if self.op.is_some() {
@@ -722,7 +836,7 @@ impl Plugin {
 				since: None,
 			},
 			Request::Quit {} => {
-				ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+				ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
 				Work::Quit
 			}
 		};
@@ -734,6 +848,296 @@ impl Plugin {
 			let _ = op.reply.send(reply);
 		}
 	}
+
+	/// Drop the request in progress, owing egui the release of whatever it
+	/// pressed and has yet to let go of, and return where its answer goes.
+	fn cancel(&mut self) -> Option<oneshot::Sender<Reply>> {
+		let op = self.op.take()?;
+		if let Work::Input { frames, .. } = op.work {
+			let owed: Vec<Give> = frames
+				.into_iter()
+				.flat_map(|frame| frame.0)
+				.filter_map(|give| release(give, self.pointer))
+				.collect();
+			if !owed.is_empty() {
+				self.owed = Some(Frame(owed));
+			}
+		}
+		Some(op.reply)
+	}
+
+	/// A frame of a minimized or hidden window, which draws nothing to read or
+	/// press: quit, and fail anything else.
+	fn undrawn(&mut self, ctx: &egui::Context) {
+		self.next(ctx);
+		if matches!(self.op, Some(Op { work: Work::Quit, .. })) {
+			return self.finish(Reply::Done);
+		}
+		if let Some(reply) = self.cancel() {
+			// What a person would do first. Wayland lets no app restore itself,
+			// so there this does nothing.
+			ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Minimized(false));
+			let _ = reply.send(Reply::error(
+				"the window is minimized or hidden, so it draws nothing to act on; it was asked to show again",
+			));
+		}
+	}
+}
+
+impl egui::Plugin for Plugin {
+	fn debug_name(&self) -> &'static str {
+		"control"
+	}
+
+	// The multiview's window runs these hooks too; only the studio's own is
+	// read and driven.
+
+	fn input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+		self.passes.push(input.viewport_id);
+		let mut state = self.state.lock().unwrap();
+		// Pictures reach whichever window draws next, the multiview's too.
+		state.screenshot(input);
+		if input.viewport_id == egui::ViewportId::ROOT {
+			state.input(ctx, input);
+		}
+	}
+
+	fn on_begin_pass(&mut self, ui: &mut egui::Ui) {
+		if self.passes.last() == Some(&egui::ViewportId::ROOT) {
+			self.state.lock().unwrap().begin(ui.ctx());
+		}
+	}
+
+	fn output_hook(&mut self, _ctx: &egui::Context, output: &mut egui::FullOutput) {
+		if self.passes.pop() == Some(egui::ViewportId::ROOT) {
+			self.state.lock().unwrap().output(output);
+		}
+	}
+}
+
+impl State {
+	/// Before a frame: start the next request, and give egui its input.
+	fn input(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+		if self.op.as_ref().is_some_and(|op| op.reply.is_closed()) {
+			// Its asker hung up.
+			self.cancel();
+		}
+		if let Some(owed) = self.owed.take() {
+			self.give(owed, input);
+		}
+		self.next(ctx);
+		let screen = input.screen_rect.unwrap_or(egui::Rect::EVERYTHING);
+		let Some(op) = &mut self.op else { return };
+		// eframe turns the tree off when a screen reader leaves.
+		ctx.enable_accesskit();
+		let frame = match &mut op.work {
+			Work::Input { find, frames, .. } => {
+				if let Some(seeking) = find {
+					match seek(seeking, &self.tree, screen, input) {
+						Ok(None) => return,
+						Ok(Some(at)) => *frames = (seeking.make)(&at, &seeking.request),
+						Err(err) => return self.finish(Reply::error(format!("{err:#}"))),
+					}
+					*find = None;
+				}
+				frames.pop_front()
+			}
+			_ => None,
+		};
+		if let Some(frame) = frame {
+			self.give(frame, input);
+		}
+	}
+
+	/// Answer a screenshot with its picture, if it is among `input`'s events.
+	fn screenshot(&mut self, input: &egui::RawInput) {
+		let Some(Op {
+			work: Work::Screenshot { asked: Some(asked) },
+			..
+		}) = &self.op
+		else {
+			return;
+		};
+		let image = input.events.iter().find_map(|event| match event {
+			egui::Event::Screenshot { user_data, image, .. }
+				if user_data
+					.data
+					.as_ref()
+					.and_then(|data| data.downcast_ref::<Shot>())
+					.is_some_and(|shot| shot.0 == *asked) =>
+			{
+				Some(image.clone())
+			}
+			_ => None,
+		});
+		if let Some(image) = image {
+			let reply = match png(&image) {
+				Ok(bytes) => Reply::Screenshot {
+					png: bytes.len(),
+					bytes,
+				},
+				Err(err) => Reply::error(format!("{err:#}")),
+			};
+			self.finish(reply);
+		}
+	}
+
+	/// As a frame begins: ask for what the request reads, and keep drawing.
+	fn begin(&mut self, ctx: &egui::Context) {
+		self.drawing = true;
+		let Some(op) = &mut self.op else { return };
+		match &mut op.work {
+			Work::Screenshot { asked } if asked.is_none() => {
+				self.screenshots += 1;
+				*asked = Some(self.screenshots);
+				let shot = egui::UserData::new(Shot(self.screenshots));
+				ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Screenshot(shot));
+			}
+			Work::Snapshot
+			| Work::Wait {
+				until: Until::State { .. } | Until::Settled,
+				..
+			} => self.wanted = true,
+			_ => {}
+		}
+		// Keep drawing until it is answered: at once for input, and for a
+		// wait as often as the window would draw anyway.
+		match op.work {
+			Work::Wait { .. } => ctx.request_repaint_after_for(Duration::from_millis(16), egui::ViewportId::ROOT),
+			_ => ctx.request_repaint_of(egui::ViewportId::ROOT),
+		}
+	}
+
+	/// After a frame: read the window back, and answer what it settles.
+	fn output(&mut self, output: &egui::FullOutput) {
+		self.drawing = false;
+		if let Some(update) = &output.platform_output.accesskit_update {
+			self.tree.update(update);
+		}
+		self.wanted = false;
+		let state = self.studio.take();
+		let Some(op) = &mut self.op else { return };
+		let reply = match &mut op.work {
+			Work::Snapshot => Some(Reply::Snapshot {
+				tree: self.tree.snapshot().map(Box::new),
+				focus: self.tree.focus.map(|id| id.0),
+				state: state.unwrap_or(serde_json::Value::Null),
+			}),
+			Work::Input {
+				find: None,
+				frames,
+				settle,
+			} if frames.is_empty() => {
+				*settle = settle.saturating_sub(1);
+				(*settle == 0).then_some(Reply::Done)
+			}
+			Work::Wait {
+				until,
+				deadline,
+				timeout,
+				since,
+			} => {
+				let held = match until {
+					Until::Shown(target) => !self.tree.find(target).is_empty(),
+					Until::Gone(target) => self.tree.find(target).is_empty(),
+					Until::State { pointer, value } => {
+						state.as_ref().and_then(|state| state.pointer(pointer)) == Some(&*value)
+					}
+					Until::Settled => settled(state.as_ref(), since),
+				};
+				match held {
+					true => Some(Reply::Done),
+					false if kio::clock::now() >= *deadline => Some(Reply::Error(format!(
+						"timed out after {} waiting for {until:?}",
+						humantime::format_duration(*timeout)
+					))),
+					false => None,
+				}
+			}
+			Work::Quit => Some(Reply::Done),
+			_ => None,
+		};
+		if let Some(reply) = reply {
+			self.finish(reply);
+		}
+	}
+
+	/// Give egui a frame's input, the keys through the studio's keyboard.
+	fn give(&mut self, frame: Frame, input: &mut egui::RawInput) {
+		for give in frame.0 {
+			match give {
+				Give::Event(event) => {
+					if let egui::Event::PointerMoved(pos) | egui::Event::PointerButton { pos, .. } = &event {
+						self.pointer = Some(*pos);
+					}
+					input.events.push(event);
+				}
+				Give::Modifiers(modifiers) => {
+					self.keyboard.modifiers(held(modifiers));
+					input.events.push(egui::Event::ModifiersChanged(modifiers));
+				}
+				Give::Press(press) => {
+					let physical = winit::keyboard::PhysicalKey::Code(press.physical);
+					if self.keyboard.pressed(physical, press.name.clone(), false, true) {
+						input.events.extend(pressed(&press));
+					}
+				}
+			}
+		}
+	}
+}
+
+/// Take finding `find`'s targets a step further as a frame in `screen`
+/// begins, returning where they are once found.
+fn seek(
+	find: &mut Find,
+	tree: &Tree,
+	screen: egui::Rect,
+	input: &mut egui::RawInput,
+) -> anyhow::Result<Option<Vec<egui::Pos2>>> {
+	match find.stage {
+		Stage::Look => {
+			find.stage = Stage::Reveal;
+			return Ok(None);
+		}
+		Stage::Reveal => {
+			// Only a widget out of view: egui centers what it reveals, which would
+			// move a pane already showing it.
+			if let Ok((id, _)) = tree.one(&find.targets[0])
+				&& !tree.visible(id, screen)
+			{
+				input
+					.events
+					.push(egui::Event::AccessKitActionRequest(accesskit::ActionRequest {
+						action: accesskit::Action::ScrollIntoView,
+						target_tree: accesskit::TreeId::ROOT,
+						target_node: id,
+						data: None,
+					}));
+				find.stage = Stage::Scrolling { seen: None, frames: 0 };
+				return Ok(None);
+			}
+		}
+		Stage::Scrolling { seen, frames } => {
+			let now = tree
+				.one(&find.targets[0])
+				.ok()
+				.and_then(|(id, node)| Some((id, node.bounds()?)));
+			let landed = now.is_some_and(|(id, bounds)| seen == Some(bounds) && tree.visible(id, screen));
+			if !landed && frames < SCROLLING {
+				find.stage = Stage::Scrolling {
+					seen: now.map(|(_, bounds)| bounds),
+					frames: frames + 1,
+				};
+				return Ok(None);
+			}
+		}
+	}
+	find.targets
+		.iter()
+		.map(|target| tree.point(target, screen))
+		.collect::<anyhow::Result<_>>()
+		.map(Some)
 }
 
 /// An input request whose frames are made once `targets` are found.
@@ -812,6 +1216,34 @@ fn drag(at: &[egui::Pos2], _: &Request) -> VecDeque<Frame> {
 	frames
 }
 
+/// What a canceled request still owes egui of `give`: a button let go,
+/// where the pointer is rather than where it was headed, a key let go, or
+/// the modifiers or a scroll gesture ended.
+fn release(give: Give, pointer: Option<egui::Pos2>) -> Option<Give> {
+	match give {
+		Give::Event(egui::Event::PointerButton {
+			pos,
+			button,
+			pressed: false,
+			modifiers,
+		}) => Some(Give::Event(egui::Event::PointerButton {
+			pos: pointer.unwrap_or(pos),
+			button,
+			pressed: false,
+			modifiers,
+		})),
+		Give::Event(
+			event @ (egui::Event::Key { pressed: false, .. }
+			| egui::Event::MouseWheel {
+				phase: egui::TouchPhase::End,
+				..
+			}),
+		) => Some(Give::Event(event)),
+		Give::Modifiers(modifiers) if modifiers.is_none() => Some(Give::Modifiers(modifiers)),
+		_ => None,
+	}
+}
+
 /// The frames of pressing and releasing `combo`, such as `ctrl+shift+z`:
 /// `ctrl`, `shift`, `alt`, and `cmd` (Command on macOS, Ctrl elsewhere),
 /// then a key as egui names it.
@@ -836,202 +1268,115 @@ fn keys(combo: &str) -> anyhow::Result<VecDeque<Frame>> {
 		}
 	}
 	let key = egui::Key::from_name(name).with_context(|| format!("egui names no key `{name}`"))?;
-	let event = |pressed| egui::Event::Key {
+	let (physical, name) = place(key)?;
+	let release = egui::Event::Key {
 		key,
 		physical_key: Some(key),
-		pressed,
+		pressed: false,
 		repeat: false,
 		modifiers,
 	};
 	Ok([
-		Frame::of([egui::Event::ModifiersChanged(modifiers), event(true)]),
-		Frame::of([event(false), egui::Event::ModifiersChanged(egui::Modifiers::NONE)]),
+		Frame(vec![
+			Give::Modifiers(modifiers),
+			Give::Press(Press {
+				key,
+				physical,
+				name,
+				modifiers,
+			}),
+		]),
+		Frame(vec![Give::Event(release), Give::Modifiers(egui::Modifiers::NONE)]),
 	]
 	.into())
 }
 
-impl egui::Plugin for Plugin {
-	fn debug_name(&self) -> &'static str {
-		"control"
-	}
-
-	fn input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
-		if self.op.as_ref().is_some_and(|op| op.reply.is_closed()) {
-			// Its asker hung up.
-			self.op = None;
+/// Where `key` sits on a US layout, and what that layout prints on it, as
+/// the desktop reports a press of it.
+fn place(key: egui::Key) -> anyhow::Result<(winit::keyboard::KeyCode, winit::keyboard::Key)> {
+	use egui::Key as K;
+	let printed = |text: &str| winit::keyboard::Key::Character(text.into());
+	let text = key.name();
+	let (code, name) = match key {
+		K::Comma => ("Comma".to_string(), printed(",")),
+		K::Minus => ("Minus".to_string(), printed("-")),
+		K::Period => ("Period".to_string(), printed(".")),
+		K::Semicolon => ("Semicolon".to_string(), printed(";")),
+		K::Backslash => ("Backslash".to_string(), printed("\\")),
+		K::Slash => ("Slash".to_string(), printed("/")),
+		K::Quote => ("Quote".to_string(), printed("'")),
+		K::Backtick => ("Backquote".to_string(), printed("`")),
+		K::OpenBracket => ("BracketLeft".to_string(), printed("[")),
+		K::CloseBracket => ("BracketRight".to_string(), printed("]")),
+		K::Equals => ("Equal".to_string(), printed("=")),
+		K::Colon
+		| K::Plus
+		| K::Pipe
+		| K::Questionmark
+		| K::Exclamationmark
+		| K::OpenCurlyBracket
+		| K::CloseCurlyBracket => {
+			anyhow::bail!("{text} is typed with shift on another key: press that key with shift")
 		}
-		self.next(ctx);
-		let Some(op) = &mut self.op else { return };
-		// eframe turns the tree off when a screen reader leaves.
-		ctx.enable_accesskit();
-		match &mut op.work {
-			Work::Input {
-				find: Some(find),
-				frames,
-				..
-			} => {
-				let screen = input.screen_rect.unwrap_or(egui::Rect::EVERYTHING);
-				if find.stage == Stage::Look {
-					find.stage = Stage::Reveal;
-					return;
-				}
-				if find.stage == Stage::Reveal {
-					find.stage = Stage::Point;
-					if let Ok((id, _)) = self.tree.one(&find.targets[0]) {
-						input
-							.events
-							.push(egui::Event::AccessKitActionRequest(accesskit::ActionRequest {
-								action: accesskit::Action::ScrollIntoView,
-								target_tree: accesskit::TreeId::ROOT,
-								target_node: id,
-								data: None,
-							}));
-					}
-					return;
-				}
-				let found: anyhow::Result<Vec<_>> = find
-					.targets
-					.iter()
-					.map(|target| self.tree.point(target, screen))
-					.collect();
-				match found {
-					Ok(at) => {
-						*frames = (find.make)(&at, &find.request);
-						let Work::Input { find, .. } = &mut op.work else {
-							unreachable!()
-						};
-						*find = None;
-					}
-					Err(err) => return self.finish(Reply::error(format!("{err:#}"))),
-				}
-				self.give(input);
-			}
-			Work::Input { find: None, .. } => self.give(input),
-			Work::Screenshot { asked: Some(asked) } => {
-				let asked = *asked;
-				let image = input.events.iter().find_map(|event| match event {
-					egui::Event::Screenshot { user_data, image, .. }
-						if user_data
-							.data
-							.as_ref()
-							.and_then(|data| data.downcast_ref::<Shot>())
-							.is_some_and(|shot| shot.0 == asked) =>
-					{
-						Some(image.clone())
-					}
-					_ => None,
-				});
-				if let Some(image) = image {
-					let reply = match png(&image) {
-						Ok(bytes) => Reply::Screenshot {
-							png: bytes.len(),
-							bytes,
-						},
-						Err(err) => Reply::error(format!("{err:#}")),
-					};
-					self.finish(reply);
-				}
-			}
-			_ => {}
+		_ if text.len() == 1 && text.as_bytes()[0].is_ascii_uppercase() => {
+			(format!("Key{text}"), printed(&text.to_ascii_lowercase()))
 		}
-	}
-
-	fn on_begin_pass(&mut self, ui: &mut egui::Ui) {
-		let Some(op) = &mut self.op else { return };
-		let ctx = ui.ctx();
-		match &mut op.work {
-			Work::Screenshot { asked } if asked.is_none() => {
-				self.screenshots += 1;
-				*asked = Some(self.screenshots);
-				ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(Shot(
-					self.screenshots,
-				))));
-			}
-			Work::Snapshot => self.shared.lock().unwrap().wanted = true,
-			Work::Wait {
-				until: Until::State { .. } | Until::Settled,
-				..
-			} => self.shared.lock().unwrap().wanted = true,
-			_ => {}
+		_ if text.len() == 1 && text.as_bytes()[0].is_ascii_digit() => (format!("Digit{text}"), printed(text)),
+		_ => {
+			// A key of its own, which egui and the desktop name alike, but for
+			// the arrows' prefix.
+			let code = match key {
+				K::ArrowDown | K::ArrowLeft | K::ArrowRight | K::ArrowUp => format!("Arrow{text}"),
+				_ => text.to_string(),
+			};
+			let named = serde_json::from_value(serde_json::Value::String(code.clone()))
+				.with_context(|| format!("the desktop names no key {text}"))?;
+			(code, winit::keyboard::Key::Named(named))
 		}
-		// Keep drawing until it is answered: at once for input, and for a
-		// wait as often as the window would draw anyway.
-		match op.work {
-			Work::Wait { .. } => ctx.request_repaint_after(Duration::from_millis(16)),
-			_ => ctx.request_repaint(),
-		}
-	}
-
-	fn output_hook(&mut self, _ctx: &egui::Context, output: &mut egui::FullOutput) {
-		if let Some(update) = &output.platform_output.accesskit_update {
-			self.tree.update(update);
-		}
-		let state = {
-			let mut shared = self.shared.lock().unwrap();
-			shared.wanted = false;
-			shared.state.take()
-		};
-		let Some(op) = &mut self.op else { return };
-		let reply = match &mut op.work {
-			Work::Snapshot => Some(Reply::Snapshot {
-				tree: self.tree.snapshot().map(Box::new),
-				focus: self.tree.focus.map(|id| id.0),
-				state: state.unwrap_or(serde_json::Value::Null),
-			}),
-			Work::Input {
-				find: None,
-				frames,
-				settle,
-			} if frames.is_empty() => {
-				*settle = settle.saturating_sub(1);
-				(*settle == 0).then_some(Reply::Done)
-			}
-			Work::Wait {
-				until,
-				deadline,
-				timeout,
-				since,
-			} => {
-				let held = match until {
-					Until::Shown(target) => !self.tree.find(target).is_empty(),
-					Until::Gone(target) => self.tree.find(target).is_empty(),
-					Until::State { pointer, value } => {
-						state.as_ref().and_then(|state| state.pointer(pointer)) == Some(&*value)
-					}
-					Until::Settled => settled(state.as_ref(), since),
-				};
-				match held {
-					true => Some(Reply::Done),
-					false if kio::clock::now() >= *deadline => Some(Reply::Error(format!(
-						"timed out after {} waiting for {until:?}",
-						humantime::format_duration(*timeout)
-					))),
-					false => None,
-				}
-			}
-			Work::Quit => Some(Reply::Done),
-			_ => None,
-		};
-		if let Some(reply) = reply {
-			self.finish(reply);
-		}
-	}
+	};
+	let physical = serde_json::from_value(serde_json::Value::String(code))
+		.with_context(|| format!("no key sits where egui's {text} does"))?;
+	Ok((physical, name))
 }
 
-impl Plugin {
-	/// Give the next frame's events to egui.
-	fn give(&mut self, input: &mut egui::RawInput) {
-		let Some(Op {
-			work: Work::Input { frames, .. },
-			..
-		}) = &mut self.op
-		else {
-			return;
-		};
-		if let Some(frame) = frames.pop_front() {
-			input.events.extend(frame.0);
-		}
+/// What egui-winit makes of `press`: the clipboard's commands, as egui
+/// hears them, or the key.
+fn pressed(press: &Press) -> Option<egui::Event> {
+	use egui::Key as K;
+	let Press { key, modifiers, .. } = *press;
+	let windows = cfg!(windows);
+	let command = modifiers.command;
+	if key == K::Cut || (command && key == K::X) || (windows && modifiers.shift && key == K::Delete) {
+		return Some(egui::Event::Cut);
 	}
+	if key == K::Copy || (command && key == K::C) || (windows && modifiers.ctrl && key == K::Insert) {
+		return Some(egui::Event::Copy);
+	}
+	if key == K::Paste || (command && key == K::V) || (windows && modifiers.shift && key == K::Insert) {
+		let text = arboard::Clipboard::new()
+			.and_then(|mut clipboard| clipboard.get_text())
+			.ok()?;
+		let text = text.replace("\r\n", "\n");
+		return (!text.is_empty()).then_some(egui::Event::Paste(text));
+	}
+	Some(egui::Event::Key {
+		key,
+		physical_key: Some(key),
+		pressed: true,
+		repeat: false,
+		modifiers,
+	})
+}
+
+/// `modifiers` as the desktop reports them held.
+fn held(modifiers: egui::Modifiers) -> winit::keyboard::ModifiersState {
+	use winit::keyboard::ModifiersState;
+	let mut state = ModifiersState::empty();
+	state.set(ModifiersState::CONTROL, modifiers.ctrl);
+	state.set(ModifiersState::SHIFT, modifiers.shift);
+	state.set(ModifiersState::ALT, modifiers.alt);
+	state.set(ModifiersState::SUPER, modifiers.mac_cmd);
+	state
 }
 
 /// Whether every source has started and the program has drawn a second of
@@ -1089,39 +1434,142 @@ mod tests {
 		}
 	}
 
-	/// A combination presses its modifiers with its key, and an unknown
-	/// modifier or key is refused.
+	/// The press in `frames`, which a combination makes after its modifiers.
+	fn press(frames: &VecDeque<Frame>) -> &Press {
+		match &frames[0].0[..] {
+			[Give::Modifiers(_), Give::Press(press)] => press,
+			other => panic!("not a press: {other:?}"),
+		}
+	}
+
+	/// A combination presses its modifiers with its key, where the desktop
+	/// says that key sits, and lets go of both; an unknown modifier or key is
+	/// refused.
 	#[test]
 	fn keys_parse() {
+		use winit::keyboard::{Key, KeyCode, NamedKey};
+
 		let frames = keys("ctrl+shift+Z").unwrap();
-		assert_eq!(frames.len(), 2);
-		let egui::Event::Key {
-			key,
-			pressed,
-			modifiers,
-			..
-		} = &frames[0].0[1]
-		else {
-			panic!("a key event")
-		};
-		assert_eq!((*key, *pressed), (egui::Key::Z, true));
-		assert!(modifiers.ctrl && modifiers.shift && !modifiers.alt);
+		let press = press(&frames);
+		assert_eq!(
+			(press.key, press.physical, &press.name),
+			(egui::Key::Z, KeyCode::KeyZ, &Key::Character("z".into()))
+		);
+		assert!(press.modifiers.ctrl && press.modifiers.shift && !press.modifiers.alt);
+		assert!(matches!(
+			&frames[1].0[..],
+			[
+				Give::Event(egui::Event::Key {
+					key: egui::Key::Z,
+					pressed: false,
+					..
+				}),
+				Give::Modifiers(egui::Modifiers::NONE)
+			]
+		));
 		// What a shortcut on Command, such as the palette's, matches.
-		let egui::Event::Key { modifiers, .. } = &keys("cmd+k").unwrap()[0].0[1] else {
-			panic!("a key event")
-		};
-		assert!(modifiers.matches_logically(egui::Modifiers::COMMAND));
+		assert!(press_of("cmd+k").modifiers.matches_logically(egui::Modifiers::COMMAND));
 		#[cfg(not(target_os = "macos"))]
-		{
-			let egui::Event::Key { modifiers, .. } = &keys("ctrl+k").unwrap()[0].0[1] else {
-				panic!("a key event")
-			};
-			assert!(modifiers.matches_logically(egui::Modifiers::COMMAND));
+		assert!(press_of("ctrl+k").modifiers.matches_logically(egui::Modifiers::COMMAND));
+		for (combo, physical, name) in [
+			("F9", KeyCode::F9, Key::Named(NamedKey::F9)),
+			("Escape", KeyCode::Escape, Key::Named(NamedKey::Escape)),
+			("ArrowDown", KeyCode::ArrowDown, Key::Named(NamedKey::ArrowDown)),
+			("Space", KeyCode::Space, Key::Named(NamedKey::Space)),
+			("7", KeyCode::Digit7, Key::Character("7".into())),
+			("[", KeyCode::BracketLeft, Key::Character("[".into())),
+		] {
+			let press = press_of(combo);
+			assert_eq!((press.physical, &press.name), (physical, &name), "{combo}");
 		}
-		assert!(keys("Escape").is_ok());
-		for refused in ["hyper+a", "ctrl+", "ctrl+NoSuchKey", ""] {
+		for refused in ["hyper+a", "ctrl+", "ctrl+NoSuchKey", "", "Colon"] {
 			assert!(keys(refused).is_err(), "{refused} was accepted");
 		}
+	}
+
+	fn press_of(combo: &str) -> Press {
+		press(&keys(combo).unwrap()).clone()
+	}
+
+	/// A shortcut for the clipboard reaches egui as the command, as the
+	/// desktop's does, and any other key as itself.
+	#[test]
+	fn clipboard_shortcuts_are_commands() {
+		assert_eq!(pressed(&press_of("cmd+c")), Some(egui::Event::Copy));
+		assert_eq!(pressed(&press_of("cmd+x")), Some(egui::Event::Cut));
+		assert!(matches!(
+			pressed(&press_of("c")),
+			Some(egui::Event::Key {
+				key: egui::Key::C,
+				pressed: true,
+				..
+			})
+		));
+	}
+
+	/// A request given up on halfway through a drag lets go where the pointer
+	/// got to, and owes nothing it never pressed.
+	#[test]
+	fn a_canceled_drag_lets_go_where_it_is() {
+		let (_, requests) = mpsc::channel(1);
+		let mut state = State::new(requests, hotkeys::Keyboard::default());
+		let (reply, _) = oneshot::channel();
+		let mut frames = drag(&[egui::pos2(0.0, 0.0), egui::pos2(80.0, 0.0)], &Request::Quit {});
+		let mut input = egui::RawInput::default();
+		for _ in 0..4 {
+			let frame = frames.pop_front().unwrap();
+			state.give(frame, &mut input);
+		}
+		state.op = Some(Op {
+			reply,
+			work: Work::Input {
+				find: None,
+				frames,
+				settle: SETTLE,
+			},
+		});
+		state.cancel();
+		let owed = state.owed.take().expect("a release");
+		assert!(matches!(
+			&owed.0[..],
+			[Give::Event(egui::Event::PointerButton { pos, pressed: false, .. })] if *pos == egui::pos2(20.0, 0.0)
+		));
+	}
+
+	/// A widget shows where its middle is inside every widget holding it, so
+	/// one scrolled past its pane's edge does not.
+	#[test]
+	fn a_widget_past_its_panes_edge_is_out_of_view() {
+		let rect = |x0, y0, x1, y1| accesskit::Rect { x0, y0, x1, y1 };
+		let mut nodes = Vec::new();
+		let mut node = |id, bounds, children: &[u64]| {
+			let mut node = accesskit::Node::new(accesskit::Role::GenericContainer);
+			node.set_bounds(bounds);
+			node.set_children(
+				children
+					.iter()
+					.map(|child| accesskit::NodeId(*child))
+					.collect::<Vec<_>>(),
+			);
+			nodes.push((accesskit::NodeId(id), node));
+		};
+		node(1, rect(0.0, 0.0, 400.0, 400.0), &[2]);
+		// A pane showing the top 200 points of its 600.
+		node(2, rect(0.0, 0.0, 400.0, 200.0), &[3]);
+		node(3, rect(0.0, 0.0, 400.0, 600.0), &[4, 5]);
+		node(4, rect(0.0, 100.0, 50.0, 120.0), &[]);
+		node(5, rect(0.0, 300.0, 50.0, 320.0), &[]);
+		let mut tree = Tree::default();
+		tree.update(&accesskit::TreeUpdate {
+			nodes,
+			tree: Some(accesskit::Tree::new(accesskit::NodeId(1))),
+			tree_id: accesskit::TreeId::ROOT,
+			focus: accesskit::NodeId(1),
+		});
+		let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 400.0));
+		assert!(tree.visible(accesskit::NodeId(4), screen));
+		assert!(!tree.visible(accesskit::NodeId(5), screen));
+		assert!(tree.point(&Target::Id(5), screen).is_err());
 	}
 
 	/// A request line is the JSON `ctl` writes, and anything else, such as an
@@ -1151,8 +1599,8 @@ mod tests {
 		let moved: Vec<egui::Pos2> = frames
 			.iter()
 			.flat_map(|frame| &frame.0)
-			.filter_map(|event| match event {
-				egui::Event::PointerMoved(pos) => Some(*pos),
+			.filter_map(|give| match give {
+				Give::Event(egui::Event::PointerMoved(pos)) => Some(*pos),
 				_ => None,
 			})
 			.collect();

@@ -1749,15 +1749,15 @@ fn hotkey_row(
 				}
 				match caps {
 					Some(caps) => {
-						if ui.add(IconButton::new(Icon::Close, "Clear the key").small()).clicked() {
+						let clear = IconButton::new(Icon::Close, "Clear the key").small();
+						if kit::named(ui.add(clear), &format!("Clear the {name} key")).clicked() {
 							asked = Some(false);
 						}
 						// Right to left, so the last key first.
 						let mut clicked = false;
 						for cap in caps.iter().rev() {
-							clicked |= ui
-								.add(kit::Keycap::new(cap).fx(fx))
-								.interact(Sense::click())
+							let keycap = ui.add(kit::Keycap::new(cap).fx(fx)).interact(Sense::click());
+							clicked |= kit::named(keycap, &format!("Rebind {name}: {cap}"))
 								.on_hover_text("Bind another key")
 								.clicked();
 						}

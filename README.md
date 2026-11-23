@@ -2235,7 +2235,9 @@ answer:
 - `scroll <target> --dy <points>` scrolls what is under it, down for a
   positive `dy`, and `--dx` sideways.
 - `type <text>` types into the focused field, and `key <combo>` presses a
-  key, such as `Enter`, `Escape`, or `ctrl+z`.
+  key, such as `Enter`, `Escape`, or `ctrl+z`, as the keyboard would: a
+  bound hotkey fires, Settings > Hotkeys binds it, and `ctrl+c`, `ctrl+x`,
+  and `ctrl+v` copy, cut, and paste.
 - `wait` blocks until `--shown <target>` is in the window, `--gone <target>`
   is not, `--settled` (every source started and drawing), or
   `--state '<JSON pointer>=<JSON>'`, such as `--state
@@ -2246,7 +2248,10 @@ A target is a widget's name as `snapshot` lists it, such as `"Add source"`
 or `"tone fader"`; `contains:<text>` for a name holding the text; `id:<n>`
 for a node ID from the same layout; or `at:<x>,<y>` for a point in logical
 pixels. A click that matches no widget, several, or a disabled one fails and
-says so, and a widget scrolled out of view is scrolled in first. For example:
+says so, and a widget scrolled out of view is scrolled in first. Commands act
+on the studio's own window, never the multiview's. A minimized window draws
+nothing to act on, so every command but `quit` fails until it shows again.
+For example:
 
 ```bash
 moq-studio --headless --control studio.sock show.toml &
