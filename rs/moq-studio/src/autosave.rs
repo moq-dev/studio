@@ -503,7 +503,7 @@ fn parse(path: &Path, bytes: &[u8]) -> anyhow::Result<Collection> {
 
 /// Where the history of the scene file at `scene` is saved: beside it, as
 /// `show.history.toml` for `show.toml`.
-fn history_path(scene: &Path) -> PathBuf {
+pub(crate) fn history_path(scene: &Path) -> PathBuf {
 	let mut name = scene.file_stem().unwrap_or_default().to_os_string();
 	name.push(".history.toml");
 	scene.with_file_name(name)

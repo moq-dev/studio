@@ -26,20 +26,21 @@ mod hotkeys;
 mod interact;
 mod kit;
 mod ladder;
-mod library;
 mod markers;
 mod mix;
 mod past;
 mod pointer;
+mod probe;
+mod recent;
 mod record;
 mod replay;
-mod setup;
 mod shelf;
 #[cfg(test)]
 mod shots;
 mod show;
 mod snap;
 mod stream;
+mod task;
 mod ui;
 mod uplink;
 mod vcam;
@@ -50,9 +51,9 @@ mod watch;
 #[usage(name = "moq-studio")]
 #[usage(completion, settings, unknown_env(prefix = "MOQ_"))]
 pub struct Config {
-	/// The show to open: its scene file, saved as it changes. If it does not
-	/// exist, guided setup proposes one and creates it. Without one, the
-	/// window opens on your recent shows.
+	/// The show to open: its scene file, saved as it changes, and created as
+	/// a new show if it does not exist. Without one, the window reopens the
+	/// last show, or creates one in the app's storage.
 	#[usage(value_hint = usage_rs::ValueHint::FilePath, extensions("toml"))]
 	pub scenes: Option<PathBuf>,
 
@@ -196,17 +197,7 @@ fn main() -> anyhow::Result<ExitCode> {
 		quic: config.quic.clone(),
 		credentials: stream::Credentials::system(),
 	};
-	let app = match &config.scenes {
-		// Nothing is saved until setup starts the studio, so quitting before
-		// then leaves no file and the next launch runs setup again.
-		Some(scenes) => match runtime.block_on(opener.open(scenes.clone()))? {
-			show::Opened::Studio(engine, stream) => App::Starting(engine, stream),
-			show::Opened::Setup(setup, stream) => App::Setup(setup, stream),
-		},
-		None => App::Library(Box::new(library::Library::new(library::pictures())), None),
-	};
-
-	run(app, opener)?;
+	run(config.scenes.clone(), opener)?;
 	Ok(ExitCode::SUCCESS)
 }
 
@@ -244,18 +235,36 @@ impl Started {
 	}
 }
 
-/// A show being opened from the library.
-type Opening = setup::Task<anyhow::Result<show::Opened>>;
+/// A show to open.
+#[derive(Clone, Debug)]
+enum Target {
+	/// The scene file at this path, which must be there.
+	Open(PathBuf),
+	/// The scene file at this path, created as a new show if it is not there.
+	Create(PathBuf),
+	/// A new show in the app's storage.
+	New,
+}
+
+/// A show being opened off the window's thread.
+struct Opening {
+	task: task::Task<anyhow::Result<(Arc<engine::Engine>, stream::Stream)>>,
+	/// Its name, while it opens.
+	name: String,
+	/// What to open if it cannot be, saying why in the studio; with none, the
+	/// window closes with the error.
+	instead: Option<Target>,
+}
 
 /// What the window shows.
 enum App {
-	/// No show open: the library, and the show it is opening.
-	Library(Box<library::Library>, Option<Opening>),
-	/// A new show: guided setup, until it starts the studio.
-	Setup(Box<setup::Setup>, stream::Stream),
+	/// A show opening, before its engine starts.
+	Opening(Box<Opening>),
 	/// An engine whose studio is built once the window can draw it.
-	Starting(Arc<engine::Engine>, stream::Stream),
+	Starting(Arc<engine::Engine>, Box<stream::Stream>),
 	Studio(Box<ui::Studio>),
+	/// No show could be opened, and the window is closing.
+	Closing,
 	/// Between two of the above, within the frame that moves from one to the
 	/// next.
 	Moving,
@@ -269,17 +278,19 @@ struct Window {
 	/// The engine once the studio is built, until the show is closed.
 	started: Arc<Started>,
 	/// The shows this user has opened.
-	recent: library::Recent,
-	/// Where the shows' pictures are kept, if the system has app storage.
-	pictures: Option<PathBuf>,
+	recent: recent::Recent,
+	/// Where a new show is kept, if the system has app storage.
+	shows: Option<PathBuf>,
 	/// The open show's last stream off air that [`Self::recent`] has noted.
 	aired: Option<engine::Aired>,
 	keyboard: hotkeys::Keyboard,
-	/// The window's own effects, on the setup screen and in the studio.
+	/// The window's own effects, in the studio.
 	fx: fx::Fx,
-	/// Whether the studio's title bar is the window's frame, rather than the
-	/// desktop's, which the library and guided setup keep.
-	framed: bool,
+	/// Why the show that opens next is not the one asked for, to say in its
+	/// studio.
+	notice: Option<anyhow::Error>,
+	/// Why no show could be opened, which ends the window.
+	failed: Arc<Mutex<Option<anyhow::Error>>>,
 	/// Set once the window is asked to close, as [`Events::closed`] is.
 	closed: Arc<AtomicBool>,
 }
@@ -313,11 +324,8 @@ impl eframe::App for Window {
 			// Its time on air so far, in case the window closes while live.
 			if let Some(live) = engine.on_air().live() {
 				let lasted = live.since.elapsed().as_secs();
-				let at = library::now().saturating_sub(lasted);
-				self.recent.aired(path, library::Aired { at, lasted });
-			}
-			if self.closed.load(Ordering::Relaxed) {
-				self.keep_picture(&engine);
+				let at = recent::now().saturating_sub(lasted);
+				self.recent.aired(path, recent::Aired { at, lasted });
 			}
 		}
 		self.recent.save(storage);
@@ -325,67 +333,92 @@ impl eframe::App for Window {
 }
 
 impl Window {
-	/// Draw the library, setup, or the studio, building the studio once its
+	/// Draw the show opening or the studio, building the studio once its
 	/// engine starts.
 	fn show(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
 		match std::mem::replace(&mut self.app, App::Moving) {
 			App::Studio(mut studio) => {
 				studio.ui(ui, frame, &mut self.fx);
-				match studio.closing() {
-					true => self.close_show(studio, ui.ctx(), frame),
-					false => self.app = App::Studio(studio),
+				match studio.leaving() {
+					Some(leave) => self.leave(studio, leave, ui.ctx(), frame),
+					None => self.app = App::Studio(studio),
 				}
 			}
-			App::Library(library, opening) => self.library(ui, library, opening),
-			App::Setup(mut setup, stream) => match setup.ui(ui, &mut self.fx) {
-				Some(engine) => {
-					self.app = App::Starting(engine, stream);
-					ui.ctx().request_repaint();
-				}
-				None => self.app = App::Setup(setup, stream),
-			},
+			App::Opening(opening) => self.opening(ui, opening),
 			App::Starting(engine, stream) => self.start(ui, frame, engine, stream),
+			App::Closing => {
+				kit::wash(ui.painter(), ui.max_rect());
+				self.app = App::Closing;
+			}
 			App::Moving => unreachable!("the window moves between pages within a frame"),
 		}
 	}
 
-	/// Draw the library, and open the show picked there, off this thread.
-	fn library(&mut self, ui: &mut egui::Ui, mut library: Box<library::Library>, mut opening: Option<Opening>) {
-		if let Some(task) = &mut opening {
-			ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
-			if task.poll().is_some() {
-				let Some(setup::Task::Done(opened)) = opening.take() else {
-					unreachable!("polled done")
-				};
-				library.opening = None;
-				match opened {
-					Ok(show::Opened::Studio(engine, stream)) => {
-						self.app = App::Starting(engine, stream);
-						return ui.ctx().request_repaint();
+	/// Start opening `target` off this thread, to open `instead` if it cannot
+	/// be.
+	fn open(&mut self, target: Target, instead: Option<Target>) {
+		let (path, create) = match target {
+			Target::Open(path) => (Ok(path), false),
+			Target::Create(path) => (Ok(path), true),
+			Target::New => (
+				self.shows
+					.as_deref()
+					.context("this system has no app storage to keep a show in")
+					.and_then(show::new_path),
+				true,
+			),
+		};
+		let name = path.as_deref().map(show::name).unwrap_or_default();
+		let opener = self.opener.clone();
+		let task = match path {
+			Ok(path) => task::Task::spawn(
+				&self.opener.runtime,
+				move || async move { opener.open(path, create).await },
+			)
+			.unwrap_or_else(|err| task::Task::Done(Err(anyhow::Error::new(err).context("cannot open the show")))),
+			Err(err) => task::Task::Done(Err(err)),
+		};
+		self.app = App::Opening(Box::new(Opening { task, name, instead }));
+	}
+
+	/// Wait for the show opening, then build its studio; if it cannot open,
+	/// open what it names instead and say why there, or end the window.
+	fn opening(&mut self, ui: &mut egui::Ui, mut opening: Box<Opening>) {
+		ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+		if opening.task.poll().is_none() {
+			draw_opening(ui, &opening.name);
+			self.app = App::Opening(opening);
+			return;
+		}
+		let task::Task::Done(opened) = opening.task else {
+			unreachable!("polled done")
+		};
+		ui.ctx().request_repaint();
+		match opened {
+			Ok((engine, stream)) => self.app = App::Starting(engine, Box::new(stream)),
+			Err(err) => {
+				let err = err.context(format!("cannot open {}", opening.name));
+				tracing::error!(error = format!("{err:#}"), "cannot open the show");
+				match opening.instead {
+					Some(instead) => {
+						// A new show last: one that cannot be made ends the window.
+						let then = match instead {
+							Target::New => None,
+							_ => Some(Target::New),
+						};
+						self.notice = Some(err);
+						self.open(instead, then);
 					}
-					Ok(show::Opened::Setup(setup, stream)) => {
-						self.app = App::Setup(setup, stream);
-						return ui.ctx().request_repaint();
+					None => {
+						*self.failed.lock().unwrap() = Some(err);
+						self.closed.store(true, Ordering::Relaxed);
+						ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+						kit::wash(ui.painter(), ui.max_rect());
+						self.app = App::Closing;
 					}
-					Err(err) => library.error = Some(format!("{err:#}")),
 				}
 			}
 		}
-		let runtime = self.opener.runtime.clone();
-		if let Some(library::Pick::Open(path)) = library.ui(ui, &mut self.recent, &runtime) {
-			let name = path.file_stem().unwrap_or(path.as_os_str()).to_string_lossy();
-			library.opening = Some(name.into_owned());
-			library.error = None;
-			let opener = self.opener.clone();
-			match setup::Task::spawn(&runtime, move || async move { opener.open(path).await }) {
-				Ok(task) => opening = Some(task),
-				Err(err) => {
-					library.opening = None;
-					library.error = Some(format!("cannot open the show: {err}"));
-				}
-			}
-		}
-		self.app = App::Library(library, opening);
 	}
 
 	/// Build the studio around `engine`, now that the window can draw it.
@@ -394,48 +427,30 @@ impl Window {
 		ui: &mut egui::Ui,
 		frame: &mut eframe::Frame,
 		engine: Arc<engine::Engine>,
-		stream: stream::Stream,
+		stream: Box<stream::Stream>,
 	) {
 		self.started.set(engine.clone());
-		self.recent.opened(engine.autosave.path(), library::now());
-		// Once a show is open, the desktop's frame goes. macOS cannot draw under
-		// its title bar once the window is open, so it keeps it until a restart.
-		if !self.framed && !cfg!(target_os = "macos") {
-			ui.ctx().send_viewport_cmd(egui::ViewportCommand::Decorations(false));
-			self.framed = true;
-		}
+		self.recent.opened(engine.autosave.path(), recent::now());
 		let runtime = self.opener.runtime.clone();
-		let mut studio = ui::Studio::new(&self.render, engine, stream, runtime, self.framed);
+		let mut studio = ui::Studio::new(&self.render, engine, *stream, runtime, true);
 		studio.load(hotkeys::Window {
 			frame,
 			ctx: ui.ctx(),
 			keyboard: self.keyboard.clone(),
 		});
+		studio.list(&self.recent);
+		if let Some(notice) = self.notice.take() {
+			studio.refuse(notice);
+		}
 		self.app = App::Studio(Box::new(studio));
 		ui.ctx().request_repaint();
 	}
 
-	/// Keep the program as the open show's picture in the library.
-	fn keep_picture(&mut self, engine: &engine::Engine) {
-		let path = engine.autosave.path();
-		let saved = self
-			.pictures
-			.clone()
-			.context("this system has no app storage")
-			.and_then(|pictures| {
-				let picture = library::capture(&self.opener.gpu, engine)?;
-				self.recent.shaped(path, picture.portrait());
-				library::save_picture(&pictures, path, &picture)
-			});
-		if let Err(err) = saved {
-			tracing::warn!(error = format!("{err:#}"), "cannot keep the show's picture");
-		}
-	}
-
-	/// End the open show as quitting does, and return to the library with its
-	/// card refreshed. The show stays open if it cannot be saved, or went live
-	/// since the click, rather than lose an edit or cut a stream.
-	fn close_show(&mut self, mut studio: Box<ui::Studio>, ctx: &egui::Context, frame: &mut eframe::Frame) {
+	/// End the open show as quitting does, and open what the Show menu asked
+	/// for. The show stays open if it cannot be saved, or went live since the
+	/// click, rather than lose an edit or cut a stream; a show that cannot
+	/// open brings it back.
+	fn leave(&mut self, mut studio: Box<ui::Studio>, leave: ui::Leave, ctx: &egui::Context, frame: &mut eframe::Frame) {
 		let engine = studio.engine().clone();
 		// Claimed against a go-live first, which the engine being off air
 		// alone would not refuse while it reads tokens or checks encoders.
@@ -448,11 +463,8 @@ impl Window {
 			return;
 		}
 		self.follow_air();
-		// Before the engine stops drawing.
-		self.keep_picture(&engine);
 		if let Some(storage) = frame.storage_mut() {
 			studio.save(storage);
-			self.recent.save(storage);
 		}
 		self.started.take();
 		self.aired = None;
@@ -462,12 +474,32 @@ impl Window {
 		// The studio goes with its hotkeys, which would otherwise fire on the
 		// closed show.
 		studio.release(&self.render);
-		// The desktop's frame again, which the library keeps.
-		if self.framed && !cfg!(target_os = "macos") {
-			ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
-			self.framed = false;
+		let path = engine.autosave.path().to_path_buf();
+		drop(engine);
+		let target = match leave {
+			ui::Leave::Open(path) => Target::Open(path),
+			ui::Leave::New => Target::New,
+			ui::Leave::Rename(name) => match show::rename(&path, &name) {
+				Ok(renamed) => {
+					self.recent.moved(&path, &renamed);
+					Target::Open(renamed)
+				}
+				Err(err) => {
+					self.notice = Some(err.context("cannot rename the show"));
+					Target::Open(path.clone())
+				}
+			},
+		};
+		if let Some(storage) = frame.storage_mut() {
+			self.recent.save(storage);
 		}
-		self.app = App::Library(Box::new(library::Library::new(self.pictures.clone())), None);
+		let instead = match &target {
+			// Itself again, which a rename may have moved.
+			Target::Open(opened) if *opened != path => Some(Target::Open(path)),
+			Target::New => Some(Target::Open(path)),
+			_ => Some(Target::New),
+		};
+		self.open(target, instead);
 		ctx.request_repaint();
 	}
 
@@ -480,10 +512,42 @@ impl Window {
 			return;
 		}
 		self.aired = Some(aired);
-		let at = library::now().saturating_sub(aired.since.elapsed().as_secs());
+		let at = recent::now().saturating_sub(aired.since.elapsed().as_secs());
 		let lasted = aired.lasted.as_secs();
-		self.recent.aired(engine.autosave.path(), library::Aired { at, lasted });
+		self.recent.aired(engine.autosave.path(), recent::Aired { at, lasted });
 	}
+}
+
+/// What the window shows while the show called `name` opens: its name, over
+/// the wash the studio opens on. Dragging it moves the window, which has no
+/// frame of the desktop's.
+fn draw_opening(ui: &mut egui::Ui, name: &str) {
+	let window = ui.max_rect();
+	kit::wash(ui.painter(), window);
+	let drag = ui.interact(window, ui.id().with("opening"), egui::Sense::drag());
+	if drag.drag_started_by(egui::PointerButton::Primary) {
+		ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+	}
+	let builder = egui::UiBuilder::new()
+		.max_rect(egui::Rect::from_center_size(
+			window.center(),
+			egui::vec2(window.width(), 40.0),
+		))
+		.layout(egui::Layout::left_to_right(egui::Align::Center));
+	ui.scope_builder(builder, |ui| {
+		let text = egui::RichText::new(format!("Opening {name}…"))
+			.font(kit::ui(14.0))
+			.color(kit::DIM);
+		let width = 16.0
+			+ 10.0 + ui
+			.painter()
+			.layout_no_wrap(text.text().to_string(), kit::ui(14.0), kit::DIM)
+			.size()
+			.x;
+		ui.add_space((ui.available_width() - width).max(0.0) / 2.0);
+		ui.spinner();
+		ui.label(text);
+	});
 }
 
 /// eframe's handler for the window's events, which hears keys before egui,
@@ -584,14 +648,12 @@ fn icon() -> egui::IconData {
 	}
 }
 
-/// Show the window until it is closed, then end the studio.
-fn run(app: App, opener: show::Opener) -> anyhow::Result<()> {
+/// Show the window on the show at `scenes`, created if it is not there, or
+/// else on the last show opened or a new one, until it is closed, then end
+/// the studio.
+fn run(scenes: Option<PathBuf>, opener: show::Opener) -> anyhow::Result<()> {
 	let started = Arc::<Started>::default();
-	// The studio's title bar is the window's: the desktop draws no frame, and
-	// macOS draws its buttons over the studio's bar. The library and guided
-	// setup keep the desktop's until a show opens.
-	let framed = matches!(app, App::Starting(..));
-	let mut viewport = egui::ViewportBuilder::default()
+	let viewport = egui::ViewportBuilder::default()
 		.with_title("kixel.live Studio")
 		// The Wayland app id and X11 class, which the desktop finds the
 		// app's entry and icon by: the entry's file name, without `.desktop`.
@@ -599,15 +661,15 @@ fn run(app: App, opener: show::Opener) -> anyhow::Result<()> {
 		.with_icon(icon())
 		.with_inner_size([1440.0, 900.0])
 		.with_min_inner_size(ui::MIN_SIZE);
-	if framed {
-		viewport = match cfg!(target_os = "macos") {
-			true => viewport
-				.with_fullsize_content_view(true)
-				.with_titlebar_shown(false)
-				.with_title_shown(false),
-			false => viewport.with_decorations(false),
-		};
-	}
+	// The studio's title bar is the window's: the desktop draws no frame, and
+	// macOS draws its buttons over the studio's bar.
+	let viewport = match cfg!(target_os = "macos") {
+		true => viewport
+			.with_fullsize_content_view(true)
+			.with_titlebar_shown(false)
+			.with_title_shown(false),
+		false => viewport.with_decorations(false),
+	};
 	let gpu = opener.gpu.clone();
 	let options = eframe::NativeOptions {
 		viewport,
@@ -636,6 +698,8 @@ fn run(app: App, opener: show::Opener) -> anyhow::Result<()> {
 	let runtime = opener.runtime.clone();
 	let closed = Arc::new(AtomicBool::new(false));
 	let window_closed = closed.clone();
+	let failed = Arc::new(Mutex::new(None));
+	let window_failed = failed.clone();
 	let eframe = eframe::create_native(
 		"moq-studio",
 		options,
@@ -646,20 +710,30 @@ fn run(app: App, opener: show::Opener) -> anyhow::Result<()> {
 				.context("the window is not drawn with wgpu")?;
 			kit::install(&cc.egui_ctx);
 			let fx = fx::Fx::new(&render, &cc.egui_ctx, &opener.runtime);
-			let recent = library::Recent::load(cc.storage);
-			Ok(Box::new(Window {
-				app,
+			let recent = recent::Recent::load(cc.storage);
+			// The last show is reopened while it is there, and a new one made if
+			// it cannot be; a show named on the command line is the only one.
+			let (target, instead) = match (scenes, recent.last()) {
+				(Some(scenes), _) => (Target::Create(scenes), None),
+				(None, Some(last)) => (Target::Open(last.to_path_buf()), Some(Target::New)),
+				(None, None) => (Target::New, None),
+			};
+			let mut window = Window {
+				app: App::Moving,
 				render,
 				opener,
 				started: window_started,
 				recent,
-				pictures: library::pictures(),
+				shows: show::dir(),
 				aired: None,
 				keyboard: window_keyboard,
 				fx,
-				framed,
+				notice: None,
+				failed: window_failed,
 				closed: window_closed,
-			}))
+			};
+			window.open(target, instead);
+			Ok(Box::new(window))
 		}),
 		&event_loop,
 	);
@@ -673,6 +747,9 @@ fn run(app: App, opener: show::Opener) -> anyhow::Result<()> {
 		unsaved: false,
 	};
 	event_loop.run_app(&mut events).context("the window failed")?;
+	if let Some(err) = failed.lock().unwrap().take() {
+		return Err(err);
+	}
 	anyhow::ensure!(
 		closed.load(Ordering::Relaxed),
 		"the window failed; the error is logged above"
@@ -715,7 +792,7 @@ mod tests {
 		assert!(client.url.is_none() && client.tokens.is_empty());
 	}
 
-	/// With no arguments the studio opens on the library.
+	/// With no arguments the studio opens the last show, or a new one.
 	#[test]
 	fn opens_with_no_arguments() {
 		let config = parse(&[]);

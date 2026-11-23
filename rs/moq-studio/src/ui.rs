@@ -48,13 +48,15 @@ mod remotes;
 mod review;
 mod settings;
 mod shell;
+mod shows;
 mod slots;
+mod start;
 
-pub(crate) use layout::fit;
 use levels::Levels;
 #[cfg(test)]
 pub(crate) use mixer::View as MixView;
 pub(crate) use shell::dashed;
+pub use shows::Leave;
 
 /// The smallest the window gets, at which every part still has room.
 pub const MIN_SIZE: egui::Vec2 = layout::MIN;
@@ -351,7 +353,11 @@ impl Studio {
 			faults: Vec::new(),
 			reloads: 0,
 			shifts: 0,
-			closing: false,
+			leaving: None,
+			shows: Vec::new(),
+			show_dialog: None,
+			renaming_show: None,
+			quick: start::QuickStart::default(),
 			levels: Levels::default(),
 			graph: graph::View::default(),
 			review,
@@ -371,12 +377,6 @@ impl Studio {
 	/// The show's engine.
 	pub fn engine(&self) -> &Arc<Engine> {
 		&self.panels.engine
-	}
-
-	/// Whether Close show was clicked since this last said so, which the
-	/// window then answers by closing the show, or [`refuse`](Self::refuse).
-	pub fn closing(&mut self) -> bool {
-		std::mem::take(&mut self.panels.closing)
 	}
 
 	/// Claim the show for closing against a go-live, which a hotkey could
@@ -430,6 +430,11 @@ impl Studio {
 	pub(crate) fn mix(&mut self, view: mixer::View, opened: Option<&str>) {
 		self.panels.page = Page::Mix;
 		self.panels.desk = mixer::Desk::new(view, opened);
+	}
+
+	/// List `listing` as this machine's devices, as a refresh would.
+	pub(crate) fn seed_devices(&mut self, listing: Listing) {
+		self.panels.devices.listing = Some(listing);
 	}
 
 	/// Open Settings at `setting`, as the gear would.
@@ -837,8 +842,16 @@ struct Panels {
 	reloads: u64,
 	/// The engine's [shifts](engine::State::shifts) seen so far.
 	shifts: u64,
-	/// Whether Close show was clicked, until the window has closed the show.
-	closing: bool,
+	/// What the Show menu asked the window for, until the window takes it.
+	leaving: Option<Leave>,
+	/// The other shows the Show menu lists.
+	shows: Vec<crate::recent::Show>,
+	/// The Show menu's file dialog, while open.
+	show_dialog: Option<shows::Dialog>,
+	/// The show's name and the one typed so far, while renaming it.
+	renaming_show: Option<(String, String)>,
+	/// The quick start's state, while the picture is empty.
+	quick: start::QuickStart,
 	/// Each sound's and audio scene's recent levels, for the meters.
 	levels: Levels,
 	graph: graph::View,

@@ -10,8 +10,9 @@ use moq_net::bandwidth::Rate;
 use super::levels::reading;
 use super::*;
 use crate::engine::OnAir;
-use crate::setup::{self, Encoding, Task};
+use crate::probe::{self, Encoding};
 use crate::stream::{Saved, Stream};
+use crate::task::Task;
 use crate::uplink;
 
 /// How long END STREAM is held down to end the stream.
@@ -92,7 +93,7 @@ impl Going {
 				let canvases = canvases.clone();
 				move || async move {
 					let _probing = probing;
-					setup::probe(gpu, &canvases).await
+					probe::probe(gpu, &canvases).await
 				}
 			})
 			.unwrap_or_else(|err| Task::Done(Err(format!("cannot start the check: {err}")))),
@@ -447,7 +448,7 @@ impl Panels {
 				Ok(encodings) => {
 					// Up to past what they send, so a connection that carries
 					// it says so rather than stopping at its rate.
-					let ceiling = setup::total(encodings).scaled(1.0 / setup::headroom());
+					let ceiling = probe::total(encodings).scaled(1.0 / probe::headroom());
 					measure(&self.controls, &self.runtime, ceiling)
 				}
 				Err(_) => Measuring {
@@ -676,7 +677,7 @@ impl Panels {
 				level: None,
 				fixes: Vec::new(),
 			},
-			Task::Done(Ok(encodings)) if setup::keeps_up(&going.canvases, encodings) => Check {
+			Task::Done(Ok(encodings)) if probe::keeps_up(&going.canvases, encodings) => Check {
 				mark: Outcome::Passed,
 				icon: Icon::Encoder,
 				name: "Encoder",
@@ -745,12 +746,12 @@ impl Panels {
 				fixes: Vec::new(),
 			},
 			(Some(Task::Done(Ok(carries))), Some(encodings)) => {
-				let needs = setup::total(encodings);
+				let needs = probe::total(encodings);
 				let sending = match encodes {
 					1 => "the program",
 					_ => "the program in both formats",
 				};
-				match carries.scaled(setup::headroom()) >= needs {
+				match carries.scaled(probe::headroom()) >= needs {
 					true => Check {
 						mark: Outcome::Passed,
 						icon: Icon::Uplink,

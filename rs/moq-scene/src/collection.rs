@@ -307,6 +307,16 @@ impl Collection {
 		}
 	}
 
+	/// Join each file a source reads onto `dir`, the scene file's directory,
+	/// so a copy of the collection kept anywhere else reads the same files.
+	pub fn root(&mut self, dir: &std::path::Path) {
+		for source in self.sources.values_mut() {
+			if let Some(path) = source.path_mut() {
+				*path = dir.join(&path);
+			}
+		}
+	}
+
 	/// The source a [`Source::Role`] called `name` names, or `name` itself
 	/// for any other source and for a role nothing fills.
 	pub fn resolve<'a>(&'a self, name: &'a str) -> &'a str {

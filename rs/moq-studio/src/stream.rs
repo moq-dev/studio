@@ -415,7 +415,7 @@ impl Stream {
 }
 
 /// `show.stream.toml` for `show.toml`.
-fn path(scene: &Path) -> PathBuf {
+pub(crate) fn path(scene: &Path) -> PathBuf {
 	let mut name = scene.file_stem().unwrap_or(scene.as_os_str()).to_os_string();
 	name.push(".stream.toml");
 	scene.with_file_name(name)

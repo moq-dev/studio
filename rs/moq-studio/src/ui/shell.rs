@@ -301,6 +301,7 @@ impl Panels {
 		self.settings(ui.ctx(), fx);
 		self.details(ui.ctx(), layout.stage);
 		self.going_sheet(ui.ctx());
+		self.follow_shows(ui.ctx());
 		// macOS keeps its own frame's edges, and resizes by them.
 		if self.framed && !cfg!(target_os = "macos") {
 			edges(ui, window);
@@ -320,6 +321,7 @@ impl Panels {
 				if let Some(cued) = &snapshot.cued {
 					self.next(ui, fx, cued, picture, Corner::TopRight);
 				}
+				self.quick_start(ui, picture);
 			}
 			Page::Build => self.build(ui, fx, stage, snapshot),
 			// The sound slot holds the live picture instead.
@@ -515,6 +517,8 @@ impl Panels {
 			kit::popover_row(ui, false, |ui| {
 				ui.label(egui::RichText::new(self.engine.autosave.path().display().to_string()).color(kit::DIM));
 			});
+			self.show_list(ui);
+			ui.separator();
 			if ui.add(kit::button(Icon::Reload, "Reload the scene file")).clicked() {
 				let result = self.engine.reload();
 				self.check(result);
@@ -538,15 +542,6 @@ impl Panels {
 				.on_hover_text("A window for another monitor with every scene and source, live");
 			if multiview.clicked() {
 				self.multiview.set_open(!open);
-			}
-			// Closing ends the show as quitting does, which would cut a stream
-			// on air: the broadcaster ends that with END STREAM.
-			let off = matches!(self.engine.on_air(), crate::engine::OnAir::Off) && !self.controls.going();
-			let close = ui.add_enabled(off, kit::button(Icon::Close, "Close show"));
-			if !off {
-				kit::tip(close, "End the stream first", None);
-			} else if close.clicked() {
-				self.closing = true;
 			}
 		});
 	}

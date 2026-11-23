@@ -20,7 +20,7 @@ use moq_scene::Source;
 use moq_scene::source::Status;
 
 use crate::ui::{Inspect, MixView, Page, Setting, Side};
-use crate::{App, Window, autosave, engine, fx, hotkeys, library, setup, show, stream};
+use crate::{App, Window, autosave, devices, engine, fx, hotkeys, recent, show, stream};
 
 /// The window's size, the mock-ups'.
 const SIZE: egui::Vec2 = egui::vec2(1440.0, 900.0);
@@ -33,10 +33,6 @@ const SETTLE: Duration = Duration::from_secs(20);
 
 /// What a view opens.
 enum Open {
-	/// Guided setup, as the first launch shows it.
-	Setup,
-	/// The library, as the app opens with no show, with a few recent shows.
-	Library,
 	/// The studio on the show in `shots/<show>`, in a window `size` large,
 	/// turned to `view`, with a relay of its own to go live on if `relay`.
 	Studio {
@@ -52,6 +48,9 @@ enum Open {
 /// Where a view turns the studio.
 enum View {
 	Page(Page),
+	/// LIVE on a new show, as the first launch opens it: one empty scene, with
+	/// a camera and a screen to add.
+	FirstLaunch,
 	/// The MIX page in a view, with the strip of the sound named open.
 	Mix(MixView, Option<&'static str>),
 	/// MIX with Headphones' menu open, as a right click on its strip opens it.
@@ -70,9 +69,9 @@ enum View {
 	Published,
 	/// The edit history, under the title bar's undo, after an edit.
 	History,
-	/// The show's menu, open from the title bar.
+	/// The show's menu, open from the title bar, with a few other shows.
 	ShowMenu,
-	/// On air, the show's menu with Close show dimmed, saying why under the
+	/// On air, the show's menu with New show dimmed, saying why under the
 	/// pointer.
 	ShowMenuLive,
 	/// Settings, at a pane.
@@ -277,10 +276,9 @@ views! {
 	kit: Still, Open::Kit { sheet: false };
 	/// The kit's sheet, over the gallery.
 	kit_sheet: Still, Open::Kit { sheet: true };
-	/// Once its checks are done: this machine's encoder timings, and the
-	/// capture errors of a build without `capture`, which keeps the view off
-	/// the host's devices.
-	setup: Live, Open::Setup;
+	/// A new show, as the first launch opens it: the quick start on the empty
+	/// picture, its cards naming the camera and screen they add.
+	first_launch: Still, studio(View::FirstLaunch);
 	/// The LIVE page: the picture as large as the window allows, the pads, the
 	/// panic key, and the sound.
 	live: Still, studio(View::Page(Page::Live));
@@ -470,14 +468,11 @@ views! {
 	palette_found: Still, studio(View::Palette("take"));
 	/// The palette finding a setting by its name.
 	palette_setting: Still, studio(View::Palette("frame"));
-	/// The show's menu: its file, Reload, Copy, Paste, and Close show, which
-	/// returns to the library.
+	/// The show's menu: its file, the other recent shows to switch to, New
+	/// show, Open show file, Rename, Export a copy, Reload, Copy, and Paste.
 	show_menu: Still, studio(View::ShowMenu);
-	/// On air, Close show is dimmed, and says to end the stream first.
+	/// On air, switching shows is dimmed, and says to end the stream first.
 	show_menu_live: Live, relayed(View::ShowMenuLive);
-	/// With no show open: recent shows, each with its picture, beside New
-	/// show and Open a show file.
-	library: Still, Open::Library;
 	/// GO LIVE's sheet: the relay with its switch and its state, and the
 	/// checks once they finish.
 	going: Live, relayed(View::Going);
@@ -624,7 +619,7 @@ fn start(launch: engine::Launch, stream: stream::Stream, runtime: &tokio::runtim
 		runtime
 			.block_on(engine::Engine::start(launch, autosave, loaded))
 			.unwrap(),
-		stream,
+		Box::new(stream),
 	)
 }
 
@@ -660,7 +655,7 @@ fn a_click_takes_and_the_panic_key_cuts() {
 	let key = crate::guests::tests::key("show/other", &["**"], &["**"]);
 	let other = crate::guests::Room::new(&connect, "other", key, page, crate::guests::tests::EXPIRY).unwrap();
 	engine.join(Some(crate::guests::Joining::offline(other))).unwrap();
-	let (mut harness, started, closed) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
+	let (mut harness, started, closed) = window(app, &gpu, &runtime, SIZE, recent::Recent::default());
 	harness.step();
 	let engine = started.get().expect("the studio started").clone();
 	runtime
@@ -728,7 +723,7 @@ fn a_marker_is_named_where_it_is_typed() {
 	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
 	std::fs::copy(fixture.join("shots/show.toml"), "show.toml").unwrap();
 	let app = start(launch(&gpu), stream(None), &runtime);
-	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
+	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, recent::Recent::default());
 	harness.step();
 	let engine = started.get().expect("the studio started").clone();
 	runtime
@@ -808,7 +803,7 @@ fn a_marker_is_clipped_around() {
 	std::fs::copy(fixture.join("shots/show.toml"), "show.toml").unwrap();
 	let relay = Relay::start(&runtime);
 	let app = start(launch(&gpu), stream(Some(&relay)), &runtime);
-	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
+	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, recent::Recent::default());
 	harness.step();
 	let engine = started.get().expect("the studio started").clone();
 	runtime
@@ -908,7 +903,7 @@ fn the_palette_finds_and_runs_anything() {
 	show.push_str("\n[sources.mic]\nkind = \"microphone\"\n");
 	std::fs::write("show.toml", show).unwrap();
 	let app = start(launch(&gpu), stream(None), &runtime);
-	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
+	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, recent::Recent::default());
 	harness.step();
 	let engine = started.get().expect("the studio started").clone();
 	runtime
@@ -1066,7 +1061,7 @@ fn settings_change_the_show_and_move_the_guests() {
 		..launch(&gpu)
 	};
 	let app = start(launched, stream(Some(&relay)), &runtime);
-	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
+	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, recent::Recent::default());
 	harness.step();
 	let engine = started.get().expect("the studio started").clone();
 	runtime
@@ -1243,22 +1238,22 @@ fn settings_change_the_show_and_move_the_guests() {
 	quit(&engine, &runtime);
 }
 
-/// Close show, in the show's menu, waits for the stream to end, and then ends
-/// the show as quitting does and returns to the library, where the show is
-/// listed with its picture and opens again, a new engine in place of the old,
-/// which nothing keeps alive. It draws no view.
+/// The Show menu switches shows only off air. New show closes the open show
+/// as quitting does and opens a new one beside the others, empty but for its
+/// quick start, whose Camera card adds the first layer; a rename moves the
+/// show's files and opens it again; and a recent show opens from the menu, a
+/// new engine in place of the old each time, which nothing keeps alive. It
+/// draws no view.
 #[test]
 #[ignore = "draws on a GPU; run with `just shots`"]
-fn closing_the_show_returns_to_the_library() {
+fn the_show_menu_switches_shows() {
 	let (_show, runtime, gpu) = lavapipe();
 	let _entered = runtime.enter();
 	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
 	std::fs::copy(fixture.join("shots/show.toml"), "show.toml").unwrap();
 	let relay = Relay::start(&runtime);
 	let app = start(launch(&gpu), stream(Some(&relay)), &runtime);
-	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
-	let pictures = std::path::absolute("pictures").unwrap();
-	harness.state_mut().pictures = Some(pictures.clone());
+	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, recent::Recent::default());
 	harness.step();
 	let engine = started.get().expect("the studio started");
 	runtime
@@ -1279,48 +1274,98 @@ fn closing_the_show_returns_to_the_library() {
 	// On air, the row is dimmed and nothing happens.
 	harness.get_by_label("The show").click();
 	harness.run_steps(4);
-	harness.get_by_label("Close show").click();
+	harness.get_by_label("New show").click();
 	harness.run_steps(4);
-	assert!(matches!(harness.state().app, App::Studio(_)), "closed on air");
-	assert!(started.get().is_some());
-
+	assert!(matches!(harness.state().app, App::Studio(_)), "switched on air");
 	runtime.block_on(engine.end_stream()).expect("the stream ends");
 	harness.run_steps(2);
+
+	// Each switch ends the open show, and opens the next.
+	let switch = |harness: &mut Harness<'_, Window>, closed: Arc<engine::Engine>| {
+		runtime
+			.block_on(kio::clock::timeout(SETTLE, async {
+				while started.get().is_none_or(|open| Arc::ptr_eq(&open, &closed)) {
+					harness.step();
+					kio::clock::sleep(Duration::from_millis(20)).await;
+				}
+			}))
+			.expect("the next show opens");
+		harness.step();
+		assert!(matches!(harness.state().app, App::Studio(_)));
+		// Nothing of the show outlives it: not its tasks, its threads, its hotkeys.
+		let closed = Arc::downgrade(&closed);
+		runtime
+			.block_on(kio::clock::timeout(SETTLE, async {
+				while closed.upgrade().is_some() {
+					kio::clock::sleep(Duration::from_millis(20)).await;
+				}
+			}))
+			.expect("something still holds the closed show's engine");
+		started.get().unwrap()
+	};
+
 	harness.get_by_label("The show").click();
 	harness.run_steps(4);
-	harness.get_by_label("Close show").click();
+	harness.get_by_label("New show").click();
+	let engine = switch(&mut harness, engine);
+	let made = std::path::absolute("shows/My Show.toml").unwrap();
+	assert_eq!(engine.autosave.path(), made);
+	assert!(made.exists(), "a new show is saved at once");
+	{
+		let state = engine.state.lock().unwrap();
+		let collection = state.collection();
+		// Lavapipe has no hardware encoder.
+		assert_eq!(collection.canvas, moq_scene::Canvas::default());
+		assert_eq!(collection.scenes.len(), 1);
+		assert!(collection.scenes[0].items.is_empty());
+	}
+
+	// One click on the quick start adds the camera as the scene's first layer.
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		unreachable!("checked above")
+	};
+	studio.seed_devices(first_devices());
+	harness.run_steps(2);
+	harness.get_by_label("Camera").click();
+	harness.run_steps(2);
+	{
+		let state = engine.state.lock().unwrap();
+		let items = &state.collection().scenes[0].items;
+		assert_eq!(items.len(), 1);
+		assert_eq!(items[0].source, "Sony A6400");
+	}
+	harness.run_steps(2);
+	assert!(harness.query_by_label("Screen").is_none(), "the quick start is gone");
+
+	// A rename moves the show's files and opens it again.
+	harness.get_by_label("The show").click();
 	harness.run_steps(4);
-	assert!(matches!(harness.state().app, App::Library(..)), "the show closed");
-	assert!(started.get().is_none(), "nothing is left to end on quit");
-	let path = std::path::absolute("show.toml").unwrap();
-	assert!(
-		library::picture_path(&pictures, &path).exists(),
-		"the card has the program"
-	);
+	harness.get_by_label("Rename show…").click();
+	harness.run_steps(2);
+	harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+	harness.get_by_role(Role::TextInput).type_text("Podcast");
+	harness.run_steps(2);
+	harness.get_by_label("Rename").click();
+	let engine = switch(&mut harness, engine);
+	let renamed = std::path::absolute("shows/Podcast.toml").unwrap();
+	assert_eq!(engine.autosave.path(), renamed);
+	assert!(!made.exists());
+	assert_eq!(engine.state.lock().unwrap().collection().scenes[0].items.len(), 1);
 
-	// Nothing of the show outlives it: not its tasks, its threads, its hotkeys.
-	let closed = Arc::downgrade(&engine);
-	drop(engine);
-	runtime
-		.block_on(kio::clock::timeout(SETTLE, async {
-			while closed.upgrade().is_some() {
-				kio::clock::sleep(Duration::from_millis(20)).await;
-			}
-		}))
-		.expect("something still holds the closed show's engine");
-
-	// The show opens again from its card.
+	// The first show opens again from the menu.
+	harness.get_by_label("The show").click();
+	harness.run_steps(4);
 	harness.get_by_label("show").click();
-	runtime
-		.block_on(kio::clock::timeout(SETTLE, async {
-			while started.get().is_none() {
-				harness.step();
-				kio::clock::sleep(Duration::from_millis(20)).await;
-			}
-		}))
-		.expect("the show opens again");
-	let engine = started.get().unwrap();
-	assert!(matches!(harness.state().app, App::Studio(_)));
+	let engine = switch(&mut harness, engine);
+	assert_eq!(engine.autosave.path(), std::path::absolute("show.toml").unwrap());
+	let shows: Vec<_> = harness
+		.state()
+		.recent
+		.shows
+		.iter()
+		.map(|show| show.path.clone())
+		.collect();
+	assert_eq!(shows, [std::path::absolute("show.toml").unwrap(), renamed]);
 	drop(harness);
 	quit(&engine, &runtime);
 }
@@ -1839,21 +1884,16 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 	if let &Open::Kit { sheet } = open {
 		return gallery(gpu, sheet);
 	}
-	if let Open::Library = open {
-		let (app, recent) = library_shelf();
-		let (mut harness, ..) = window(app, gpu, runtime, SIZE, recent);
-		// Enough for the pictures to load and the cards to settle.
-		harness.run_steps(4);
-		return harness.render().unwrap();
-	}
 	let app = match open {
-		Open::Setup => {
-			let setup = setup::Setup::new(launch(gpu), None, "show.toml".into(), runtime.handle().clone());
-			App::Setup(Box::new(setup.unwrap()), stream(None))
-		}
-		Open::Kit { .. } | Open::Library => unreachable!("drawn without an engine"),
+		Open::Kit { .. } => unreachable!("drawn without an engine"),
 		Open::Studio { show, view, relay, .. } => {
-			let mut text = std::fs::read_to_string(shows.join(show)).unwrap();
+			let mut text = match view {
+				View::FirstLaunch => show::first(moq_scene::Canvas::default(), true)
+					.unwrap()
+					.to_toml()
+					.unwrap(),
+				_ => std::fs::read_to_string(shows.join(show)).unwrap(),
+			};
 			if let View::KeepClear { dual: true } = view {
 				text = text.replacen("version = 1\n", "version = 1\nportrait = true\n", 1);
 			}
@@ -1872,13 +1912,16 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		Open::Studio { size, .. } => *size,
 		_ => SIZE,
 	};
-	let (mut harness, started, _) = window(app, gpu, runtime, size, library::Recent::default());
+	let recent = match open {
+		Open::Studio {
+			view: View::ShowMenu, ..
+		} => recent_shows(),
+		_ => recent::Recent::default(),
+	};
+	let (mut harness, started, _) = window(app, gpu, runtime, size, recent);
 
 	let Open::Studio { view, .. } = open else {
-		runtime
-			.block_on(kio::clock::timeout(SETTLE, checked(&mut harness)))
-			.expect("setup finishes its checks");
-		return harness.render().unwrap();
+		unreachable!("drawn without an engine")
 	};
 	harness.step();
 	let App::Studio(studio) = &mut harness.state_mut().app else {
@@ -1887,6 +1930,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 	let controls = studio.controls();
 	match view {
 		View::Page(page) => studio.turn(*page),
+		View::FirstLaunch => studio.seed_devices(first_devices()),
 		View::Mix(view, opened) => studio.mix(*view, *opened),
 		View::MixMenu => studio.mix(MixView::Strips, None),
 		View::Build { side, inspect, index } => studio.build(*side, *inspect, *index),
@@ -2147,7 +2191,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		View::ShowMenuLive => {
 			harness.get_by_label("The show").click();
 			harness.run_steps(4);
-			harness.get_by_label("Close show").hover();
+			harness.get_by_label("New show").hover();
 			// egui shows a tooltip once the pointer rests half a second.
 			harness.run_steps(4);
 		}
@@ -2204,7 +2248,7 @@ fn window<'a>(
 	gpu: &engine::Gpu,
 	runtime: &'a tokio::runtime::Runtime,
 	size: egui::Vec2,
-	recent: library::Recent,
+	recent: recent::Recent,
 ) -> (Harness<'a, Window>, Arc<crate::Started>, Arc<AtomicBool>) {
 	let opener = show::Opener {
 		gpu: gpu.clone(),
@@ -2232,12 +2276,13 @@ fn window<'a>(
 				opener,
 				started: kept,
 				recent,
-				// None, so a view keeps no picture in the user's own storage.
-				pictures: None,
+				// The view's own, never the user's storage.
+				shows: Some(std::path::absolute("shows").unwrap()),
 				aired: None,
 				keyboard: hotkeys::Keyboard::default(),
 				fx,
-				framed: true,
+				notice: None,
+				failed: Default::default(),
 				closed: window_closed,
 			}
 		});
@@ -2373,43 +2418,46 @@ fn hover(harness: &mut Harness<'_, Window>) {
 	harness.run_steps(4);
 }
 
-/// The library's shows: a few recent ones, beside the view's directory, most
-/// with the person's picture as their last program.
-fn library_shelf() -> (App, library::Recent) {
-	let pictures = std::path::absolute("pictures").unwrap();
-	let person = image::open("person.jpg").unwrap().to_rgba8();
+/// The other shows the Show menu lists: a few recent ones, beside the
+/// view's directory, opened before it.
+fn recent_shows() -> recent::Recent {
 	let day = 24 * 3600;
-	let now = library::now();
+	let now = recent::now();
 	let shows = [
-		("Friday Night Ranked", Some((3 * day, 3 * 3600 + 120)), Some(false)),
-		("Sunday Chill", Some((6 * day, 6000)), Some(false)),
-		("Garage Sale Live", Some((14 * day, 55 * 60)), Some(true)),
-		("Podcast with Sam", None, None),
-		("Workbench Close-ups", Some((40 * day, 2 * 3600 + 900)), Some(false)),
+		("Friday Night Ranked", Some((3 * day, 3 * 3600 + 120))),
+		("Sunday Chill", Some((6 * day, 6000))),
+		("Podcast with Sam", None),
 	];
-	let mut recent = library::Recent::default();
+	let mut recent = recent::Recent::default();
 	// Oldest first, so the first is the latest opened.
-	for (index, (name, live, picture)) in shows.into_iter().enumerate().rev() {
+	for (index, (name, live)) in shows.into_iter().enumerate().rev() {
 		let path = std::path::absolute(format!("{name}.toml")).unwrap();
 		std::fs::write(&path, "").unwrap();
 		recent.opened(&path, now - 21 * day + (5 - index as u64) * 3600);
 		if let Some((ago, lasted)) = live {
-			recent.aired(&path, library::Aired { at: now - ago, lasted });
-		}
-		if let Some(portrait) = picture {
-			let (width, height) = if portrait { (360, 640) } else { (640, 360) };
-			let picture = image::imageops::resize(&person, width, height, image::imageops::FilterType::Triangle);
-			let picture = library::Picture {
-				width,
-				height,
-				rgba: picture.into_raw(),
-			};
-			recent.shaped(&path, portrait);
-			library::save_picture(&pictures, &path, &picture).unwrap();
+			recent.aired(&path, recent::Aired { at: now - ago, lasted });
 		}
 	}
-	let app = App::Library(Box::new(library::Library::new(Some(pictures))), None);
-	(app, recent)
+	recent
+}
+
+/// The devices a first launch finds: a camera, and a screen.
+fn first_devices() -> devices::Listing {
+	let pick = |name: &str, source| devices::Pick {
+		name: name.into(),
+		source,
+	};
+	devices::Listing {
+		cameras: Ok(vec![pick(
+			"Sony A6400",
+			Source::Camera {
+				id: Some("a6400".into()),
+			},
+		)]),
+		displays: Ok(vec![pick("Built-in display", Source::Display { id: Some("1".into()) })]),
+		windows: Ok(Vec::new()),
+		audio: Ok(Vec::new()),
+	}
 }
 
 /// Draw until the go-live sheet's checks finish.
@@ -2516,21 +2564,6 @@ fn shelf() -> crate::shelf::Listing {
 		error: None,
 		free: Some(212_000_000_000),
 	}
-}
-
-/// Draw until setup has finished its checks and proposes a scene.
-async fn checked(harness: &mut Harness<'_, Window>) {
-	loop {
-		harness.step();
-		let App::Setup(setup, _) = &harness.state().app else {
-			panic!("setup starts nothing on its own")
-		};
-		if setup.proposing() {
-			break;
-		}
-		kio::clock::sleep(Duration::from_millis(20)).await;
-	}
-	harness.run_steps(2);
 }
 
 /// Wait until every source has started and the program has drawn a second of
