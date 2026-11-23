@@ -27,6 +27,19 @@ impl<T: Send + 'static> Task<T> {
 		Ok(Self::Running(recv))
 	}
 
+	/// The result, waiting for it to arrive.
+	///
+	/// Panics if the task did, rather than waiting forever.
+	pub(crate) fn wait(&mut self) -> &T {
+		if let Self::Running(recv) = self {
+			*self = Self::Done(recv.recv().expect("a background task stopped without a result"));
+		}
+		match self {
+			Self::Running(_) => unreachable!("received above"),
+			Self::Done(done) => done,
+		}
+	}
+
 	/// The result, once it arrived.
 	///
 	/// Panics if the task did, rather than waiting forever on a result that

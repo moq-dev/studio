@@ -38,29 +38,36 @@ const PROBE: &str = "probe";
 ///
 /// Fails, rather than guessing, when either connection fails, the relay never
 /// delivers the probe back, or the transport reports no estimate (WebSocket
-/// has none).
+/// has none), saying which.
 pub async fn measure(
 	client: &moq_tokio::Client,
 	url: url::Url,
 	path: &str,
 	ceiling: Rate,
 	window: Duration,
-) -> anyhow::Result<Rate> {
+) -> Result<Rate, Failure> {
 	// Random without a dependency: each `RandomState` is seeded anew.
 	let suffix = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), ());
 	let probe = format!("{PROBE}-{suffix:016x}");
+	let unmeasured = |err: anyhow::Error| Failure::Unmeasured(format!("{err:#}"));
 	let path = moq_net::Path::new(path)
 		.and_then(|path| path.join(&moq_net::Path::new(&probe)?))
-		.with_context(|| format!("cannot probe beneath `{path}`"))?;
+		.with_context(|| format!("cannot probe beneath `{path}`"))
+		.map_err(unmeasured)?;
 	let publish = moq_tokio::origin::spawn();
 	let publication = publish
 		.route(path.clone(), moq_net::origin::RouteOptions::hidden())
-		.context("cannot create the probe broadcast")?;
+		.context("cannot create the probe broadcast")
+		.map_err(unmeasured)?;
 	let track = publication
 		.broadcast()
 		.create_track(TRACK, None)
-		.context("cannot create the probe track")?;
-	publication.announce().context("cannot announce the probe")?;
+		.context("cannot create the probe track")
+		.map_err(unmeasured)?;
+	publication
+		.announce()
+		.context("cannot announce the probe")
+		.map_err(unmeasured)?;
 
 	// One-shot, so a relay that refuses either side ends the probe with its reason
 	// instead of being redialed.
@@ -76,12 +83,15 @@ pub async fn measure(
 	let measured = async {
 		// The window starts when the probe comes back, so a slow dial does not eat it.
 		let Ok(received) = kio::clock::timeout(window, receive(subscribe.consume(), &path)).await else {
-			anyhow::bail!(match publisher.connected() && viewer.connected() {
-				true => format!("the relay did not deliver the probe back within {} s", window.as_secs()),
-				false => format!("cannot connect to the relay within {} s", window.as_secs()),
+			return Err(match publisher.connected() && viewer.connected() {
+				true => Failure::Unmeasured(format!(
+					"the relay did not deliver the probe back within {} s",
+					window.as_secs()
+				)),
+				false => Failure::Unreached(format!("cannot connect to the relay within {} s", window.as_secs())),
 			});
 		};
-		let mut groups = received?;
+		let mut groups = received.map_err(unmeasured)?;
 		// Drain the probe so the relay keeps pulling it; only the window ends this.
 		let drained: Result<anyhow::Result<std::convert::Infallible>, _> = kio::clock::timeout(window, async {
 			loop {
@@ -90,23 +100,40 @@ pub async fn measure(
 		})
 		.await;
 		if let Ok(Err(err)) = drained {
-			return Err(err);
+			return Err(unmeasured(err));
 		}
 		// The controller's estimate is already a maximum over its recent rounds.
-		publisher
-			.send_bandwidth()
-			.peek()
-			.context("the relay connection reports no bandwidth estimate, as over WebSocket")
+		publisher.send_bandwidth().peek().ok_or_else(|| {
+			Failure::Unmeasured("the relay connection reports no bandwidth estimate, as over WebSocket".into())
+		})
 	};
 
 	let result = tokio::select! {
-		result = publisher.closed() => Err(anyhow::anyhow!("the relay connection ended: {}", describe(result))),
-		result = viewer.closed() => Err(anyhow::anyhow!("the probe's viewer connection ended: {}", describe(result))),
-		Err(err) = fill(track, &reservation, ceiling) => Err(err),
+		result = publisher.closed() => Err(Failure::Unreached(format!("the relay connection ended: {}", describe(result)))),
+		result = viewer.closed() => Err(Failure::Unreached(format!("the probe's viewer connection ended: {}", describe(result)))),
+		Err(err) = fill(track, &reservation, ceiling) => Err(unmeasured(err)),
 		result = measured => result,
 	};
 	publication.broadcast().close();
 	result
+}
+
+/// Why the uplink was not measured.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Failure {
+	/// The relay could not be dialed, or a connection to it ended.
+	Unreached(String),
+	/// The relay was reached, but gave no measurement, such as over
+	/// WebSocket, which reports no estimate.
+	Unmeasured(String),
+}
+
+impl std::fmt::Display for Failure {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Self::Unreached(why) | Self::Unmeasured(why) => f.write_str(why),
+		}
+	}
 }
 
 /// Wait for the probe through the relay, and subscribe to its track.
@@ -207,6 +234,7 @@ mod tests {
 		let err = measure(&client, url, "studio", Rate::from_mbps(10), Duration::from_secs(2))
 			.await
 			.expect_err("no relay answers");
-		assert!(err.to_string().contains("connect"), "names the connection: {err:#}");
+		assert!(matches!(err, Failure::Unreached(_)), "not reached: {err}");
+		assert!(err.to_string().contains("connect"), "names the connection: {err}");
 	}
 }

@@ -96,12 +96,13 @@ enum View {
 	/// The LIVE page after a mute, with the health dot's popover open and the
 	/// pointer on undo, which names the mute.
 	Hover,
-	/// The go-live sheet, once its checks finish.
+	/// GO LIVE pressed: on a show with a relay, its popover waiting on the
+	/// check, started over; on one without, asking for a relay.
 	Going,
 	/// On air, at the LIVE page.
 	OnAir,
-	/// On air, with the pointer on the clock.
-	EndStream,
+	/// On air, the clock clicked, asking before it ends the stream.
+	EndConfirm,
 	/// On air, with the health dot's popover open.
 	OnAirHealth,
 	/// REVIEW, with this show's recordings and clips, and if `picked`, the
@@ -409,9 +410,9 @@ views! {
 	build_dual_slots: Still, Open::Studio { view: View::Dual { page: Page::Build, format: moq_scene::Format::Portrait, index: None, cued: None, off_air: Some("Guests") }, size: SIZE, show: "dual.toml", relay: false };
 	/// Settings, Show on it: Both at once on.
 	settings_show_dual: Still, Open::Studio { view: View::Setting(Setting::Show), size: SIZE, show: "dual.toml", relay: false };
-	/// GO LIVE's sheet on it: both broadcasts to each relay, and the encoder
-	/// and connection checked for both pictures.
-	going_dual: Live, Open::Studio { view: View::Going, size: SIZE, show: "dual.toml", relay: true };
+	/// GO LIVE's popover on it: both broadcasts to each relay, and the
+	/// encoder and connection checked for both pictures.
+	golive_dual: Live, Open::Studio { view: View::Going, size: SIZE, show: "dual.toml", relay: true };
 	/// On air on it: both pictures in their ON AIR frames, each with what
 	/// its video sends under it.
 	on_air_dual: Live, Open::Studio { view: View::OnAir, size: SIZE, show: "dual.toml", relay: true };
@@ -484,9 +485,9 @@ views! {
 	settings_mods_published: Still, Open::Studio { view: View::ModsAt("Priority"), size: SIZE, show: "published.toml", relay: false };
 	/// The scene graph, in a window of its own.
 	graph: Still, studio(View::Graph);
-	/// The command palette as its key opens it: every action, each with its
-	/// key and why it cannot run now, before the pages, settings, and what
-	/// can be added.
+	/// The command palette as its key opens it: every action that can run
+	/// now, each with its key, before the pages, settings, and what can be
+	/// added.
 	palette: Still, studio(View::Palette(""));
 	/// The palette finding what `take` names: the scenes, as TAKE is Studio
 	/// mode's, off.
@@ -498,22 +499,26 @@ views! {
 	show_menu: Still, studio(View::ShowMenu);
 	/// On air, switching shows is dimmed, and says to end the stream first.
 	show_menu_live: Live, relayed(View::ShowMenuLive);
-	/// GO LIVE's sheet: the relay with its switch and its state, and the
-	/// checks once they finish.
-	going: Live, relayed(View::Going);
+	/// GO LIVE on a show with no relay: its popover asks for one, and its
+	/// token, to go live now.
+	golive_inline: Still, studio(View::Going);
+	/// GO LIVE's popover while the check runs: the relay and its state, the
+	/// encoder and the connection as they come in, and going live once they
+	/// pass.
+	golive_checking: Live, relayed(View::Going);
 	/// On air: the accent frame, ON AIR, and the clock.
 	on_air: Live, relayed(View::OnAir);
-	/// On air, the pointer on the clock, which reads END STREAM.
-	end_stream: Live, relayed(View::EndStream);
+	/// On air, the clock clicked: End stream or Keep live.
+	end_confirm: Live, relayed(View::EndConfirm);
 	/// On air, the health dot's popover: the worst problem, every
 	/// destination, the viewers, and the encoder.
 	on_air_health: Live, relayed(View::OnAirHealth);
-	/// Settings, Stream: the relay, its token, the failover, the broadcast's
-	/// name, and on demand.
-	settings_stream: Still, studio(View::Setting(Setting::Stream));
-	/// Settings, Stream with `--connect` set: the flag's relay, locked, and
-	/// the token kept for it.
-	settings_stream_flagged: Live, relayed(View::Setting(Setting::Stream));
+	/// Settings, Destinations: the relay, its token, and the broadcast's
+	/// name, with the failover and on demand under Advanced.
+	settings_destinations: Still, studio(View::Setting(Setting::Destinations));
+	/// Settings, Destinations with `--connect` set: the flag's relay, locked,
+	/// and the token kept for it.
+	settings_destinations_flagged: Live, relayed(View::Setting(Setting::Destinations));
 	/// The multiview off air: every scene and the sources picked, the scene
 	/// the stream opens on amber, and the clock, which keeps it from being
 	/// still.
@@ -813,6 +818,107 @@ fn a_marker_is_named_where_it_is_typed() {
 	quit(&engine, &runtime);
 }
 
+/// GO LIVE on a show with no relay asks for one in its popover, and Go
+/// live now saves it, waits on the check, and goes live once it passes,
+/// with no further press. A click on the
+/// clock then asks before it ends the stream: Keep live keeps it on air, End
+/// stream ends it. The window as a person uses it, on a real engine and
+/// relay. It draws no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn go_live_from_no_relay_and_end_on_confirm() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	// Small enough for the software encoder to keep up on Mesa's software
+	// driver, so the check passes on any machine.
+	let show = std::fs::read_to_string(fixture.join("shots/show.toml")).unwrap();
+	let show = show.replacen("width = 1920\nheight = 1080", "width = 640\nheight = 360", 1);
+	std::fs::write("show.toml", show).unwrap();
+	let relay = Relay::start(&runtime);
+	// The relay's certificate is trusted, but no relay is set.
+	let mut client = moq_tokio::connect::Config::default();
+	client.tls.fingerprint = vec![relay.fingerprint.clone()];
+	let credentials = stream::Credentials::memory();
+	let stream = stream::Stream::load(
+		Path::new("show.toml"),
+		Default::default(),
+		client,
+		Default::default(),
+		credentials,
+	)
+	.unwrap();
+	let app = start(launch(&gpu), stream, &runtime);
+	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, recent::Recent::default());
+	harness.step();
+	let engine = started.get().expect("the studio started").clone();
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
+		.expect("the sources and pictures settle");
+
+	harness.get_by_label("Go live").click();
+	harness.run_steps(2);
+	harness
+		.get_all_by_role(Role::TextInput)
+		.next()
+		.expect("the popover asks for a relay")
+		.focus();
+	harness.run_steps(2);
+	harness
+		.get_all_by_role(Role::TextInput)
+		.next()
+		.unwrap()
+		.type_text(relay.url.as_str());
+	harness.run_steps(2);
+	harness.get_by_label("Go live now").click();
+	// The save runs on a thread of its own; once it lands, the popover waits
+	// on the check.
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, async {
+			while harness.query_by_label("Going live once checked").is_none() {
+				harness.step();
+				kio::clock::sleep(Duration::from_millis(20)).await;
+			}
+		}))
+		.expect("it waits on the check");
+	// The check measures the connection for seconds before it passes.
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, async {
+			while engine.on_air().live().is_none() {
+				harness.step();
+				assert!(harness.query_by_label("Go live anyway").is_none(), "the check passes");
+				kio::clock::sleep(Duration::from_millis(50)).await;
+			}
+		}))
+		.expect("the studio goes live once the check passes");
+	let saved = std::fs::read_to_string("show.stream.toml").unwrap();
+	assert!(
+		saved.contains(relay.url.host_str().unwrap()),
+		"the relay is saved: {saved}"
+	);
+
+	harness.run_steps(2);
+	harness.get_by_label("Live: end the stream").click();
+	harness.run_steps(2);
+	harness.get_by_label("Keep live").click();
+	harness.run_steps(2);
+	assert!(harness.query_by_label("Keep live").is_none(), "the popover closes");
+	assert!(engine.on_air().live().is_some(), "and the stream stays on air");
+	harness.get_by_label("Live: end the stream").click();
+	harness.run_steps(2);
+	harness.get_by_label("End stream").click();
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, async {
+			while engine.on_air() != engine::OnAir::Off {
+				harness.step();
+				kio::clock::sleep(Duration::from_millis(20)).await;
+			}
+		}))
+		.expect("the stream ends");
+	drop(harness);
+	quit(&engine, &runtime);
+}
+
 /// A marker dropped by the flag beside the panic key, on air, shows on
 /// REVIEW, and a click on its row saves the seconds around it as a clip:
 /// from [`replay::BEFORE`] it to [`replay::AFTER`] it, its video starting up
@@ -1079,6 +1185,13 @@ fn the_palette_finds_and_runs_anything() {
 				.filter(|_| setting == Setting::Mods)
 				.map(|which| (which.name(), true));
 			for (name, on) in rows.chain(mods) {
+				// Found as the palette finds it, which opens what holds it.
+				let ctx = harness.ctx.clone();
+				let App::Studio(studio) = &mut harness.state_mut().app else {
+					unreachable!("the studio is open")
+				};
+				studio.seek(&ctx, name);
+				harness.run_steps(2);
 				assert_eq!(
 					harness.query_all_by_label(name).next().is_some(),
 					on,
@@ -1229,9 +1342,10 @@ fn settings_change_the_show_and_move_the_guests() {
 	let left = engine.room().unwrap();
 	harness.get_by_label("Guests").click();
 	harness.run_steps(2);
+	// Saved once no field has the keyboard, which a click away takes.
 	fill(&mut harness, 0, "other");
 	fill(&mut harness, 1, "");
-	harness.get_by_label("Save").click();
+	harness.get_by_label("Guests").click();
 	runtime
 		.block_on(kio::clock::timeout(SETTLE, async {
 			while harness
@@ -1245,7 +1359,7 @@ fn settings_change_the_show_and_move_the_guests() {
 		.expect("a room without its key is refused");
 	assert_eq!(engine.room().unwrap().path().as_str(), "guests", "and the room stays");
 	fill(&mut harness, 1, "other.jwk");
-	harness.get_by_label("Save").click();
+	harness.get_by_label("Guests").click();
 	joined(&mut harness, "other");
 	// The room left changes nothing the next could have missed.
 	assert!(left.unpair("phone").is_err(), "the room left removes a remote");
@@ -1315,6 +1429,55 @@ fn settings_change_the_show_and_move_the_guests() {
 	assert!(harness.query_by_label("Mods").is_none(), "Settings closed");
 	assert!(harness.query_by_label("Scene graph").is_some(), "the graph is open");
 
+	drop(harness);
+	quit(&engine, &runtime);
+}
+
+/// A Destinations edit still being typed, which waits to save until no field
+/// has the keyboard, saves on the way out of the show, as Settings has no
+/// Save button. It draws no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn an_edit_being_typed_saves_on_the_way_out() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	std::fs::copy(fixture.join("shots/show.toml"), "show.toml").unwrap();
+	let app = start(launch(&gpu), stream(None), &runtime);
+	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, recent::Recent::default());
+	harness.step();
+	let engine = started.get().expect("the studio started");
+	harness.get_by_label("Settings").click();
+	harness.run_steps(2);
+	harness.get_by_label("Destinations").click();
+	harness.run_steps(2);
+	harness.get_by_label("Relay address").focus();
+	harness.run_steps(2);
+	harness
+		.get_by_label("Relay address")
+		.type_text("https://flushed.example/");
+	harness.run_steps(4);
+	let saved = || std::fs::read_to_string("show.stream.toml").unwrap_or_default();
+	assert!(!saved().contains("flushed"), "not while it is typed");
+
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		panic!("the studio starts on its first frame")
+	};
+	studio.flush_settings().expect("the edit saves");
+	assert!(saved().contains("flushed.example"), "saved: {}", saved());
+
+	// One that cannot save says why, not the note of the save before it.
+	harness.run_steps(2);
+	harness.get_by_label("Relay address").focus();
+	harness.run_steps(2);
+	harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+	harness.get_by_label("Relay address").type_text("not a url");
+	harness.run_steps(2);
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		unreachable!("still the studio")
+	};
+	let refused = studio.flush_settings().expect_err("an address that is not one");
+	assert!(format!("{refused:#}").contains("not a URL"), "says why: {refused:#}");
 	drop(harness);
 	quit(&engine, &runtime);
 }
@@ -2370,13 +2533,13 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		View::Paired => studio.open(Setting::Remote),
 		View::Graph => studio.open_graph(),
 		View::Health => studio.details(),
-		View::Going => studio.going(),
 		View::Hover
+		| View::Going
 		| View::History
 		| View::ShowMenu
 		| View::ShowMenuLive
 		| View::OnAir
-		| View::EndStream
+		| View::EndConfirm
 		| View::OnAirHealth => {}
 		View::Cued(page) => {
 			studio.studio_mode(true);
@@ -2471,7 +2634,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		assert!(appeared, "Ibis takes a tile");
 	}
 	if let View::OnAir
-	| View::EndStream
+	| View::EndConfirm
 	| View::OnAirHealth
 	| View::OnAirSetting(_)
 	| View::Restart
@@ -2492,12 +2655,18 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		.expect("the sources and pictures settle");
 	match view {
 		View::Hover => hover(&mut harness),
-		View::Going => runtime
-			.block_on(kio::clock::timeout(SETTLE, checks(&mut harness)))
-			.expect("the go-live checks finish"),
-		View::EndStream => {
-			harness.get_by_label("End stream").hover();
-			harness.run_steps(2);
+		// Pressed once the window settled, which the check, started over,
+		// would otherwise pass in, going live.
+		View::Going => {
+			let App::Studio(studio) = &mut harness.state_mut().app else {
+				panic!("the studio stays open")
+			};
+			studio.going();
+			harness.run_steps(4);
+		}
+		View::EndConfirm => {
+			harness.get_by_label("Live: end the stream").click();
+			harness.run_steps(4);
 		}
 		View::Restart => {
 			harness.get_by_label("720p").click();
@@ -2716,6 +2885,7 @@ fn window<'a>(
 				notice: None,
 				failed: Default::default(),
 				closed: window_closed,
+				exiting: Default::default(),
 				control: None,
 			}
 		});
@@ -2902,21 +3072,6 @@ fn first_devices() -> devices::Listing {
 		windows: Ok(Vec::new()),
 		audio: Ok(Vec::new()),
 	}
-}
-
-/// Draw until the go-live sheet's checks finish.
-async fn checks(harness: &mut Harness<'_, Window>) {
-	loop {
-		harness.step();
-		let App::Studio(studio) = &harness.state().app else {
-			panic!("the studio stays open")
-		};
-		if studio.checked() {
-			break;
-		}
-		kio::clock::sleep(Duration::from_millis(50)).await;
-	}
-	harness.run_steps(2);
 }
 
 /// The last 30 seconds as of `now`: a keyframe every 2.5 s, a sun setting

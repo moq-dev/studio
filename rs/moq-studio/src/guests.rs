@@ -155,7 +155,7 @@ impl Config {
 			.join_page
 			.clone()
 			.unwrap_or_else(|| Url::parse(JOIN_PAGE).expect("the default join page is a URL"));
-		let connect = connect.context("guests join through the relay; set one in Settings, Stream")?;
+		let connect = connect.context("guests join through the relay; set one in Settings, Destinations")?;
 		let removals = beside(key, "guests");
 		let remotes = beside(key, "remotes");
 		let key = moq_auth::Key::from_file(key).with_context(|| format!("reading the room key {}", key.display()))?;

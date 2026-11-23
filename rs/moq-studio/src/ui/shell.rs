@@ -300,7 +300,6 @@ impl Panels {
 		self.graph_window(ui.ctx(), layout.stage);
 		self.settings(ui.ctx(), fx);
 		self.details(ui.ctx(), layout.stage);
-		self.going_sheet(ui.ctx());
 		self.follow_shows(ui.ctx());
 		self.follow_media_dialog(ui.ctx());
 		// macOS keeps its own frame's edges, and resizes by them.
@@ -651,24 +650,26 @@ impl Panels {
 		}
 	}
 
-	/// Start or stop recording, from any page, pulsing and showing its clock
-	/// while it records.
+	/// Start or stop recording, from any page: `● REC` while stopped, and
+	/// `■` with its clock while recording, the square pulsing.
 	fn record_button(&mut self, ui: &mut Ui, fx: &mut Fx) {
 		let status = self.engine.recorder.status().filter(|status| !status.done);
 		let key = self.key(&Action::Record, ui.ctx());
 		let elapsed = status
 			.as_ref()
 			.map(|status| super::review::clock(kio::clock::now().saturating_duration_since(status.started)));
-		let time = elapsed
-			.clone()
-			.map(|elapsed| ui.painter().layout_no_wrap(elapsed, kit::mono(12.0), kit::TEXT));
-		let width = time.as_ref().map_or(30.0, |time| 30.0 + time.size().x + 8.0);
+		let text = match &elapsed {
+			Some(elapsed) => ui.painter().layout_no_wrap(elapsed.clone(), kit::mono(12.0), kit::TEXT),
+			None => kit::caps_galley(ui.painter(), "Rec", kit::display_bold(13.0), kit::TEXT, None),
+		};
+		let width = 30.0 + text.size().x + 10.0;
 		let (rect, response) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
 		let name = match (&status, &elapsed) {
 			(None, _) => "Start recording".to_string(),
 			(Some(status), _) if status.stopping => "Finishing the recording".to_string(),
 			(Some(_), elapsed) => format!("Stop recording, {} in", elapsed.as_deref().unwrap_or_default()),
 		};
+		response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
 		let response = kit::tip(response, &name, key.as_deref());
 		let painter = ui.painter();
 		let recording = status.is_some();
@@ -684,16 +685,20 @@ impl Panels {
 			Stroke::new(1.0, stroke),
 			egui::StrokeKind::Inside,
 		);
-		let pulse = recording.then(|| Mark::new(ui.painter()));
-		let dot = Rect::from_center_size(pos2(rect.left() + 15.0, rect.center().y), Vec2::splat(9.0));
-		ui.painter().circle_filled(dot.center(), 4.5, kit::ACCENT);
-		if let Some(pulse) = pulse {
-			fx.recording(&pulse.around(dot));
+		let mark = Rect::from_center_size(pos2(rect.left() + 16.0, rect.center().y), Vec2::splat(9.0));
+		match recording {
+			// Stop, as a player's square is.
+			true => {
+				let pulse = Mark::new(ui.painter());
+				ui.painter().rect_filled(mark, 2, kit::ACCENT);
+				fx.recording(&pulse.around(mark));
+			}
+			false => {
+				ui.painter().circle_filled(mark.center(), 4.5, kit::ERR);
+			}
 		}
-		if let Some(time) = time {
-			let at = pos2(dot.right() + 7.0, rect.center().y - time.size().y / 2.0);
-			ui.painter().galley(at, time, kit::TEXT);
-		}
+		let at = pos2(mark.right() + 8.0, rect.center().y - text.size().y / 2.0);
+		ui.painter().galley(at, text, kit::TEXT);
 		if response.clicked() {
 			self.controls.press(&Action::Record);
 		}

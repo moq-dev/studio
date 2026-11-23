@@ -657,6 +657,25 @@ impl Engine {
 			.collect()
 	}
 
+	/// Whether the preferred relay [watched](Self::watch), the one going live
+	/// is measured to, is still on its first dial, neither connected nor
+	/// failed yet.
+	pub fn dialing(&self) -> bool {
+		use moq_tokio::connection::Phase;
+		let watching = self.watching.lock().unwrap();
+		watching
+			.first()
+			.is_some_and(|watch| matches!(watch.link.monitor.state().phase, Phase::Connecting { failure: None }))
+	}
+
+	/// How many sessions the relays [watched](Self::watch) have connected,
+	/// which the first connect and each reconnect, such as on a new network
+	/// path, count up.
+	pub fn connects(&self) -> u64 {
+		let watching = self.watching.lock().unwrap();
+		watching.iter().map(|watch| watch.link.monitor.state().connects).sum()
+	}
+
 	/// Close each watching session, so its relay hears the close.
 	pub(super) async fn unwatch(&self) {
 		let watching = std::mem::take(&mut *self.watching.lock().unwrap());

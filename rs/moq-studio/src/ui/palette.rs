@@ -1,7 +1,8 @@
 //! The command palette: one key opens a search box that runs anything the
-//! studio can do. Its actions are the table in `controls`, each with its key
-//! and, when it cannot run now, why; beside them are the pages, the
-//! settings, and what can be added or selected, each found by its own name.
+//! studio can do. Its actions are the table in `controls`, each with its key;
+//! one that cannot run now is left out until searched for, then listed last,
+//! saying why. Beside them are the pages, the settings, and what can be added
+//! or selected, each found by its own name.
 
 use egui::{Align2, Rect, RichText, Sense, Stroke, pos2, vec2};
 
@@ -109,12 +110,16 @@ fn words(text: &str) -> impl Iterator<Item = &str> {
 }
 
 /// The rows `query` finds, best first, and in the order listed among equals.
+/// Those that cannot run now come last, and only once something is typed, so
+/// the list as it opens holds only what runs.
 fn found(rows: Vec<Row>, query: &str) -> Vec<Row> {
+	let typed = !query.trim().is_empty();
 	let mut scored: Vec<(u32, Row)> = rows
 		.into_iter()
+		.filter(|row| typed || row.refused.is_none())
 		.filter_map(|row| row.score(query).map(|score| (score, row)))
 		.collect();
-	scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+	scored.sort_by_key(|(score, row)| (row.refused.is_some(), std::cmp::Reverse(*score)));
 	scored.into_iter().map(|(_, row)| row).collect()
 }
 
@@ -432,6 +437,7 @@ impl Panels {
 		if matches!(
 			command,
 			Command::Act(Action::GoLive)
+				| Command::Act(Action::EndStream)
 				| Command::Page(_)
 				| Command::Layer(_)
 				| Command::Device(_)
@@ -442,8 +448,11 @@ impl Panels {
 			self.close_settings();
 		}
 		match command {
-			// The window's GO LIVE: the sheet, with its checks and relays.
-			Command::Act(Action::GoLive) => self.open_going(),
+			// The window's GO LIVE: on air once the check passes, or its
+			// popover, which asks for a relay the show lacks.
+			Command::Act(Action::GoLive) => self.press_go_live(),
+			// The clock's End stream popover, as a click on it opens it.
+			Command::Act(Action::EndStream) => self.confirm_end = true,
 			Command::Act(action) => self.controls.press(&action),
 			Command::Page(page) => self.page = page,
 			Command::Setting(setting, row) => {
@@ -615,6 +624,24 @@ mod tests {
 		assert_eq!(names(rows(), "scene"), ["Take scene `Gameplay`"]);
 		assert_eq!(names(rows(), "").len(), rows().len());
 		assert_eq!(names(rows(), "  ")[0], "Go live");
+	}
+
+	/// What cannot run now is left out of the list as it opens, and comes
+	/// after everything that can once searched for, saying why.
+	#[test]
+	fn what_cannot_run_waits_to_be_searched_for() {
+		let off_air = || {
+			let mut listed = rows();
+			listed[1].refused = Some("the program is not on air".into());
+			listed
+		};
+		let shown = names(off_air(), "");
+		assert!(!shown.contains(&"End stream".to_string()), "{shown:?}");
+		assert_eq!(shown.len(), rows().len() - 1);
+		assert_eq!(
+			names(off_air(), "st"),
+			["Start or stop recording", "Go live", "End stream"]
+		);
 	}
 
 	/// Punctuation typed is no part of a word, as in `go-live`.

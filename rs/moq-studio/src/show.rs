@@ -83,7 +83,7 @@ impl Opener {
 					recordings: Some(videos),
 					..stream.saved().clone()
 				};
-				stream.save(saved)?;
+				stream.save(saved, &[])?;
 				wrote = Some(before);
 			}
 		}
@@ -108,7 +108,7 @@ impl Opener {
 			Err(err) => {
 				let undone = match wrote {
 					None => Ok(()),
-					Some(Some(before)) => stream.save(before),
+					Some(Some(before)) => stream.save(before, &[]),
 					Some(None) => std::fs::remove_file(stream.path()).map_err(Into::into),
 				};
 				if let Err(err) = undone {

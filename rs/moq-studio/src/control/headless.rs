@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use anyhow::Context;
 use eframe::egui_wgpu;
 use egui_kittest::Harness;
 
@@ -65,6 +66,7 @@ pub fn run(scenes: Option<PathBuf>, opener: show::Opener, socket: Socket) -> any
 				notice: None,
 				failed,
 				closed,
+				exiting: Default::default(),
 				control: Some(control),
 			};
 			window.open(target, instead);
@@ -120,16 +122,21 @@ pub fn run(scenes: Option<PathBuf>, opener: show::Opener, socket: Socket) -> any
 		}
 	}
 
+	// A settings edit still being typed saves on the way out, as on quit.
+	let flushed = match &mut harness.state_mut().app {
+		App::Studio(studio) => studio.flush_settings(),
+		_ => Ok(()),
+	};
 	drop(harness);
 	let saved = started.take().map(|engine| crate::shutdown(&engine, &runtime));
 	// As a window's exit does, so a rename under way lands before the
 	// process ends, and none starts.
 	show::settle();
 	saved.transpose()?;
-	match failed.lock().unwrap().take() {
-		Some(err) => Err(err),
-		None => Ok(()),
+	if let Some(err) = failed.lock().unwrap().take() {
+		return Err(err);
 	}
+	flushed.context("cannot save the settings on quit")
 }
 
 /// The last frame's output for the window.
