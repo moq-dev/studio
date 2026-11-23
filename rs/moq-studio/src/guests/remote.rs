@@ -401,9 +401,12 @@ impl Board for Controls {
 	}
 
 	fn press(self: Arc<Self>, action: &Action) -> Result<String, String> {
-		// Pairings outlast the mod, but drive nothing while it is off.
-		if !self.mods.on(Mod::Remote) {
-			return Err(format!("{} is off in the studio's Settings, Mods", Mod::Remote.name()));
+		// Pairings outlast the mod, but drive nothing while it is off, nor
+		// anything whose own mod is off: `fire` lets TAKE and AUTO through
+		// for the studio's off-air banner, which a phone never shows.
+		let mut needs = [Some(Mod::Remote), action.needs()].into_iter().flatten();
+		if let Some(off) = needs.find(|needs| !self.mods.on(*needs)) {
+			return Err(format!("{} is off in the studio's Settings, Mods", off.name()));
 		}
 		let result = self.fire(action).map_err(|err| format!("{err:#}"));
 		// The status bar says what a remote did, as it does a hotkey.

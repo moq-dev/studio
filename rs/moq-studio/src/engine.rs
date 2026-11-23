@@ -4513,6 +4513,21 @@ mod tests {
 			assert_eq!(take(&main), Ok(format!("took `{main}`")));
 			assert_eq!(controls.desk().program.as_deref(), Some(main.as_str()));
 			take("Guest").unwrap();
+
+			// With Studio mode's mod off, a phone cannot TAKE or AUTO what the
+			// off-air banner cued, though the banner itself can.
+			controls.mods.set(Mod::Studio, false);
+			crate::controls::cue(&mut engine.state.lock().unwrap(), &main).unwrap();
+			for action in [Action::Cut, Action::Transition] {
+				assert_eq!(
+					controls.clone().press(&action),
+					Err("Studio mode is off in the studio's Settings, Mods".into())
+				);
+			}
+			assert_eq!(controls.desk().program.as_deref(), Some("Guest"));
+			assert_eq!(controls.fire(&Action::Cut).unwrap(), format!("took `{main}`"));
+			take("Guest").unwrap();
+			controls.mods.set(Mod::Studio, true);
 		}
 
 		// A sound's key or palette row flips its mute, an edit undo takes back.

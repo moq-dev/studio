@@ -14,14 +14,12 @@ use super::*;
 pub(super) fn placed(state: &State, layer: &Layer, format: Format) -> Vec<Item> {
 	let collection = state.collection();
 	let format = collection.format_of(layer, format);
-	let items = collection.items(layer).unwrap_or_default();
+	let layers = collection.items(layer).unwrap_or_default();
 	// A layer set free that keeps clear, where it was placed.
-	let items = items
+	let items = layers
 		.iter()
 		.map(|item| super::keep::placed(state, layer, &collection.portrayed(item, format), format));
-	let arranged = (layer.scene.as_deref()).and_then(|scene| state.compositor.placed(format, scene));
-	// One frame behind an edit, until the next render arranges it.
-	let Some(arranged) = arranged.filter(|arranged| arranged.len() == items.len()) else {
+	let Some(arranged) = rendered(state, layer.scene.as_deref(), format, layers) else {
 		return items.collect();
 	};
 	let placed = items.zip(arranged).map(|(item, arranged)| match item.slot {
@@ -43,8 +41,8 @@ pub(super) fn staged<'a>(state: &'a State, scene: Option<&str>, format: Format) 
 	let format = scene.map_or(format, |scene| collection.format_of(&Layer::scene(scene), format));
 	let found = scene.and_then(|scene| {
 		let index = collection.scenes.iter().position(|found| found.name == scene)?;
-		let arranged = state.compositor.placed(format, scene)?;
-		(arranged.len() == collection.scenes[index].items.len()).then_some((index, arranged))
+		let arranged = rendered(state, Some(scene), format, &collection.scenes[index].items)?;
+		Some((index, arranged))
 	});
 	let mut staged = collection.formatted(format);
 	if let Some((index, arranged)) = found {
@@ -93,12 +91,21 @@ pub(super) fn closed(state: &State, layer: &Layer, index: usize) -> bool {
 fn arranged<'a>(state: &'a State, layer: &Layer, index: usize, format: Format) -> Option<&'a Item> {
 	let collection = state.collection();
 	let format = collection.format_of(layer, format);
-	layer
-		.scene
-		.as_deref()
-		.and_then(|scene| state.compositor.placed(format, scene))
-		.filter(|arranged| arranged.len() == collection.items(layer).map_or(0, <[Item]>::len))
-		.and_then(|arranged| arranged.get(index))
+	rendered(state, layer.scene.as_deref(), format, collection.items(layer)?)?.get(index)
+}
+
+/// The items of the scene called `scene` as the last render arranged them in
+/// `format`'s picture, if it rendered `items` in their order. An edit leaves
+/// it a frame behind, when a reorder keeps the count but not which item is
+/// where, so it pairs each by identity.
+fn rendered<'a>(state: &'a State, scene: Option<&str>, format: Format, items: &[Item]) -> Option<&'a [Item]> {
+	let arranged = state.compositor.placed(format, scene?)?;
+	same(arranged, items).then_some(arranged)
+}
+
+/// Whether `a` and `b` are the same layers in the same order.
+fn same(a: &[Item], b: &[Item]) -> bool {
+	a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.id == b.id)
 }
 
 /// What a slot's chip calls it: the role in it, a guest, or the slot.
@@ -528,5 +535,27 @@ impl Panels {
 				})
 			}
 		})
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A placement the last render left for other layers is never paired
+	/// with these: a reorder or a reload keeps the count but not the layers.
+	#[test]
+	fn a_placement_pairs_only_with_the_layers_it_was_rendered_for() {
+		let items: Vec<Item> = ["a", "b", "c"]
+			.into_iter()
+			.map(|source| Item::new(source, Rect::default()))
+			.collect();
+		assert!(same(&items, &items));
+		let mut swapped = items.clone();
+		swapped.swap(1, 2);
+		assert!(!same(&items, &swapped), "reordered");
+		let reloaded: Vec<Item> = items.iter().map(|item| Item::new(&item.source, item.rect)).collect();
+		assert!(!same(&items, &reloaded), "each layer fresh");
+		assert!(!same(&items, &items[..2]), "one fewer");
 	}
 }
