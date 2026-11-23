@@ -14,6 +14,7 @@ use super::{Panels, SceneAction, Strip, describe, edit, on_program, scene_settin
 use crate::engine::State;
 use crate::kit;
 use crate::mix;
+use crate::mods::Mod;
 
 /// Something that draws, holds, or is drawn or held.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -626,7 +627,12 @@ impl Panels {
 		}
 		let program_audio = collection.program_audio().unwrap_or_default();
 		ui.horizontal_wrapped(|ui| {
-			if let Some(action) = scene_settings(ui, index, scene, &collection.audio_scenes, program_audio) {
+			let mods = &self.controls.mods;
+			let audio = mods
+				.on(Mod::Audio)
+				.then_some((collection.audio_scenes.as_slice(), program_audio));
+			let publish = mods.on(Mod::Published).then_some(audio);
+			if let Some(action) = scene_settings(ui, index, scene, publish) {
 				pass.action = Some(Action::Scene(action));
 			}
 		});

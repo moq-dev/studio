@@ -1039,6 +1039,9 @@ pub struct Program {
 	/// The origin the studio's own broadcasts are read through, which no relay
 	/// connection carries.
 	local: moq_net::origin::Producer,
+	/// Whether the sources on program encode for replays, with nothing
+	/// reading them.
+	replays: std::sync::atomic::AtomicBool,
 }
 
 impl Program {
@@ -1088,9 +1091,13 @@ impl Program {
 			}
 			changed
 		});
+		// Without replays, only what reads a source encodes it.
+		let (mut shown, mut heard): (BTreeSet<String>, BTreeSet<String>) =
+			match self.replays.load(std::sync::atomic::Ordering::Relaxed) {
+				true => (shown, heard),
+				false => Default::default(),
+			};
 		// Published, a source encodes as though on program.
-		let mut shown = shown;
-		let mut heard: BTreeSet<String> = heard;
 		shown.extend(published.keys().cloned());
 		heard.extend(published.keys().cloned());
 		self.sources
@@ -1382,6 +1389,15 @@ impl Engine {
 	/// Set whether guests appear on their own, as the show's settings say.
 	pub fn set_guests_appear(&self, appear: bool) {
 		self.guests_appear.store(appear, std::sync::atomic::Ordering::Relaxed);
+	}
+
+	/// Set whether the sources on program encode their recent past for a
+	/// replay, as they do until told not to, or only while something reads
+	/// them.
+	pub fn set_replays(&self, replays: bool) {
+		self.program
+			.replays
+			.store(replays, std::sync::atomic::Ordering::Relaxed);
 	}
 
 	/// Keep `room` among the [rooms](Self::rooms) Panic mutes the guests of,
@@ -2241,6 +2257,7 @@ async fn publish(gpu: &Gpu, stats: &Arc<Stats>, canvas: Canvas, start: Instant) 
 			recording,
 			recorded,
 			local,
+			replays: std::sync::atomic::AtomicBool::new(true),
 		},
 		Publish {
 			recording: recorded_video,
@@ -4415,6 +4432,10 @@ mod tests {
 			stream,
 			tokio::runtime::Handle::current(),
 		));
+		use crate::mods::Mod;
+		for each in [Mod::Studio, Mod::Review, Mod::Remote] {
+			controls.mods.set(each, true);
+		}
 		controls.set_studio(true);
 		controls.scene(&mut engine.state.lock().unwrap(), "Guest").unwrap();
 		{
@@ -4456,7 +4477,7 @@ mod tests {
 				Some("`red` has no sound")
 			);
 			assert!(refused(Action::Mute("nobody".into())).is_some());
-			assert!(Action::listed(&state).contains(&Action::Scene("Portrait".into())));
+			assert!(Action::listed(&state, &Default::default()).contains(&Action::Scene("Portrait".into())));
 		}
 		for (action, why) in [
 			(crate::controls::Action::Cut, "nothing is cued"),
@@ -4478,7 +4499,7 @@ mod tests {
 			assert!(portrait.refused.is_some(), "a pad says why it cannot go on");
 			assert_eq!(desk.program.as_deref(), Some("Guest"));
 			assert_eq!(desk.take_refused.as_deref(), Some("nothing is cued"));
-			let mutes: Vec<String> = Action::listed(&engine.state.lock().unwrap())
+			let mutes: Vec<String> = Action::listed(&engine.state.lock().unwrap(), &Default::default())
 				.into_iter()
 				.filter_map(|action| match action {
 					Action::Mute(name) => Some(name),
@@ -4492,6 +4513,21 @@ mod tests {
 			assert_eq!(take(&main), Ok(format!("took `{main}`")));
 			assert_eq!(controls.desk().program.as_deref(), Some(main.as_str()));
 			take("Guest").unwrap();
+
+			// With Studio mode's mod off, a phone cannot TAKE or AUTO what the
+			// off-air banner cued, though the banner itself can.
+			controls.mods.set(Mod::Studio, false);
+			crate::controls::cue(&mut engine.state.lock().unwrap(), &main).unwrap();
+			for action in [Action::Cut, Action::Transition] {
+				assert_eq!(
+					controls.clone().press(&action),
+					Err("Studio mode is off in the studio's Settings, Mods".into())
+				);
+			}
+			assert_eq!(controls.desk().program.as_deref(), Some("Guest"));
+			assert_eq!(controls.fire(&Action::Cut).unwrap(), format!("took `{main}`"));
+			take("Guest").unwrap();
+			controls.mods.set(Mod::Studio, true);
 		}
 
 		// A sound's key or palette row flips its mute, an edit undo takes back.

@@ -19,7 +19,7 @@ picks the broadcast for its screen, are judgments no test makes.
 
 ## Waiting
 
-- Maintainer: switch on **Both at once** in Settings, Show, on a show with a
+- Maintainer: switch on **Both formats** in Settings, Mods, then **Both at once** in Settings, Show, on a show with a
   game or a screen as its main picture and a camera, go live to a relay,
   and watch `<broadcast>` on a desktop and `<broadcast>/portrait` on a phone.
   Done when both read as intended, or the change the derivation needs is

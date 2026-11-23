@@ -25,6 +25,7 @@ use crate::health::{self, Verdict};
 use crate::hotkeys::{self, Bindings, Hotkeys, Reach};
 use crate::interact::Interact;
 use crate::kit::{self, Icon, IconButton, Tally, TallyFrame};
+use crate::mods::Mod;
 use crate::replay::{self, Of};
 use crate::snap::{self, Grab, Snap};
 use crate::{mix, record};
@@ -42,6 +43,7 @@ mod layout;
 mod levels;
 mod live;
 mod mixer;
+mod mods;
 mod multiview;
 mod palette;
 mod remotes;
@@ -54,6 +56,8 @@ pub(crate) use layout::fit;
 use levels::Levels;
 #[cfg(test)]
 pub(crate) use mixer::View as MixView;
+#[cfg(test)]
+pub(crate) use mods::layout_off;
 pub(crate) use shell::dashed;
 
 /// The smallest the window gets, at which every part still has room.
@@ -77,6 +81,15 @@ pub(crate) enum Page {
 
 impl Page {
 	const ALL: [Self; 4] = [Self::Live, Self::Build, Self::Mix, Self::Review];
+
+	/// The mod that must be on for the page to be listed, if any.
+	fn needs(self) -> Option<Mod> {
+		match self {
+			Self::Live | Self::Build => None,
+			Self::Mix => Some(Mod::Audio),
+			Self::Review => Some(Mod::Review),
+		}
+	}
 
 	fn name(self) -> &'static str {
 		match self {
@@ -112,9 +125,8 @@ pub(crate) enum Setting {
 	Guests,
 	/// The phones paired as remotes.
 	Remote,
-	/// Published scenes and sources, the virtual camera, the effects, and the
-	/// scene graph.
-	Advanced,
+	/// The features most streamers never use, each switched on here.
+	Mods,
 }
 
 impl Setting {
@@ -125,10 +137,18 @@ impl Setting {
 		Self::Hotkeys,
 		Self::Guests,
 		Self::Remote,
-		Self::Advanced,
+		Self::Mods,
 	];
 
-	fn name(self) -> &'static str {
+	/// The mod that must be on for the pane to be listed, if any.
+	pub(crate) fn needs(self) -> Option<Mod> {
+		match self {
+			Self::Remote => Some(Mod::Remote),
+			_ => None,
+		}
+	}
+
+	pub(crate) fn name(self) -> &'static str {
 		match self {
 			Self::Show => "Show",
 			Self::Stream => "Stream",
@@ -136,7 +156,7 @@ impl Setting {
 			Self::Hotkeys => "Hotkeys",
 			Self::Guests => "Guests",
 			Self::Remote => "Remote",
-			Self::Advanced => "Advanced",
+			Self::Mods => "Mods",
 		}
 	}
 
@@ -148,46 +168,44 @@ impl Setting {
 			Self::Hotkeys => Icon::Hotkeys,
 			Self::Guests => Icon::Guests,
 			Self::Remote => Icon::Phone,
-			Self::Advanced => Icon::Advanced,
+			Self::Mods => Icon::Advanced,
 		}
 	}
 
 	/// Each setting in its pane by the name its row shows, which the palette
-	/// finds it by, with what else it answers to.
-	pub(crate) fn rows(self) -> &'static [(&'static str, &'static [&'static str])] {
+	/// finds it by, with what else it answers to and the mod it needs, if
+	/// any. The Mods pane's rows are the mods themselves.
+	pub(crate) fn rows(self) -> &'static [(&'static str, &'static [&'static str], Option<Mod>)] {
 		match self {
 			Self::Show => &[
-				("Format", &["portrait", "landscape", "vertical"]),
-				("Canvas size", &["resolution", "1080p", "720p"]),
-				("Frame rate", &["fps"]),
-				(settings::SCENE_SIZES, &[]),
+				("Format", &["portrait", "landscape", "vertical"], Some(Mod::Formats)),
+				("Both at once", &["dual", "portrait", "phones"], Some(Mod::Formats)),
+				("Canvas size", &["resolution", "1080p", "720p"], None),
+				("Frame rate", &["fps"], None),
+				(settings::SCENE_SIZES, &[], Some(Mod::Published)),
 			],
 			Self::Stream => &[
-				("Relay", &["token", "server", "url"]),
-				("Failover relay", &["backup"]),
-				("Broadcast name", &["path"]),
-				("Encode only while someone watches", &["on demand", "viewers"]),
+				("Relay", &["token", "server", "url"], None),
+				("Failover relay", &["backup"], None),
+				("Broadcast name", &["path"], None),
+				("Encode only while someone watches", &["on demand", "viewers"], None),
+				("Virtual camera", &["webcam", "video call"], None),
 			],
 			Self::Recording => &[
-				("Each source too", &["iso", "separate", "files"]),
-				("Picture", &["video"]),
-				("Sound", &["audio"]),
+				("Each source too", &["iso", "separate", "files"], None),
+				("Picture", &["video"], None),
+				("Sound", &["audio"], Some(Mod::Audio)),
 			],
 			Self::Hotkeys => &[],
 			Self::Guests => &[
-				("Room", &[]),
-				("Room key", &[]),
-				("Join page", &[]),
-				("Link lifetime", &["expiry", "expires"]),
-				("Appear on their own", &["tile"]),
+				("Room", &[], None),
+				("Room key", &[], None),
+				("Join page", &[], None),
+				("Link lifetime", &["expiry", "expires"], None),
+				("Appear on their own", &["tile"], Some(Mod::Layout)),
 			],
 			Self::Remote => &[],
-			Self::Advanced => &[
-				("Publish a scene as its own broadcast", &[]),
-				("Publish a source independently", &[]),
-				("Virtual camera", &["webcam", "video call"]),
-				("Scene graph", &["wires", "nodes", "map"]),
-			],
+			Self::Mods => &[],
 		}
 	}
 
@@ -200,7 +218,7 @@ impl Setting {
 			Self::Hotkeys => &["keys", "shortcuts", "bind"],
 			Self::Guests => &["invite", "join", "room"],
 			Self::Remote => &["phone", "pair", "qr", "control"],
-			Self::Advanced => &["publish"],
+			Self::Mods => &["features", "extras", "advanced", "power"],
 		}
 	}
 
@@ -215,7 +233,9 @@ impl Setting {
 			Self::Remote => {
 				"Phones that drive the show from a page their code opens: the scenes, TAKE, and the mutes. Kept beside the room key."
 			}
-			Self::Advanced => "Things most shows never touch.",
+			Self::Mods => {
+				"Features most streamers never use, hidden until switched on. Kept on this computer, not in the show."
+			}
 		}
 	}
 }
@@ -512,7 +532,7 @@ impl Studio {
 		self.panels.multiview.set_alone(picked);
 	}
 
-	/// Open the scene graph's window, as Settings, Advanced would.
+	/// Open the scene graph's window, as Settings, Mods would.
 	pub(crate) fn open_graph(&mut self) {
 		self.panels.graph_open = true;
 	}
@@ -561,6 +581,12 @@ impl Studio {
 	pub(crate) fn bind(&mut self, action: &Action, key: hotkeys::Binding) {
 		let hotkeys = self.panels.hotkeys.as_mut().expect("the window handed over its keys");
 		hotkeys.bind(action, Some(key)).expect("a key bound to nothing else");
+	}
+
+	/// Switch the mod `which` on or off, as its switch in Settings, Mods
+	/// would.
+	pub(crate) fn switch(&mut self, which: Mod, on: bool) {
+		self.panels.switch(which, on);
 	}
 
 	/// Turn Studio mode on or off, as its switch would.
@@ -613,6 +639,7 @@ const SNAPPING: &str = "snapping";
 const HOTKEYS: &str = "hotkeys";
 /// How this operator runs a show, not part of the show.
 const STUDIO_MODE: &str = "studio_mode";
+const MODS: &str = "mods";
 
 impl Studio {
 	/// Take up what this user picked last time, and start hearing the keys
@@ -624,11 +651,15 @@ impl Studio {
 			panels.speaker = eframe::get_value::<Option<String>>(storage, SPEAKER).flatten();
 			panels.snapping = eframe::get_value(storage, SNAPPING).unwrap_or_default();
 			bindings = eframe::get_value(storage, HOTKEYS).unwrap_or_default();
+			let mods: Vec<Mod> = eframe::get_value(storage, MODS).unwrap_or_default();
+			panels.controls.mods.load(&mods);
 			let studio = eframe::get_value(storage, STUDIO_MODE).unwrap_or_default();
 			panels.controls.set_studio(studio);
 			let multiview = eframe::get_value(storage, multiview::KEY).unwrap_or_default();
 			panels.multiview.load(multiview);
 		}
+		// The show as it opens switches on what it uses without a word.
+		self.panels.follow_mods(false);
 		self.panels.keyboard = Some(window.keyboard.clone());
 		let hotkeys = Hotkeys::new(window, self.panels.controls.clone(), &self.panels.runtime, bindings);
 		self.panels.hotkeys = Some(hotkeys);
@@ -639,6 +670,7 @@ impl Studio {
 		eframe::set_value(storage, SPEAKER, &panels.speaker);
 		eframe::set_value(storage, SNAPPING, &panels.snapping);
 		eframe::set_value(storage, STUDIO_MODE, &panels.controls.studio());
+		eframe::set_value(storage, MODS, &panels.controls.mods.saved());
 		panels.multiview.save(storage);
 		if let Some(hotkeys) = &panels.hotkeys {
 			eframe::set_value(storage, HOTKEYS, &hotkeys.bindings());
@@ -670,6 +702,7 @@ impl Studio {
 		// Everything the title bar, the strip, and the live picture show,
 		// under one short lock, so drawing them never holds the engine's
 		// state, which the program's render thread wants each frame.
+		panels.follow_mods(true);
 		let snapshot = panels.snapshot(ui.ctx(), frame);
 		if let Some(fired) = panels.controls.fired() {
 			panels.say(fired);
@@ -1826,15 +1859,14 @@ fn strip_controls(
 	change
 }
 
+/// What a scene's settings offer beside Safe, by the mods on: `None` without
+/// Published scenes, or its Publish switch, with the audio scenes and the one
+/// on program to pick what it carries from while Audio scenes & routes is on.
+type Publish<'a> = Option<Option<(&'a [moq_scene::AudioScene], &'a str)>>;
+
 /// A scene's Publish setting, and the audio scene its broadcast carries
 /// while published, as its Scenes panel row and Graph node show them.
-fn scene_settings(
-	ui: &mut Ui,
-	index: usize,
-	scene: &Scene,
-	audio_scenes: &[moq_scene::AudioScene],
-	program_audio: &str,
-) -> Option<SceneAction> {
+fn scene_settings(ui: &mut Ui, index: usize, scene: &Scene, publish: Publish<'_>) -> Option<SceneAction> {
 	let mut action = None;
 	let mut safe = scene.safe;
 	if ui
@@ -1844,6 +1876,7 @@ fn scene_settings(
 	{
 		action = Some(SceneAction::Safe(index, safe));
 	}
+	let Some(audio) = publish else { return action };
 	let mut published = scene.published;
 	if ui
 		.add(kit::Toggle::new(&mut published).label("Publish"))
@@ -1852,7 +1885,9 @@ fn scene_settings(
 	{
 		action = Some(SceneAction::Publish(index, published));
 	}
-	if scene.published {
+	if scene.published
+		&& let Some((audio_scenes, program_audio)) = audio
+	{
 		let on_program = format!("on program ({program_audio})");
 		let mut audio = scene.audio.clone();
 		egui::ComboBox::from_id_salt(("scene audio", index))
@@ -2820,6 +2855,15 @@ impl Kind {
 		Self::Role,
 	];
 
+	/// The mod that must be on for it to be offered, if any.
+	fn needs(self) -> Option<Mod> {
+		match self {
+			Self::Replay => Some(Mod::Review),
+			Self::Role => Some(Mod::Layout),
+			_ => None,
+		}
+	}
+
 	fn label(self) -> &'static str {
 		match self {
 			Self::Color => "Color",
@@ -2863,7 +2907,11 @@ impl Kind {
 impl AddSource {
 	/// Draw the form, offering `scenes` to a scene source; the source to add
 	/// once the user asks for it.
-	fn ui(&mut self, ui: &mut Ui, scenes: &[String]) -> Option<Source> {
+	fn ui(&mut self, ui: &mut Ui, scenes: &[String], mods: &crate::mods::Mods) -> Option<Source> {
+		let on = |kind: &Kind| kind.needs().is_none_or(|needs| mods.on(needs));
+		if !on(&self.kind) {
+			self.kind = Kind::default();
+		}
 		let mut add = false;
 		egui::Grid::new("add source").show(ui, |ui| {
 			let label = ui.label("Name");
@@ -2877,7 +2925,7 @@ impl AddSource {
 					let picker = |kind: &Kind| {
 						cfg!(target_os = "linux") || !matches!(kind, Kind::PickedDisplay | Kind::PickedWindow)
 					};
-					for kind in Kind::ALL.into_iter().filter(picker) {
+					for kind in Kind::ALL.into_iter().filter(picker).filter(on) {
 						ui.selectable_value(&mut self.kind, kind, kind.label());
 					}
 				})

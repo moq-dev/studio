@@ -54,5 +54,4 @@ Decided 2026-11-22 with the maintainer (/quest-plan):
 
 ## Related
 
-- [Mods](/quest/m0/ux/mods.md) - gates Smart Layout (Slots + Keep out of the way) and Published scenes
 - [Adding a source in one click](/quest/m0/ux/add.md) - adds and selects new layers directly into this flow

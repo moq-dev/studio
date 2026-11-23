@@ -390,15 +390,28 @@ impl Widget for Pill<'_> {
 pub struct Toggle<'a> {
 	on: &'a mut bool,
 	label: Option<&'a str>,
+	/// What a screen reader calls it, when no label beside it does.
+	name: Option<&'a str>,
 }
 
 impl<'a> Toggle<'a> {
 	pub fn new(on: &'a mut bool) -> Self {
-		Self { on, label: None }
+		Self {
+			on,
+			label: None,
+			name: None,
+		}
 	}
 
 	pub fn label(mut self, label: &'a str) -> Self {
 		self.label = Some(label);
+		self
+	}
+
+	/// Name it for a screen reader, as the row it sits in is named, without
+	/// drawing the name beside it.
+	pub fn named(mut self, name: &'a str) -> Self {
+		self.name = Some(name);
 		self
 	}
 }
@@ -421,7 +434,7 @@ impl Widget for Toggle<'_> {
 				WidgetType::Checkbox,
 				ui.is_enabled(),
 				on,
-				self.label.unwrap_or_default(),
+				self.label.or(self.name).unwrap_or_default(),
 			)
 		});
 		if ui.is_rect_visible(rect) {

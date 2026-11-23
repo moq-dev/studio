@@ -3,11 +3,31 @@
 
 use egui::{Align2, Rect, Sense, Stroke, Vec2, pos2, vec2};
 
-use super::build::{LayerAction, Menu, OFF_AIR_TOP, layer_menu, shown_in};
+use super::build::{LayerAction, OFF_AIR_TOP, layer_menu, shown_in};
 use super::*;
 
 /// A layer row's height.
 const ROW: f32 = 46.0;
+
+/// Whether nothing draws `name`: no layer shows it, and no clone, role,
+/// filter, or the stinger reads it. Add lists it under Not in any scene
+/// once no audio scene hears it either.
+pub(super) fn unplaced(collection: &Collection, name: &str) -> bool {
+	let shown = (collection.layers()).any(|(_, items)| items.iter().any(|item| item.source == name));
+	let filters = collection
+		.layers()
+		.flat_map(|(_, items)| items.iter().flat_map(|item| &item.filters));
+	let mut read =
+		(filters.chain(collection.video.values().flat_map(|video| &video.filters))).filter_map(Filter::source);
+	// A clone or a role naming it shows it.
+	let cloned = collection.sources.values().any(|source| match source {
+		Source::Clone { source } | Source::Role { source: Some(source) } => source == name,
+		_ => false,
+	});
+	// Removing the stinger's source would quietly reset the transition.
+	let stinger = collection.transition.stinger() == Some(name);
+	!shown && !cloned && !stinger && !read.any(|source| source == name)
+}
 
 impl Panels {
 	/// The left column in `rect`: Layers and Add, and the inspector too when
@@ -168,7 +188,7 @@ impl Panels {
 			}
 			// Dropped on a slot on the picture, it takes that slot.
 			response.dnd_set_drag_payload(picked.clone());
-			if let Some(menu) = Menu::of(state, &picked, self.off_air(state).is_some()) {
+			if let Some(menu) = self.menu(state, &picked) {
 				response.context_menu(|ui| {
 					if let Some(chosen) = layer_menu(ui, &menu) {
 						action = Some((picked.clone(), chosen));
@@ -552,30 +572,10 @@ impl Panels {
 		self.follow_reloads(&state);
 		let collection = state.collection();
 		let heard = |name: &str| collection.audio_scenes.iter().any(|scene| scene.sounds.contains(name));
-		let shown = |name: &str| {
-			collection
-				.layers()
-				.any(|(_, items)| items.iter().any(|item| item.source == name))
-		};
-		let used_by_others = |name: &str| {
-			let filters = collection
-				.layers()
-				.flat_map(|(_, items)| items.iter().flat_map(|item| &item.filters));
-			let read = filters.chain(collection.video.values().flat_map(|video| &video.filters));
-			let mut read = read.filter_map(Filter::source);
-			// A clone or a role naming it shows it.
-			let cloned = collection.sources.values().any(|source| match source {
-				Source::Clone { source } | Source::Role { source: Some(source) } => source == name,
-				_ => false,
-			});
-			// Removing the stinger's source would quietly reset the transition.
-			let stinger = collection.transition.stinger() == Some(name);
-			cloned || stinger || read.any(|source| source == name)
-		};
 		let unused: Vec<String> = collection
 			.sources
 			.keys()
-			.filter(|name| !shown(name) && !heard(name) && !used_by_others(name))
+			.filter(|name| unplaced(collection, name) && !heard(name))
 			.cloned()
 			.collect();
 		if unused.is_empty() {
@@ -636,8 +636,14 @@ impl Panels {
 							..Item::new(name.clone(), moq_scene::Rect::default())
 						};
 					}
+					// Its sound joins the stream with it, as a new source's does.
+					let heard = state.collection().sources.get(&name).is_some_and(Source::has_audio);
 					let result = edit(&mut state, format!("Add `{name}` {}", place(&layer)), None, |draft| {
-						draft.insert_item(&layer, index, item)
+						draft.insert_item(&layer, index, item)?;
+						if heard {
+							draft.hear(&name)?;
+						}
+						Ok(())
 					});
 					if result.is_ok() {
 						self.select(Some(Picked { layer, index }));
@@ -696,7 +702,9 @@ impl Panels {
 			.iter()
 			.map(|scene| scene.name.clone())
 			.collect();
-		let Some(source) = self.add.ui(ui, &scenes) else { return };
+		let Some(source) = self.add.ui(ui, &scenes, &self.controls.mods) else {
+			return;
+		};
 		let name = self.add.name.trim().to_string();
 		let layer = self.scene(&state).ok();
 		let result = add(&mut state, layer, name, source, None);

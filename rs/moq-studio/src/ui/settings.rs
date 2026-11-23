@@ -64,6 +64,9 @@ pub(super) enum Restart {
 	/// The scene of this name, published, to this size or the program's: by
 	/// name, as an undo or reload while the restart waits may move it.
 	Scene(String, Option<moq_scene::Size>),
+	/// A portrait show turned to this landscape canvas, as switching off
+	/// Both formats does, which then switches the mod off.
+	Landscape(Canvas),
 }
 
 /// What a system file dialog is picking.
@@ -185,7 +188,7 @@ impl Panels {
 							Setting::Hotkeys => self.hotkeys(ui, fx),
 							Setting::Guests => self.guest_settings(ui),
 							Setting::Remote => self.remote_settings(ui),
-							Setting::Advanced => self.advanced(ui),
+							Setting::Mods => self.mods_pane(ui),
 						});
 					// A pane closes the window by clearing it, as the scene
 					// graph's Open does, or opens another by naming it, as
@@ -232,7 +235,11 @@ impl Panels {
 			painter.galley(pos2(rect.left() + 20.0, y), title, kit::TEXT);
 			y += 36.0;
 		}
-		for each in Setting::ALL {
+		let mods = &self.controls.mods;
+		let listed = Setting::ALL
+			.into_iter()
+			.filter(|each| each.needs().is_none_or(|needs| mods.on(needs)));
+		for each in listed.collect::<Vec<_>>() {
 			let at = Rect::from_min_size(pos2(rect.left() + 10.0, y), vec2(rect.width() - 20.0, 38.0));
 			y += 40.0;
 			let mut response = ui.interact(at, ui.id().with(("setting", each.name())), Sense::click());
@@ -271,49 +278,9 @@ impl Panels {
 		let shown = self.canvas.unwrap_or(current);
 		let mut wanted = None;
 
-		let portrait = current.height > current.width;
-		row(
-			ui,
-			"Format",
-			"The shape of the show's picture. The layout of this window follows it.",
-			|ui| {
-				ui.spacing_mut().item_spacing.x = CARD_GAP;
-				// Right to left, so Landscape comes first.
-				for (tall, name, says, icon) in [
-					(true, "Portrait", "Phones", Icon::Portrait),
-					(false, "Landscape", "Desks and TVs", Icon::Landscape),
-				] {
-					if format_card(ui, icon, name, says, portrait == tall).clicked() && portrait != tall {
-						wanted = Some(Canvas {
-							width: current.height,
-							height: current.width,
-							..current
-						});
-					}
-				}
-			},
-		);
-
-		let mut on = both;
-		row(
-			ui,
-			"Both at once",
-			"Also send a portrait picture, for phones, as its own broadcast beside the landscape one. Each \
-			 scene gets a portrait arrangement of its layers, and the machine encodes both.",
-			|ui| {
-				// As the scene file requires: only a canvas wider than tall turns.
-				let wide = current.width > current.height;
-				let toggle = ui
-					.add_enabled(wide, kit::Toggle::new(&mut on).label("Landscape and portrait"))
-					.on_disabled_hover_text(
-						"Only a canvas wider than tall turns: a portrait show turns to landscape first",
-					);
-				if toggle.changed() {
-					self.set_both(on);
-				}
-			},
-		);
-
+		if self.controls.mods.on(Mod::Formats) {
+			self.formats(ui, current, both, &mut wanted);
+		}
 		let named = named_size(current).filter(|_| self.canvas.is_none());
 		let mut size = named;
 		let sizes: Vec<(Option<u32>, &str)> = SIZES
@@ -359,9 +326,14 @@ impl Panels {
 			wanted = Some(apply);
 		}
 
-		rule(ui);
-		ui.add_space(10.0);
-		let resized = self.scene_sizes(ui, current, &scenes);
+		let resized = match self.controls.mods.on(Mod::Published) {
+			true => {
+				rule(ui);
+				ui.add_space(10.0);
+				self.scene_sizes(ui, current, &scenes)
+			}
+			false => None,
+		};
 
 		let on_air = self.engine.on_air() != crate::engine::OnAir::Off;
 		if on_air {
@@ -392,6 +364,53 @@ impl Panels {
 			(Some(restart), false) => self.apply_restart(restart),
 			(None, _) => {}
 		}
+	}
+
+	/// The Show pane's rows of Both formats: the format, and going out in
+	/// both at once. A new canvas the cards ask for goes in `wanted`.
+	fn formats(&mut self, ui: &mut Ui, current: Canvas, both: bool, wanted: &mut Option<Canvas>) {
+		let portrait = current.height > current.width;
+		row(
+			ui,
+			"Format",
+			"The shape of the show's picture. The layout of this window follows it.",
+			|ui| {
+				ui.spacing_mut().item_spacing.x = CARD_GAP;
+				// Right to left, so Landscape comes first.
+				for (tall, name, says, icon) in [
+					(true, "Portrait", "Phones", Icon::Portrait),
+					(false, "Landscape", "Desks and TVs", Icon::Landscape),
+				] {
+					if format_card(ui, icon, name, says, portrait == tall).clicked() && portrait != tall {
+						*wanted = Some(Canvas {
+							width: current.height,
+							height: current.width,
+							..current
+						});
+					}
+				}
+			},
+		);
+
+		let mut on = both;
+		row(
+			ui,
+			"Both at once",
+			"Also send a portrait picture, for phones, as its own broadcast beside the landscape one. Each \
+				 scene gets a portrait arrangement of its layers, and the machine encodes both.",
+			|ui| {
+				// As the scene file requires: only a canvas wider than tall turns.
+				let wide = current.width > current.height;
+				let toggle = ui
+					.add_enabled(wide, kit::Toggle::new(&mut on).label("Landscape and portrait"))
+					.on_disabled_hover_text(
+						"Only a canvas wider than tall turns: a portrait show turns to landscape first",
+					);
+				if toggle.changed() {
+					self.set_both(on);
+				}
+			},
+		);
 	}
 
 	/// The exact width, height, and frame rate, while Custom is open; the
@@ -510,7 +529,7 @@ impl Panels {
 				}
 				help(
 					ui,
-					"A scene of another size cannot go on air. Publish it as its own broadcast instead, under Advanced.",
+					"A scene of another size cannot go on air. Publish it as its own broadcast instead, under Mods, Published scenes.",
 				);
 			});
 		toggle.labelled_by(label.inner);
@@ -528,6 +547,13 @@ impl Panels {
 				canvas.width, canvas.height, canvas.framerate
 			),
 			Restart::Scene(name, _) => format!("Scene `{name}` publishes at its new size."),
+			Restart::Landscape(canvas) => format!(
+				"The show turns to landscape, {}x{} at {} fps, as {} goes off.",
+				canvas.width,
+				canvas.height,
+				canvas.framerate,
+				Mod::Formats.name()
+			),
 		};
 		let mut apply = false;
 		let closed = kit::Sheet::new(egui::Id::new("restart"), "Restart the video?").show(ctx, |ui| {
@@ -549,10 +575,23 @@ impl Panels {
 	}
 
 	/// Apply `restart`, as an edit undo takes back.
-	fn apply_restart(&mut self, restart: Restart) {
+	pub(super) fn apply_restart(&mut self, restart: Restart) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		let result = match restart {
+			Restart::Landscape(canvas) => {
+				let label = format!("Switch off {}", Mod::Formats.name());
+				// A show reloaded while this was asked may go out in portrait.
+				let result = edit(&mut state, label, None, |draft| {
+					draft.set_portrait(false)?;
+					draft.set_canvas(canvas)
+				});
+				if result.is_ok() {
+					self.controls.mods.set(Mod::Formats, false);
+					self.deselect_item();
+				}
+				result
+			}
 			Restart::Canvas(canvas) => {
 				let label = format!(
 					"Set the canvas to {}x{} at {} fps",
@@ -720,7 +759,9 @@ impl Panels {
 		self.saved_note(ui, Setting::Recording);
 		ui.add_space(12.0);
 		self.recorded_scene(ui);
-		self.recorded_audio(ui);
+		if self.controls.mods.on(Mod::Audio) {
+			self.recorded_audio(ui);
+		}
 		let mut each = self.controls.record_sources.load(Ordering::Relaxed);
 		row(
 			ui,
@@ -895,6 +936,7 @@ impl Panels {
 		let stream = self.controls.stream.lock().unwrap().clone();
 		let overridden = stream.overridden();
 		let busy = self.saving.is_some() || self.picker.is_some();
+		let layout = self.controls.mods.on(Mod::Layout);
 		let saved = stream.saved().clone();
 		let form = self.guests_form.get_or_insert_with(|| GuestForm::new(&saved));
 		let mut pick_key = false;
@@ -999,12 +1041,16 @@ impl Panels {
 					ui.add(kit::Segmented::new(&mut form.expiry, &options));
 				},
 			);
-			field_row(ui, "Appear on their own", "", None, |ui| {
-				ui.add(kit::Toggle::new(&mut form.appear).label("In the next tile on program"))
-					.on_hover_text(
-						"A guest who joins takes the next tile of the scene on program, rather than waiting under Add",
-					);
-			});
+			// Tiles are Smart layout's slots.
+			if layout {
+				field_row(ui, "Appear on their own", "", None, |ui| {
+					ui.add(kit::Toggle::new(&mut form.appear).label("In the next tile on program"))
+						.on_hover_text(
+							"A guest who joins takes the next tile of the scene on program, rather than waiting under \
+							 Add",
+						);
+				});
+			}
 		});
 
 		let edited = form.edited(&saved);
@@ -1187,13 +1233,15 @@ impl Panels {
 		let (listed, sources): (Vec<Action>, HashSet<String>) = {
 			let state = self.engine.state.lock().unwrap();
 			let sources = state.collection().sources.keys().cloned().collect();
-			(Action::listed(&state), sources)
+			(Action::listed(&state, &self.controls.mods), sources)
 		};
 		let bindings = hotkeys.bindings();
-		// A key bound to an action not listed, so it can still be seen and cleared.
+		// A key bound to an action not listed, so it can still be seen and
+		// cleared, unless its mod is off, which hides it until switched on.
+		let mods = &self.controls.mods;
 		let unlisted: Vec<Action> = bindings
 			.keys()
-			.filter(|action| !listed.contains(action))
+			.filter(|action| !listed.contains(action) && action.needs().is_none_or(|needs| mods.on(needs)))
 			.cloned()
 			.collect();
 		let groups = Group::ALL.map(|group| {
@@ -1282,9 +1330,10 @@ impl Panels {
 		}
 	}
 
-	/// Settings, Advanced: scenes and sources published on their own, the
-	/// virtual camera, and the scene graph.
-	fn advanced(&mut self, ui: &mut Ui) {
+	/// What Published scenes keeps in Settings, Mods, while on: scenes and
+	/// sources published on their own, and each published scene's virtual
+	/// camera.
+	pub(super) fn published(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();
 		let (scenes, sources, published) = {
 			let state = engine.state.lock().unwrap();
@@ -1400,21 +1449,9 @@ impl Panels {
 			self.check(result);
 		}
 
-		self.camera(ui, None);
 		for scene in scenes.iter().filter(|scene| scene.published) {
 			self.camera(ui, Some(&scene.name));
 		}
-		row(
-			ui,
-			"Scene graph",
-			"Every source, scene, and audio scene, drawn as one map you can wire.",
-			|ui| {
-				if ui.add(kit::button(Icon::Detach, "Open")).clicked() {
-					self.graph_open = true;
-					self.setting = None;
-				}
-			},
-		);
 	}
 
 	/// The virtual camera of the program, or of the published scene `scene`:

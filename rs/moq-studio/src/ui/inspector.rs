@@ -105,7 +105,8 @@ impl Panels {
 		let kept = item.keep_clear;
 
 		section(ui, "Place");
-		if picked.layer.scene.is_some() {
+		let layout = self.controls.mods.on(Mod::Layout);
+		if layout && picked.layer.scene.is_some() {
 			use moq_scene::Slot;
 			let name = |slot: Option<Slot>| match slot {
 				None => "Free",
@@ -276,7 +277,8 @@ impl Panels {
 		// clear places only the landscape picture, so not one shown only in
 		// portrait.
 		let published = collection.published.contains_key(collection.capture(&item.source));
-		if picked.layer.scene.is_some()
+		if layout
+			&& picked.layer.scene.is_some()
 			&& item.slot.is_none()
 			&& !published
 			&& item.shown_in(Format::Landscape)
@@ -569,7 +571,7 @@ impl Panels {
 					asked = Some(Asked::Warn(capture.to_string(), warn));
 				}
 			}
-			if source.independent() {
+			if source.independent() && self.controls.mods.on(Mod::Published) {
 				let viewers = collection.published.get(&name).copied();
 				let mut published = viewers.is_some();
 				let hover = match source {
@@ -858,7 +860,12 @@ impl Panels {
 		};
 		ui.label(egui::RichText::new(size).color(kit::DIM));
 		ui.horizontal_wrapped(|ui| {
-			if let Some(settings) = scene_settings(ui, index, &scene, &audio_scenes, &program_audio) {
+			let mods = &self.controls.mods;
+			let audio = mods
+				.on(Mod::Audio)
+				.then_some((audio_scenes.as_slice(), program_audio.as_str()));
+			let publish = mods.on(Mod::Published).then_some(audio);
+			if let Some(settings) = scene_settings(ui, index, &scene, publish) {
 				action = Some(settings);
 			}
 		});
@@ -867,7 +874,10 @@ impl Panels {
 				.color(kit::DIM)
 				.font(kit::ui(12.0)),
 		);
-		let slotted = self.slots(ui, &mut state, index);
+		let slotted = match self.controls.mods.on(Mod::Layout) {
+			true => self.slots(ui, &mut state, index),
+			false => None,
+		};
 		if let Some(action) = action {
 			let result = self.scene_action(&mut state, action);
 			drop(state);

@@ -19,6 +19,7 @@ use egui_kittest::kittest::{NodeT, Queryable, by};
 use moq_scene::Source;
 use moq_scene::source::Status;
 
+use crate::mods::Mod;
 use crate::ui::{Inspect, MixView, Page, Setting, Side};
 use crate::{App, Window, autosave, engine, fx, hotkeys, library, setup, show, stream};
 
@@ -157,6 +158,10 @@ enum View {
 	/// The command palette, open by its key over LIVE with a few keys bound,
 	/// with what is typed into it.
 	Palette(&'static str),
+	/// Settings, Mods, each switched on, as a power user has it.
+	ModsOn,
+	/// Settings, Mods, scrolled to the row of this name.
+	ModsAt(&'static str),
 }
 
 /// The studio on the dual-format views' show, at the mock-ups' size, turned
@@ -173,6 +178,23 @@ fn dual(page: Page, format: moq_scene::Format) -> Open {
 		size: SIZE,
 		show: "dual.toml",
 		relay: false,
+	}
+}
+
+impl View {
+	/// The mods a view switches on, beyond those its show uses.
+	fn mods(&self) -> Vec<Mod> {
+		match self {
+			Self::Mix(..) | Self::MixMenu => vec![Mod::Audio],
+			Self::Review { .. } => vec![Mod::Review],
+			Self::Cued(_) | Self::Dual { cued: Some(_), .. } => vec![Mod::Studio],
+			Self::Multiview { live: false, .. } => vec![Mod::Multiview],
+			Self::Multiview { live: true, .. } => vec![Mod::Multiview, Mod::Studio],
+			Self::Setting(Setting::Remote) | Self::Paired => vec![Mod::Remote],
+			Self::Graph => vec![Mod::Graph],
+			Self::ModsOn => Mod::ALL.to_vec(),
+			_ => Vec::new(),
+		}
 	}
 }
 
@@ -332,7 +354,7 @@ views! {
 	build_off_air: Still, studio(View::OffAir("Break"));
 	/// A scene that cannot go on air opens off air too, its Take it live
 	/// dimmed, saying why under the pointer.
-	build_off_air_refused: Still, studio(View::OffAir("Vertical"));
+	build_off_air_refused: Still, Open::Studio { view: View::OffAir("Vertical"), size: SIZE, show: "published.toml", relay: false };
 	/// Too narrow for the banner beside the live picture, it goes under it.
 	build_off_air_compact: Still, Open::Studio { view: View::OffAir("Break"), size: HALF, show: "show.toml", relay: false };
 	/// A facecam keeping out of the way of a game: what matters glowing on the
@@ -453,20 +475,23 @@ views! {
 	/// when its link expires, and every phone paired, one removed. Live, as
 	/// each link carries a token of its own.
 	settings_remote_paired: Live, studio(View::Paired);
-	/// Settings, Advanced: published scenes and sources, the virtual camera,
-	/// and the scene graph.
-	settings_advanced: Still, studio(View::Setting(Setting::Advanced));
-	/// Settings, Advanced with a source published: how viewers may treat it,
-	/// as a sound alone, with no layer to inspect, sets it.
-	settings_advanced_published: Still, Open::Studio { view: View::Setting(Setting::Advanced), size: SIZE, show: "published.toml", relay: false };
+	/// Settings, Mods: each feature most streamers never use, off.
+	settings_mods: Still, studio(View::Setting(Setting::Mods));
+	/// Settings, Mods with each switched on: Published scenes keeps its
+	/// scenes and sources here, and Scene graph opens.
+	settings_mods_on: Still, studio(View::ModsOn);
+	/// Settings, Mods on a show with a source published, which switched
+	/// Published scenes on as it opened: how viewers may treat it, as a
+	/// sound alone, with no layer to inspect, sets it.
+	settings_mods_published: Still, Open::Studio { view: View::ModsAt("Priority"), size: SIZE, show: "published.toml", relay: false };
 	/// The scene graph, in a window of its own.
 	graph: Still, studio(View::Graph);
 	/// The command palette as its key opens it: every action, each with its
 	/// key and why it cannot run now, before the pages, settings, and what
 	/// can be added.
 	palette: Still, studio(View::Palette(""));
-	/// The palette finding what `take` names: the scenes and TAKE, which says
-	/// nothing is cued.
+	/// The palette finding what `take` names: the scenes, as TAKE is Studio
+	/// mode's, off.
 	palette_found: Still, studio(View::Palette("take"));
 	/// The palette finding a setting by its name.
 	palette_setting: Still, studio(View::Palette("frame"));
@@ -730,6 +755,7 @@ fn a_marker_is_named_where_it_is_typed() {
 	let app = start(launch(&gpu), stream(None), &runtime);
 	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
 	harness.step();
+	enable(&mut harness, &[Mod::Review]);
 	let engine = started.get().expect("the studio started").clone();
 	runtime
 		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
@@ -810,6 +836,7 @@ fn a_marker_is_clipped_around() {
 	let app = start(launch(&gpu), stream(Some(&relay)), &runtime);
 	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
 	harness.step();
+	enable(&mut harness, &[Mod::Review]);
 	let engine = started.get().expect("the studio started").clone();
 	runtime
 		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
@@ -957,7 +984,13 @@ fn the_palette_finds_and_runs_anything() {
 	run(&mut harness, "unmute mic");
 	assert!(!muted("mic"), "and unmuted it");
 
-	// TAKE with nothing cued says why, and Enter leaves it open.
+	// TAKE with nothing cued says why, and Enter leaves it open, with
+	// Studio mode's mod on, as it is not listed otherwise.
+	run(&mut harness, "take the cued");
+	assert!(harness.query_by_label("Take the cued scene").is_none(), "unlisted");
+	harness.key_press(egui::Key::Escape);
+	harness.run_steps(2);
+	enable(&mut harness, &[Mod::Studio]);
 	run(&mut harness, "take the cued");
 	let take = harness.get_by_label("Take the cued scene");
 	assert!(take.accesskit_node().is_disabled(), "it cannot run");
@@ -967,7 +1000,8 @@ fn the_palette_finds_and_runs_anything() {
 	harness.run_steps(2);
 	assert!(harness.query_by_role(Role::TextInput).is_none(), "Escape closes it");
 
-	// A setting under a disclosure opens it.
+	// A setting under a disclosure opens it, its mod on.
+	enable(&mut harness, &[Mod::Published]);
 	run(&mut harness, "scene sizes");
 	assert!(
 		harness.query_by_label("Give a scene its own size").is_some(),
@@ -1012,18 +1046,50 @@ fn the_palette_finds_and_runs_anything() {
 		"only the missing source is no such sound"
 	);
 
-	// Each setting the palette finds by name is a row of its pane.
-	for setting in Setting::ALL {
+	// Each setting the palette finds by name is a row of its pane while its
+	// mod is on, and absent while off, as is a pane whose mod is off.
+	{
 		let App::Studio(studio) = &mut harness.state_mut().app else {
 			unreachable!("the studio is open")
 		};
-		studio.open(setting);
-		harness.run_steps(2);
-		for (name, _) in setting.rows() {
-			assert!(
-				harness.query_by_label(name).is_some(),
-				"{setting:?} has no row called `{name}`"
+		for which in Mod::ALL {
+			studio.switch(which, false);
+		}
+	}
+	for all in [false, true] {
+		if all {
+			enable(&mut harness, &Mod::ALL);
+		}
+		for setting in Setting::ALL {
+			let App::Studio(studio) = &mut harness.state_mut().app else {
+				unreachable!("the studio is open")
+			};
+			studio.open(setting);
+			harness.run_steps(2);
+			let shown = all || setting.needs().is_none();
+			assert_eq!(
+				harness.query_all_by_label(setting.name()).next().is_some(),
+				shown,
+				"{setting:?} listed: {all}"
 			);
+			if !shown {
+				continue;
+			}
+			let rows = setting
+				.rows()
+				.iter()
+				.map(|(name, _, needs)| (*name, all || needs.is_none()));
+			let mods = Mod::ALL
+				.iter()
+				.filter(|_| setting == Setting::Mods)
+				.map(|which| (which.name(), true));
+			for (name, on) in rows.chain(mods) {
+				assert_eq!(
+					harness.query_all_by_label(name).next().is_some(),
+					on,
+					"{setting:?}'s row `{name}` shown, with every mod on: {all}"
+				);
+			}
 		}
 	}
 
@@ -1038,7 +1104,8 @@ fn the_palette_finds_and_runs_anything() {
 /// and moves to the room it saves at once, off air, dropping a phone's link
 /// into the room it left. The recordings folder
 /// moves only once no recording is under way. The scene
-/// graph's Open closes Settings for the graph. It draws no view.
+/// graph's Open, once switched on in Mods, closes Settings for the graph.
+/// It draws no view.
 #[test]
 #[ignore = "draws on a GPU; run with `just shots`"]
 fn settings_change_the_show_and_move_the_guests() {
@@ -1086,6 +1153,8 @@ fn settings_change_the_show_and_move_the_guests() {
 	harness.get_by_label("720p").click();
 	harness.run_steps(2);
 	assert_eq!((canvas().width, canvas().height), (1280, 720));
+	assert!(harness.query_by_label("Portrait").is_none(), "Both formats is off");
+	enable(&mut harness, &[Mod::Formats]);
 	harness.get_by_label("Portrait").click();
 	harness.run_steps(2);
 	assert_eq!((canvas().width, canvas().height), (720, 1280));
@@ -1139,6 +1208,8 @@ fn settings_change_the_show_and_move_the_guests() {
 		"{muted}"
 	);
 	// Remote, with no room to pair in, sends the host to the room's pane.
+	assert!(harness.query_by_label("Remote").is_none(), "Phone remote is off");
+	enable(&mut harness, &[Mod::Remote]);
 	harness.get_by_label("Remote").click();
 	harness.run_steps(2);
 	harness.get_by_label("Set up the room").click();
@@ -1231,12 +1302,22 @@ fn settings_change_the_show_and_move_the_guests() {
 	let saved = std::fs::read_to_string("show.stream.toml").unwrap();
 	assert!(!saved.contains("recordings"), "{saved}");
 
-	// The scene graph opens in place of Settings, so it takes the clicks.
-	harness.get_by_label("Advanced").click();
+	// The scene graph, switched on, opens in place of Settings, so it takes
+	// the clicks.
+	harness.get_by_label("Mods").click();
+	harness.run_steps(2);
+	assert!(harness.query_by_label("Open").is_none(), "Scene graph is off");
+	harness
+		.get_by_role_and_label(Role::CheckBox, "Scene graph")
+		.scroll_to_me();
+	harness.run_steps(2);
+	harness
+		.get_by_role_and_label(Role::CheckBox, "Scene graph")
+		.click_accesskit();
 	harness.run_steps(2);
 	harness.get_by_label("Open").click();
 	harness.run_steps(2);
-	assert!(harness.query_by_label("Advanced").is_none(), "Settings closed");
+	assert!(harness.query_by_label("Mods").is_none(), "Settings closed");
 	assert!(harness.query_by_label("Scene graph").is_some(), "the graph is open");
 
 	drop(harness);
@@ -1563,6 +1644,7 @@ fn studio_mode_cues_and_takes() {
 		Default::default(),
 	);
 	harness.step();
+	enable(&mut harness, &[Mod::Studio]);
 	let engine = started.get().expect("the studio started").clone();
 	runtime
 		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
@@ -1624,6 +1706,283 @@ fn studio_mode_cues_and_takes() {
 	quit(&engine, &runtime);
 }
 
+/// While a mod is off, its feature is held back where no page shows it: a
+/// key for it does nothing, a layer's menu offers no slot, a guest is not
+/// placed on their own, though the settings ask, and a guest waiting to be
+/// placed by hand, in no scene, does not switch Audio scenes & routes on.
+/// It draws no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn a_mod_off_holds_its_feature_back() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	let show = std::fs::read_to_string(fixture.join("shots/show.toml")).unwrap();
+	// The only source in no scene: a guest who joined and waits.
+	let show = show.replacen(
+		"[sources.highlight]\nkind = \"color\"\ncolor = \"#f59e0b\"\n",
+		"[sources.waiting]\nkind = \"broadcast\"\npath = \"room/waiting\"\n",
+		1,
+	);
+	assert!(show.contains("room/waiting"));
+	std::fs::write("show.toml", show).unwrap();
+	std::fs::write("show.stream.toml", "guests_appear = true\n").unwrap();
+	let app = start(launch(&gpu), stream(None), &runtime);
+	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
+	harness.step();
+	let engine = started.get().expect("the studio started").clone();
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		panic!("the studio starts on its first frame")
+	};
+	let controls = studio.controls();
+	studio.build(Side::Layers, Inspect::Layer, None);
+	harness.run_steps(2);
+
+	controls.press(&crate::controls::Action::SaveClip);
+	let saved = controls.fired().expect("the key says how it went");
+	assert!(
+		saved.as_ref().is_err_and(|why| why.contains("Replay & review is off")),
+		"{saved:?}"
+	);
+	assert!(!engine.guests_appear(), "with no slots to place them in");
+	let offered = |harness: &mut Harness<'_, Window>| {
+		harness.get_all_by_label("host").next().unwrap().click_secondary();
+		harness.run_steps(2);
+		let offered = harness.query_by_label("Put in a tile").is_some();
+		harness.key_press(egui::Key::Escape);
+		harness.run_steps(2);
+		offered
+	};
+	assert!(!offered(&mut harness), "no slot in the layer's menu");
+	assert!(
+		crate::controls::sounds(&engine.state.lock().unwrap(), "waiting"),
+		"the waiting guest makes a sound"
+	);
+	assert!(
+		!controls.mods.on(Mod::Audio),
+		"a guest waiting to be placed is not left out"
+	);
+
+	// Added from Not in any scene, they are heard on the stream.
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		unreachable!("the studio is open")
+	};
+	studio.build(Side::Add, Inspect::Layer, None);
+	harness.run_steps(2);
+	let adds: Vec<_> = harness.get_all_by_role_and_label(Role::Button, "Add").collect();
+	adds.last().expect("the waiting guest's Add").click();
+	harness.run_steps(2);
+	{
+		let state = engine.state.lock().unwrap();
+		let collection = state.collection();
+		let program = collection.program_audio().unwrap();
+		assert!(collection.heard(program).contains("waiting"), "heard once placed");
+	}
+	assert!(!controls.mods.on(Mod::Audio));
+
+	enable(&mut harness, &[Mod::Layout]);
+	assert!(engine.guests_appear(), "as the settings ask");
+	assert!(offered(&mut harness));
+	drop(harness);
+	quit(&engine, &runtime);
+}
+
+/// Switching a mod off in Settings, Mods turns its feature off as one edit,
+/// which undo takes back, switching the mod on again with it: on a show
+/// using each, on a real engine. It draws no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn a_mod_switched_off_turns_its_feature_off() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	let read = |file: &str| std::fs::read_to_string(fixture.join("shots").join(file)).unwrap();
+	// Sounds the stream leaves out: music heard only in the headphones, and
+	// a microphone sent nowhere.
+	let mix = read("mix.toml")
+		.replacen(
+			r#"sounds = ["caller", "guest", "mic", "music"]"#,
+			r#"sounds = ["caller", "guest"]"#,
+			1,
+		)
+		.replacen(r#"sounds = ["caller"]"#, r#"sounds = ["caller", "music"]"#, 1)
+		.replacen(r#"sounds = ["guest", "mic"]"#, r#"sounds = ["guest"]"#, 1);
+	// One mix, which leaves the microphone out.
+	let one = read("mix.toml");
+	let one = one[..one.find("[[audio_scenes]]\nname = \"Headphones\"").unwrap()].replacen(
+		r#"sounds = ["caller", "guest", "mic", "music"]"#,
+		r#"sounds = ["caller", "guest", "music"]"#,
+		1,
+	);
+	// A tile whose role nothing fills, which its arrangement closes.
+	let slots = read("slots.toml")
+		.replacen(
+			"[sources.game]",
+			"[sources.Empty]\nkind = \"role\"\n\n[sources.game]",
+			1,
+		)
+		.replacen(
+			r#"{ source = "Dana", slot = "tile" },"#,
+			r#"{ source = "Dana", slot = "tile" }, { source = "Empty", slot = "tile" },"#,
+			1,
+		);
+	// Going out in portrait too, where keeping clear leaves the portrait
+	// picture be.
+	let keep = read("keep.toml").replacen("version = 1\n", "version = 1\nportrait = true\n", 1);
+	// A guest shown through a role, their sound sent nowhere.
+	let role = read("show.toml")
+		.replacen(
+			"[sources.caller]",
+			"[sources.Guest]\nkind = \"role\"\nsource = \"guest\"\n\n[sources.caller]",
+			1,
+		)
+		.replacen(r#"{ source = "guest", rect"#, r#"{ source = "Guest", rect"#, 1)
+		.replacen(r#"sounds = ["caller", "guest"]"#, r#"sounds = ["caller"]"#, 1);
+	// Slots in both pictures, one tile shown only in portrait.
+	let dual_slots = read("dual.toml").replacen(
+		r#"{ source = "Dana", slot = "tile" },"#,
+		r#"{ source = "Dana", slot = "tile", format = "portrait" },"#,
+		1,
+	);
+	let every: &[&str] = &["caller", "guest", "mic", "music"];
+	let shows: [(String, Mod, &[&str]); 9] = [
+		(mix, Mod::Audio, every),
+		(one, Mod::Audio, every),
+		(role, Mod::Audio, &["caller", "guest"]),
+		(slots, Mod::Layout, &[]),
+		(keep, Mod::Layout, &[]),
+		(dual_slots, Mod::Layout, &[]),
+		(read("dual.toml"), Mod::Formats, &[]),
+		(read("portrait.toml"), Mod::Formats, &[]),
+		(read("published.toml"), Mod::Published, &[]),
+	];
+	for (show, which, sounds) in shows {
+		std::fs::write("show.toml", show).unwrap();
+		let app = start(launch(&gpu), stream(None), &runtime);
+		let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
+		harness.step();
+		let engine = started.get().expect("the studio started").clone();
+		runtime
+			.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
+			.expect("the sources and pictures settle");
+		let App::Studio(studio) = &mut harness.state_mut().app else {
+			unreachable!("the studio is open")
+		};
+		let controls = studio.controls();
+		studio.open(Setting::Mods);
+		harness.run_steps(2);
+		assert!(controls.mods.on(which), "{which:?} switched on, as the show uses it");
+		if which == Mod::Layout {
+			// A frame behind a reorder, held there by the lock, where each slot
+			// is drawn is not known yet: switching off refuses rather than
+			// saving a guess.
+			let mut state = engine.state.lock().unwrap();
+			let slotted = state
+				.collection()
+				.scenes
+				.iter()
+				.find(|scene| scene.items.len() > 1 && scene.items.iter().any(|item| item.slot.is_some()));
+			if let Some(scene) = slotted.map(|scene| moq_scene::Layer::scene(&scene.name)) {
+				let mut draft = state.collection().draft("Reorder");
+				draft.move_item(&scene, 0, 1).unwrap();
+				state.commit(draft, None).unwrap();
+				let err = crate::ui::layout_off(&mut state, "Switch off".into()).unwrap_err();
+				assert!(err.to_string().contains("still settling"), "{err:#}");
+				state.undo().unwrap();
+			}
+		}
+		let before = engine.state.lock().unwrap().collection().clone();
+
+		harness
+			.get_by_role_and_label(Role::CheckBox, which.name())
+			.scroll_to_me();
+		harness.run_steps(2);
+		harness
+			.get_by_role_and_label(Role::CheckBox, which.name())
+			.click_accesskit();
+		harness.run_steps(4);
+		assert!(!controls.mods.on(which), "{which:?} switched off");
+		let after = engine.state.lock().unwrap().collection().clone();
+		match which {
+			Mod::Audio => {
+				let [program] = after.audio_scenes.as_slice() else {
+					panic!("one audio scene: {:?}", after.audio_scenes)
+				};
+				assert!(program.program && !program.recorded && program.scenes.is_empty());
+				let heard: std::collections::BTreeSet<&str> = before.heard(before.program_audio().unwrap());
+				let all: Vec<&str> = program.sounds.iter().map(String::as_str).collect();
+				assert_eq!(all, sounds, "every sound, those left out too");
+				let muted = |name: &str| after.audio.get(name).is_some_and(|audio| audio.muted);
+				for left in all.iter().filter(|name| !heard.contains(*name)) {
+					assert!(muted(left), "{left} muted, as the stream left it out");
+				}
+				assert!(
+					heard
+						.iter()
+						.all(|name| muted(name) == before.audio.get(*name).is_some_and(|a| a.muted))
+				);
+			}
+			Mod::Layout => {
+				assert_eq!(after.scenes.len(), before.scenes.len());
+				for (scene, was) in after.scenes.iter().zip(&before.scenes) {
+					assert_eq!(scene.items.len(), was.items.len(), "{}", scene.name);
+					for (item, was) in scene.items.iter().zip(&was.items) {
+						assert!(
+							item.slot.is_none() && item.keep_clear.is_none(),
+							"{} set free",
+							item.source
+						);
+						if item.source == "Empty" {
+							assert!(!item.visible, "a closed tile stays hidden");
+						} else if was.slot.is_some() {
+							assert!(!item.rect.is_empty(), "{} kept where it was drawn", item.source);
+							assert!(item.visible, "{} still shown", item.source);
+						}
+						if was.keep_clear.is_some() {
+							assert_eq!(
+								after.placement(item, moq_scene::Format::Portrait),
+								before.placement(was, moq_scene::Format::Portrait),
+								"{} keeps its portrait place",
+								item.source
+							);
+						}
+					}
+				}
+			}
+			Mod::Formats => {
+				assert!(!after.portrait, "landscape only");
+				assert!(after.canvas.width > after.canvas.height, "a landscape canvas");
+			}
+			Mod::Published => {
+				assert!(after.published.is_empty(), "no source published independently");
+				assert_eq!(after.scenes.len(), before.scenes.len());
+				assert!(
+					after
+						.scenes
+						.iter()
+						.all(|scene| !scene.published && scene.size.is_none())
+				);
+			}
+			_ => unreachable!(),
+		}
+
+		// Under Settings, the title bar's undo.
+		harness.key_press(egui::Key::Escape);
+		harness.run_steps(2);
+		harness.get_by_label_contains("Undo: Switch off").click();
+		harness.run_steps(4);
+		assert_eq!(
+			*engine.state.lock().unwrap().collection(),
+			before,
+			"undo brings it back"
+		);
+		assert!(controls.mods.on(which), "{which:?} back on with it");
+
+		drop(harness);
+		quit(&engine, &runtime);
+	}
+}
+
 /// The show's menu opens the multiview. On it, a click on
 /// a scene's tile takes it, or cues it in Studio mode, a source's menu leaves
 /// it out, and the sources' popover picks one: on a real engine. It draws no
@@ -1634,7 +1993,11 @@ fn the_multiview_takes_cues_and_picks() {
 	let (_show, runtime, gpu) = lavapipe();
 	let _entered = runtime.enter();
 	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
-	std::fs::copy(fixture.join("shots/show.toml"), "show.toml").unwrap();
+	// A scene of its own size, which the program refuses.
+	let published = std::fs::read_to_string(fixture.join("shots/published.toml")).unwrap();
+	let vertical = &published[published.find("[[scenes]]\nname = \"Vertical\"").unwrap()..];
+	let show = std::fs::read_to_string(fixture.join("shots/show.toml")).unwrap();
+	std::fs::write("show.toml", format!("{show}\n{vertical}")).unwrap();
 	let (mut harness, started, _) = window(
 		start(launch(&gpu), stream(None), &runtime),
 		&gpu,
@@ -1643,6 +2006,7 @@ fn the_multiview_takes_cues_and_picks() {
 		Default::default(),
 	);
 	harness.step();
+	enable(&mut harness, &[Mod::Multiview, Mod::Studio]);
 	let engine = started.get().expect("the studio started").clone();
 	runtime
 		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
@@ -1721,6 +2085,7 @@ fn mix_sends_and_mutes() {
 		Default::default(),
 	);
 	harness.step();
+	enable(&mut harness, &[Mod::Audio]);
 	let App::Studio(studio) = &mut harness.state_mut().app else {
 		panic!("the studio starts on its first frame")
 	};
@@ -1889,6 +2254,9 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		panic!("the studio starts on its first frame")
 	};
 	let controls = studio.controls();
+	for which in view.mods() {
+		studio.switch(which, true);
+	}
 	match view {
 		View::Page(page) => studio.turn(*page),
 		View::Mix(view, opened) => studio.mix(*view, *opened),
@@ -1897,6 +2265,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		View::KeepClear { .. } => studio.build(Side::Layers, Inspect::Layer, Some(0)),
 		View::Menu | View::Published => studio.build(Side::Layers, Inspect::Layer, Some(1)),
 		View::Setting(setting) | View::OnAirSetting(setting) => studio.open(*setting),
+		View::ModsOn | View::ModsAt(_) => studio.open(Setting::Mods),
 		View::Restart | View::CustomCanvas => studio.open(Setting::Show),
 		View::GuestsFailed => studio.open(Setting::Guests),
 		View::Paired => studio.open(Setting::Remote),
@@ -2037,6 +2406,10 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		}
 		View::Published => {
 			harness.get_by_label("Priority").scroll_to_me();
+			harness.run_steps(4);
+		}
+		View::ModsAt(row) => {
+			harness.get_by_label(row).scroll_to_me();
 			harness.run_steps(4);
 		}
 		View::CustomCanvas => {
@@ -2360,6 +2733,17 @@ fn drag(harness: &mut Harness<'_, Window>, engine: &engine::Engine, drop: Drop) 
 			.block_on(kio::clock::timeout(SETTLE, settle(harness, engine)))
 			.expect("the dropped logo's picture settles");
 	}
+}
+
+/// Switch on `mods`, as their switches in Settings, Mods would.
+fn enable(harness: &mut Harness<'_, Window>, mods: &[Mod]) {
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		panic!("the studio is open")
+	};
+	for which in mods {
+		studio.switch(*which, true);
+	}
+	harness.run_steps(2);
 }
 
 /// Mute the first sound, open the health dot's popover, and rest the pointer
