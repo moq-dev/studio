@@ -94,7 +94,7 @@ shows those pictures beside the frames they implement.
   in Settings > Mods, and absent from every page until then: Both formats,
   Studio mode, Multiview, Phone remote, Published scenes, and Scene graph
   (rejected: leaving them on the pages and in Advanced). Decided 2026-11-20
-  (maintainer, /quest-plan); see [Mods](/quest/m0/ux/mods.md).
+  (maintainer, /quest-plan). Settings > Mods holds them.
 - **Dropped:** a rundown that fills overlays, one-click looks and a brand kit,
   active-speaker layouts, control surfaces, and a rehearsal mode. Not planned.
 
@@ -132,8 +132,7 @@ reference mock-ups live in [`mock/overhaul.html`](/quest/m0/ux/mock/overhaul.htm
   Smart Layout (Slots + Keep out of the way) move behind Settings > Mods;
   off-air Panic/Clip/Marker chrome stays hidden when unused (rejected: keeping
   a dedicated simplified Mix page always visible; keeping Audio Scenes on by
-  default). See [Mods](/quest/m0/ux/mods.md) and
-  [Unified Studio shell](/quest/m0/ux/unified-shell.md).
+  default). See [Unified Studio shell](/quest/m0/ux/unified-shell.md).
 - **Go Live, Settings & Palette:** ✅ background encoder/uplink health checks,
   one-click Go Live once configured, inline destination URL/key setup on first
   use, click-to-confirm End Stream popover replacing the hidden 1.2s hold,

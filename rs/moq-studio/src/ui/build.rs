@@ -708,7 +708,6 @@ impl Panels {
 	) -> Option<(Option<Spot>, anyhow::Result<()>)> {
 		let view = View::new(response.rect, canvas);
 		let shown = self.shown(state);
-		let off_air = self.off_air(state).is_some();
 		let selected = shown
 			.iter()
 			.find(|(picked, item)| Some(picked) == self.selection.as_ref() && item.visible);
@@ -716,13 +715,17 @@ impl Panels {
 		if let Some((picked, item)) = selected
 			&& self.drag.is_none()
 			&& response.rect.is_positive()
-			&& let Some(menu) = Menu::of(state, picked, off_air)
+			&& let Some(menu) = self.menu(state, picked)
 		{
 			let at = view.screen(&item.rect).intersect(response.rect);
 			let cropping = self.cropping;
 			action = toolbar(ui, response.rect, at, &menu, cropping);
 		}
-		let context = Menu::of_selected(state, self.selection.as_ref(), &shown, off_air);
+		let context = self
+			.selection
+			.as_ref()
+			.filter(|selected| shown.iter().any(|(shown, _)| shown == *selected))
+			.and_then(|selected| self.menu(state, selected));
 		let mut picture = None;
 		response.context_menu(|ui| match &context {
 			Some(menu) => {
@@ -1095,11 +1098,22 @@ pub(super) struct Menu {
 	/// Whether its scene is open off air, where nothing goes always on top,
 	/// as that is drawn on program.
 	off_air: bool,
+	/// Whether it can go in a slot, with Smart layout on.
+	slots: bool,
+}
+
+impl Panels {
+	/// What `picked` offers, if it is still there.
+	pub(super) fn menu(&self, state: &State, picked: &Picked) -> Option<Menu> {
+		let off_air = self.off_air(state).is_some();
+		let slots = self.controls.mods.on(crate::mods::Mod::Layout);
+		Menu::of(state, picked, off_air).map(|menu| Menu { slots, ..menu })
+	}
 }
 
 impl Menu {
-	/// What `picked` offers, if it is still there, `off_air` or not.
-	pub(super) fn of(state: &State, picked: &Picked, off_air: bool) -> Option<Self> {
+	/// What `picked` offers, if it is still there, `off_air` or not, with no slots.
+	fn of(state: &State, picked: &Picked, off_air: bool) -> Option<Self> {
 		let collection = state.collection();
 		let item = picked.item(collection)?.clone();
 		let capture = collection.sources.get(collection.capture(&item.source));
@@ -1117,14 +1131,9 @@ impl Menu {
 			linked: shown_in(collection, &item.source).len(),
 			copyable: !collection.unfilled(&item.source),
 			off_air,
+			slots: false,
 			item,
 		})
-	}
-
-	/// What the selected layer offers, if it is shown on the picture.
-	fn of_selected(state: &State, selection: Option<&Picked>, shown: &[(Picked, Item)], off_air: bool) -> Option<Self> {
-		let picked = selection.filter(|picked| shown.iter().any(|(shown, _)| shown == *picked))?;
-		Self::of(state, picked, off_air)
 	}
 }
 
@@ -1167,7 +1176,7 @@ pub(super) fn layer_menu(ui: &mut Ui, menu: &Menu) -> Option<LayerAction> {
 			action = Some(LayerAction::Reorder(to));
 		}
 	}
-	if !menu.top {
+	if !menu.top && menu.slots {
 		use moq_scene::Slot;
 		ui.separator();
 		let slots = [

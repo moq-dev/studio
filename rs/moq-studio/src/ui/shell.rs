@@ -466,7 +466,7 @@ impl Panels {
 			.inner;
 		let nav = match layout.sidebar {
 			Some(_) => 0.0,
-			None => nav_width(ui, compact) + 24.0,
+			None => nav_width(ui, &self.pages(), compact) + 24.0,
 		};
 		if !compact {
 			let needs = (left - inner.left()) + nav + (inner.right() - right);
@@ -478,7 +478,7 @@ impl Panels {
 		}
 		if layout.sidebar.is_none() {
 			// Centered on the bar, or as near as the controls beside it allow.
-			let width = nav_width(ui, compact);
+			let width = nav_width(ui, &self.pages(), compact);
 			let center = rect
 				.center()
 				.x
@@ -528,16 +528,18 @@ impl Panels {
 				ui.ctx().send_viewport_cmd(ViewportCommand::RequestPaste);
 				self.dropping.paste_from_window();
 			}
-			let open = self.multiview.open();
-			let text = match open {
-				true => "Close the multiview",
-				false => "Open the multiview",
-			};
-			let multiview = ui
-				.add(kit::button(Icon::Detach, text))
-				.on_hover_text("A window for another monitor with every scene and source, live");
-			if multiview.clicked() {
-				self.multiview.set_open(!open);
+			if self.controls.mods.on(Mod::Multiview) {
+				let open = self.multiview.open();
+				let text = match open {
+					true => "Close the multiview",
+					false => "Open the multiview",
+				};
+				let multiview = ui
+					.add(kit::button(Icon::Detach, text))
+					.on_hover_text("A window for another monitor with every scene and source, live");
+				if multiview.clicked() {
+					self.multiview.set_open(!open);
+				}
 			}
 			// Closing ends the show as quitting does, which would cut a stream
 			// on air: the broadcaster ends that with END STREAM.
@@ -586,13 +588,22 @@ impl Panels {
 			.show(|ui| self.history(ui));
 	}
 
+	/// The pages whose mods are on, in order.
+	pub(super) fn pages(&self) -> Vec<Page> {
+		let mods = &self.controls.mods;
+		let pages = Page::ALL.into_iter();
+		pages
+			.filter(|page| page.needs().is_none_or(|needs| mods.on(needs)))
+			.collect()
+	}
+
 	/// The pages, as one segmented control at `rect`.
 	fn nav(&mut self, ui: &mut Ui, rect: Rect, compact: bool) {
 		let painter = ui.painter();
 		painter.rect(rect, 10, kit::P2, Stroke::new(1.0, kit::LINE), egui::StrokeKind::Inside);
 		let (font, pad) = nav_font(compact);
 		let mut x = rect.left() + 3.0;
-		for page in Page::ALL {
+		for page in self.pages() {
 			let galley = kit::caps_galley(ui.painter(), page.name(), font.clone(), kit::TEXT, None);
 			let width = galley.size().x + pad * 2.0;
 			let at = Rect::from_min_size(pos2(x, rect.top() + 3.0), vec2(width, rect.height() - 6.0));
@@ -618,7 +629,7 @@ impl Panels {
 		bar(ui, fx, rect);
 		ui.painter()
 			.vline(rect.right() - 0.5, rect.y_range(), Stroke::new(1.0, kit::LINE));
-		for (index, page) in Page::ALL.into_iter().enumerate() {
+		for (index, page) in self.pages().into_iter().enumerate() {
 			let at = Rect::from_min_size(
 				pos2(rect.center().x - 26.0, rect.top() + 10.0 + index as f32 * 58.0),
 				vec2(52.0, 54.0),
@@ -733,19 +744,28 @@ impl Panels {
 	/// a row down a `column`.
 	fn scenes_strip(&mut self, ui: &mut Ui, snapshot: &Snapshot, rect: Rect, column: bool) {
 		let room = rect.shrink(MARGIN);
-		// Studio mode's switch at the strip's end: right of a row, under a
-		// column.
-		let (room, switch) = match column {
-			true => (
+		// Studio mode's switch at the strip's end, while its mod is on: right
+		// of a row, under a column.
+		let (room, switch) = match (self.controls.mods.on(Mod::Studio), column) {
+			(false, _) => (room, None),
+			(true, true) => (
 				room.with_max_y(room.bottom() - 30.0 - GAP),
-				Rect::from_min_size(pos2(room.right() - 30.0, room.bottom() - 30.0), Vec2::splat(30.0)),
+				Some(Rect::from_min_size(
+					pos2(room.right() - 30.0, room.bottom() - 30.0),
+					Vec2::splat(30.0),
+				)),
 			),
-			false => (
+			(true, false) => (
 				room.with_max_x(room.right() - 30.0 - GAP),
-				Rect::from_center_size(pos2(room.right() - 15.0, room.center().y), Vec2::splat(30.0)),
+				Some(Rect::from_center_size(
+					pos2(room.right() - 15.0, room.center().y),
+					Vec2::splat(30.0),
+				)),
 			),
 		};
-		self.studio_switch(ui, snapshot.studio, switch);
+		if let Some(switch) = switch {
+			self.studio_switch(ui, snapshot.studio, switch);
+		}
 		let mut action = None;
 		ui.scope_builder(UiBuilder::new().max_rect(room), |ui| {
 			ui.spacing_mut().item_spacing = Vec2::splat(GAP);
@@ -1021,8 +1041,8 @@ impl Panels {
 		Some(bindings.get(action)?.shown(ctx))
 	}
 
-	/// The panic key, named for the scene it cuts to, saving a clip, and
-	/// dropping a marker.
+	/// The panic key, named for the scene it cuts to, and with Replay &
+	/// review on, saving a clip and dropping a marker.
 	fn panic_key(&mut self, ui: &mut Ui, snapshot: &Snapshot, rect: Rect, tall: bool) {
 		let room = rect.shrink(MARGIN);
 		let note = match &snapshot.safe {
@@ -1047,24 +1067,31 @@ impl Panels {
 			.look(kit::Look::Boxed)
 			.key(marker_key.as_deref())
 			.note(Some("Mark this moment, which REVIEW lists and cuts a clip around"));
-		let (panic_at, clip_at) = match tall {
-			true => (
+		// Clips and markers are Replay & review's, so with it off the panic
+		// key is alone.
+		let review = self.controls.mods.on(Mod::Review);
+		let (panic_at, clip_at) = match (tall, review) {
+			(true, _) => (
 				Rect::from_min_size(room.min, vec2(room.width(), 30.0)),
 				Rect::from_min_size(room.min + vec2(0.0, 38.0), Vec2::splat(30.0)),
 			),
-			false => (
+			(false, true) => (
 				Rect::from_center_size(room.center() - vec2(0.0, 19.0), vec2(room.width(), 30.0)),
 				Rect::from_center_size(room.center() + vec2(-19.0, 19.0), Vec2::splat(30.0)),
+			),
+			(false, false) => (
+				Rect::from_center_size(room.center(), vec2(room.width(), 30.0)),
+				Rect::NOTHING,
 			),
 		};
 		let marker_at = clip_at.translate(vec2(38.0, 0.0));
 		if ui.put(panic_at, panic).clicked() {
 			self.controls.press(&Action::Panic);
 		}
-		if ui.put(clip_at, clip).clicked() {
+		if review && ui.put(clip_at, clip).clicked() {
 			self.controls.press(&Action::SaveClip);
 		}
-		if ui.put(marker_at, marker).clicked() {
+		if review && ui.put(marker_at, marker).clicked() {
 			self.controls.press(&Action::Marker);
 		}
 	}
@@ -1585,9 +1612,9 @@ fn nav_font(compact: bool) -> (egui::FontId, f32) {
 }
 
 /// How wide the pages' control is.
-fn nav_width(ui: &Ui, compact: bool) -> f32 {
+fn nav_width(ui: &Ui, pages: &[Page], compact: bool) -> f32 {
 	let (font, pad) = nav_font(compact);
-	let names: f32 = Page::ALL
+	let names: f32 = pages
 		.iter()
 		.map(|page| {
 			kit::caps_galley(ui.painter(), page.name(), font.clone(), kit::TEXT, None)
@@ -1595,7 +1622,7 @@ fn nav_width(ui: &Ui, compact: bool) -> f32 {
 				.x + pad * 2.0
 		})
 		.sum();
-	names + 2.0 * (Page::ALL.len() - 1) as f32 + 6.0
+	names + 2.0 * pages.len().saturating_sub(1) as f32 + 6.0
 }
 
 /// The window's minimize, maximize, and close, right to left, which the

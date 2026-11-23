@@ -33,7 +33,6 @@ capture tool does not see it on macOS and Windows.
 
 ## Required
 
-- [Mods](/quest/m0/ux/mods.md) - the pane that switches it on
 - [The studio hides itself and private apps from capture](/quest/m1/privacy-shield.md) - the window must not appear on stream
 
 ## Related
