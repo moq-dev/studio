@@ -18,8 +18,9 @@ read-only path, from which Chromium builds its sandbox's rules).
 
 ## Waiting
 
-- Maintainer: on a Mac, download the next release's disk image (or a
-  `release.yml` run's `macos-arm64` artifact) in a browser, open the app
+- Maintainer: on a Mac, download the
+  [latest release](https://github.com/moq-dev/studio/releases/latest)'s disk
+  image (v0.0.1 or later) in a browser, open the app
   once from the image and once from Applications, add a browser source such
   as `https://webglsamples.org/aquarium/aquarium.html`, and check that it
   draws and plays, and that Activity Monitor's Sandbox column (View, Columns)
