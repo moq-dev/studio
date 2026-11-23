@@ -1191,9 +1191,18 @@ impl Panels {
 	pub(super) fn flush_settings(&mut self) -> anyhow::Result<()> {
 		// Nothing draws once the show closes; a save only asks it for a frame.
 		let ctx = egui::Context::default();
+		// A save that fails, one with no form to hold it too, such as the Go
+		// live popover's, fails the flush, unless a later save of its pane
+		// lands.
+		let mut failed: Vec<(Setting, String)> = Vec::new();
 		loop {
 			if let Some(saving) = &mut self.saving {
-				saving.task.wait();
+				let from = saving.from;
+				let result = saving.task.wait();
+				failed.retain(|(pane, _)| *pane != from);
+				if let Err(err) = result {
+					failed.push((from, err.clone()));
+				}
 			}
 			self.follow_stream_save();
 			self.typing = false;
@@ -1229,9 +1238,12 @@ impl Panels {
 				)
 			}),
 		];
-		match held.into_iter().flatten().next() {
+		if let Some((pane, why)) = held.into_iter().flatten().next() {
+			anyhow::bail!("{pane} has a change not saved: {why}");
+		}
+		match failed.first() {
 			None => Ok(()),
-			Some((pane, why)) => anyhow::bail!("{pane} has a change not saved: {why}"),
+			Some((pane, why)) => anyhow::bail!("Settings, {} has a change not saved: {why}", pane.name()),
 		}
 	}
 
