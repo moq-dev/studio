@@ -138,28 +138,26 @@ impl Opener {
 /// A show [`make`] made, and what it wrote, to take back if it cannot open.
 struct Made {
 	path: PathBuf,
-	/// Each file written, what it held before (`None` for no file), and what
-	/// it holds now, in the order written.
+	/// Each file written, through any links, what it held before (`None`
+	/// for no file), and what it holds now, in the order written.
 	wrote: Vec<(PathBuf, Option<String>, String)>,
 }
 
 impl Made {
-	/// Put back each file it wrote that still holds what it wrote, under
-	/// the folder's claim; one changed since, such as by another studio that
-	/// opened the show, is kept. Logs what it cannot put back.
+	/// Put back the files it wrote, under the folder's claim, unless one
+	/// changed since, such as by another studio that opened the show, which
+	/// keeps them all, as that studio's show. Logs what it cannot put back.
 	fn undo(self) {
 		let dir = self.path.parent().unwrap_or(Path::new(""));
 		let result = claim(dir).and_then(|_claim| {
-			for (file, before, wrote) in self.wrote.iter().rev() {
-				match std::fs::read_to_string(file) {
-					Ok(now) if now == *wrote => {}
-					Ok(_) => {
-						tracing::warn!(file = %file.display(), "keeping a new show's file changed since it was made");
-						continue;
-					}
-					Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-					Err(err) => return Err(err).with_context(|| format!("reading {}", file.display())),
+			for (file, _, wrote) in &self.wrote {
+				let now = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+				if now != *wrote {
+					tracing::warn!(file = %file.display(), "keeping a new show changed since it was made");
+					return Ok(());
 				}
+			}
+			for (file, before, _) in self.wrote.iter().rev() {
 				match before {
 					Some(text) => autosave::write_file(file, text),
 					None => std::fs::remove_file(file),
@@ -222,8 +220,9 @@ fn make(new: New, collection: &Collection) -> anyhow::Result<Made> {
 					..saved
 				};
 				let text = toml::to_string(&saved).context("cannot write the stream settings")?;
+				let file = autosave::resolve(&settings)?;
 				autosave::write_file(&settings, &text).with_context(|| format!("writing {}", settings.display()))?;
-				made.wrote.push((settings, before, text));
+				made.wrote.push((file, before, text));
 			}
 		}
 		// A history beside no scene file is a removed show's.
@@ -235,8 +234,11 @@ fn make(new: New, collection: &Collection) -> anyhow::Result<Made> {
 			_ => {}
 		}
 		let text = collection.to_toml()?;
+		// What a link there names, which a write makes and an undo removes,
+		// leaving the link.
+		let file = autosave::resolve(&path)?;
 		autosave::write_file(&path, &text).with_context(|| format!("writing {}", path.display()))?;
-		made.wrote.push((path.clone(), None, text));
+		made.wrote.push((file, None, text));
 		Ok(())
 	})();
 	if let Err(err) = result {
@@ -814,7 +816,20 @@ mod tests {
 		assert!(!path.exists(), "the scene file goes");
 		assert_eq!(std::fs::read_to_string(&settings).unwrap(), "on_demand = true");
 
+		// A show changed since is another studio's now, settings and all.
 		let made = make(New::At(path.clone()), &collection).unwrap();
+		std::fs::write(&settings, "recordings = \"videos\"").unwrap();
+		let made = Made {
+			wrote: [(
+				settings.clone(),
+				Some("on_demand = true".into()),
+				"recordings = \"videos\"".into(),
+			)]
+			.into_iter()
+			.chain(made.wrote)
+			.collect(),
+			..made
+		};
 		std::fs::write(&path, "edited").unwrap();
 		made.undo();
 		assert_eq!(
@@ -822,6 +837,23 @@ mod tests {
 			"edited",
 			"an edit since is kept"
 		);
+		assert_eq!(std::fs::read_to_string(&settings).unwrap(), "recordings = \"videos\"");
+
+		// Through a link to a file not made yet, the file goes and the link stays.
+		#[cfg(unix)]
+		{
+			let target = dir.path().join("target.toml");
+			let link = dir.path().join("Linked.toml");
+			std::os::unix::fs::symlink(&target, &link).unwrap();
+			let made = make(New::At(link.clone()), &collection).unwrap();
+			assert!(target.exists());
+			made.undo();
+			assert!(!target.exists());
+			assert!(
+				link.symlink_metadata().unwrap().file_type().is_symlink(),
+				"the link stays"
+			);
+		}
 	}
 
 	/// A recording that reads as the new name and as the show's own, as a
