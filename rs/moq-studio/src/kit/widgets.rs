@@ -971,8 +971,7 @@ impl<'a> Keycap<'a> {
 
 impl Widget for Keycap<'_> {
 	fn ui(self, ui: &mut Ui) -> Response {
-		let effects = self.fx.filter(|fx| fx.on());
-		let mark = effects.is_some().then(|| Mark::new(ui.painter()));
+		let mark = self.fx.is_some().then(|| Mark::new(ui.painter()));
 		let font = super::mono(10.0);
 		let text = ui
 			.painter()
@@ -992,7 +991,7 @@ impl Widget for Keycap<'_> {
 			}
 			painter.galley(rect.center() - text.size() / 2.0, text, TEXT);
 		}
-		if let (Some(fx), Some(mark)) = (effects, mark) {
+		if let (Some(fx), Some(mark)) = (self.fx, mark) {
 			fx.keycap(&mark.around(rect));
 		}
 		response
@@ -1342,8 +1341,7 @@ impl<'a> TallyFrame<'a> {
 	/// Draw the frame around what `picture` draws, and `fx`'s on-air glow
 	/// and take bursts around it while it draws.
 	pub fn show(self, ui: &mut Ui, fx: Option<&mut Fx>, picture: impl FnOnce(&mut Ui) -> Response) -> Response {
-		let effects = fx.filter(|fx| fx.on());
-		let mark = effects.is_some().then(|| Mark::new(ui.painter()));
+		let mark = fx.is_some().then(|| Mark::new(ui.painter()));
 		let glow = ui.painter().add(Shape::Noop);
 		let band = ui.painter().add(Shape::Noop);
 		// Room for the outline and its glow, which a panel's edge would cut.
@@ -1376,7 +1374,7 @@ impl<'a> TallyFrame<'a> {
 		if let Some((text, tally)) = self.tag {
 			tag(painter, rect.min + vec2(12.0, 12.0), text, tally, 15.0);
 		}
-		if let (Some(fx), Some(mark)) = (effects, mark) {
+		if let (Some(fx), Some(mark)) = (fx, mark) {
 			fx.program(&mark.around(rect));
 		}
 		response

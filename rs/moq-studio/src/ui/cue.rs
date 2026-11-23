@@ -403,24 +403,14 @@ fn big_button(ui: &mut Ui, fx: &mut Fx, rect: Rect, big: Big<'_>) -> egui::Respo
 	let response = ui.interact(rect, ui.id().with(("big button", text)), sense);
 	response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, text.to_uppercase()));
 	let response = kit::tip(response, &format!("{text}: {note}"), key);
-	let effects = metal && enabled && fx.on();
-	let mark = effects.then(|| Mark::new(ui.painter()));
+	let mark = (metal && enabled).then(|| Mark::new(ui.painter()));
 	let painter = ui.painter();
 	let ink = match (metal, enabled) {
 		(_, false) => {
 			painter.rect(rect, 8, kit::P2, Stroke::new(1.0, kit::LINE), egui::StrokeKind::Inside);
 			kit::FAINT
 		}
-		(true, true) if effects => Fx::INK,
-		(true, true) => {
-			let fill = if response.hovered() {
-				kit::ACCENT.gamma_multiply(0.85)
-			} else {
-				kit::ACCENT
-			};
-			painter.rect_filled(rect, 8, fill);
-			Color32::WHITE
-		}
+		(true, true) => Fx::INK,
 		(false, true) => {
 			let fill = if response.hovered() {
 				kit::P3.gamma_multiply(1.3)

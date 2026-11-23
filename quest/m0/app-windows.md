@@ -19,7 +19,7 @@ the studio landed.
   keypad Enter (Windows' hotkey API cannot tell it from Enter), and a
   keyboard layout switch while a game has focus, which re-registers every
   binding on its physical key.
-- The effects setting's read of Windows' animation setting
+- The window effects' read of Windows' animation setting
   (`rs/moq-studio/src/fx/motion.rs`, from
   [moq-dev/studio#85](https://github.com/moq-dev/studio/pull/85)) has not run
   there either.
