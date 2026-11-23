@@ -6577,9 +6577,10 @@ mod tests {
 			tokio::runtime::Handle::current(),
 		));
 		let first = controls.follow_relays().expect("the follow starts");
+		let saving = controls.clone();
 		let saved = tokio::task::spawn_blocking(move || {
 			stream.save(relay(10)).unwrap();
-			controls.set_stream(stream, true);
+			saving.set_stream(stream, true);
 			first.join().expect("the first follow ran");
 		});
 		saved.await.unwrap();
@@ -6587,7 +6588,8 @@ mod tests {
 		let followed = kio::clock::timeout(TIMEOUT, async {
 			loop {
 				let watched: Vec<String> = engine.watched().into_iter().map(|(relay, _)| relay.endpoint).collect();
-				if watched == ["https://127.0.0.1:10"] {
+				// And no follow is left pending once it lands.
+				if watched == ["https://127.0.0.1:10"] && !controls.refollowing() {
 					return;
 				}
 				kio::clock::sleep(Duration::from_millis(10)).await;

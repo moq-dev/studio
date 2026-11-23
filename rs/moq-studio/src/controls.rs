@@ -788,6 +788,12 @@ impl Controls {
 		(stream.clone(), self.rewatch.swap(false, Ordering::AcqRel))
 	}
 
+	/// Whether a follow waits or runs, so the relays being watched may not be
+	/// the ones the settings name yet, such as just after a save.
+	pub fn refollowing(&self) -> bool {
+		self.rewatch.load(Ordering::Acquire) || self.following.try_lock().is_err()
+	}
+
 	/// Follow broadcast sources, guests, and viewers' reports through the
 	/// show's relays, as the settings hold them once the follow runs, in the
 	/// background. Ordered with every save and go-live after it, as a save's

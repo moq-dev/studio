@@ -772,7 +772,7 @@ impl Setup {
 					let measured = Task::spawn(&self.runtime, move || async move {
 						uplink::measure(&client, url, &path, ceiling, uplink::WINDOW)
 							.await
-							.map_err(|err| format!("{err:#}"))
+							.map_err(|err| err.to_string())
 					});
 					measured.unwrap_or_else(|err| Task::Done(Err(format!("cannot start the probe: {err}"))))
 				}

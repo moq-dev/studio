@@ -122,7 +122,9 @@ impl Ready {
 					measure(controls, runtime, ceiling)
 				}
 				Err(_) => Measuring {
-					task: Task::Done(Err("the encoder failed, so what it would send is not known".into())),
+					task: Task::Done(Err(uplink::Failure::Unmeasured(
+						"the encoder failed, so what it would send is not known".into(),
+					))),
 					_stop: None,
 				},
 			});
@@ -255,7 +257,10 @@ impl Ready {
 				icon: Icon::Uplink,
 				name: "Connection",
 				said: format!("The connection was not measured: {err}."),
-				word: "Relay not reached",
+				word: match err {
+					uplink::Failure::Unreached(_) => "Relay not reached",
+					uplink::Failure::Unmeasured(_) => "Connection not measured",
+				},
 				fixes: vec![again],
 			},
 			// Measuring, or about to once the encoder says what it sends.
@@ -277,7 +282,7 @@ impl Ready {
 /// the popover or a hotkey, window shown or not, so it never competes with
 /// the stream for the uplink.
 struct Measuring {
-	task: Task<Result<Rate, String>>,
+	task: Task<Result<Rate, uplink::Failure>>,
 	/// Dropping it ends the measurement.
 	_stop: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -383,12 +388,16 @@ impl Panels {
 		// One encoder check at a time: a stale one still timing, even one
 		// dropped, finishes first, as its thread runs on beside the next.
 		let timing = self.controls.probes_running();
-		// Not during the preferred relay's first dial, whose session counts
+		// Not during the preferred relay's first dial, nor a follow that
+		// would start one, such as just after a save, since its session counts
 		// toward what a check is of: one checked before would go stale as it
 		// connects. A dial that failed checks at once, and again once it
-		// connects; one that hangs, after a measurement's length.
+		// connects; one that hangs, or a follow that cannot finish, such as on
+		// a token the credential store will not read, after a measurement's
+		// length.
 		let now = kio::clock::now();
-		let dialing = match (self.engine.dialing(), self.dialing) {
+		let dialing = self.controls.refollowing() || self.engine.dialing();
+		let dialing = match (dialing, self.dialing) {
 			(false, _) => {
 				self.dialing = None;
 				false
@@ -1370,21 +1379,31 @@ fn measure(controls: &Controls, runtime: &tokio::runtime::Handle, ceiling: Rate)
 		};
 		let path = stream.broadcast().to_string();
 		async move {
-			let relays = relays.map_err(|err| format!("{err:#}"))?;
-			let relay = relays.into_iter().next().ok_or("no relay is set")?;
+			// A relay that cannot be set up, such as on a token the credential
+			// store would not read, is not dialed.
+			let relays = relays.map_err(|err| uplink::Failure::Unreached(format!("{err:#}")))?;
+			let relay = relays
+				.into_iter()
+				.next()
+				.ok_or_else(|| uplink::Failure::Unreached("no relay is set".into()))?;
 			let measured = uplink::measure(&relay.client, relay.url, &path, ceiling, uplink::WINDOW);
+			let halted = |why: &str| Err(uplink::Failure::Unmeasured(why.into()));
 			tokio::select! {
 				biased;
 				// Fails only once the engine is gone, which ends this anyway.
-				_ = on_air.wait_for(|on_air| *on_air != OnAir::Off) => Err("stopped as the stream went live".into()),
+				_ = on_air.wait_for(|on_air| *on_air != OnAir::Off) => halted("stopped as the stream went live"),
 				// Sent never: the sender is dropped to stop.
-				_ = stopped => Err("stopped".into()),
-				result = measured => result.map_err(|err| format!("{err:#}")),
+				_ = stopped => halted("stopped"),
+				result = measured => result,
 			}
 		}
 	});
 	Measuring {
-		task: task.unwrap_or_else(|err| Task::Done(Err(format!("cannot start the measurement: {err}")))),
+		task: task.unwrap_or_else(|err| {
+			Task::Done(Err(uplink::Failure::Unmeasured(format!(
+				"cannot start the measurement: {err}"
+			))))
+		}),
 		_stop: Some(stop),
 	}
 }
