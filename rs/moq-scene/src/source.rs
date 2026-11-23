@@ -239,6 +239,11 @@ struct Reach {
 /// shrinks, so the late frames a loss leaves behind do not shrink it.
 const SHRINK: Duration = Duration::from_secs(1);
 
+/// How far a layer's [`Reach`] holds past the longest wait, so a playout
+/// still rising after a loss does not skip groups that will play: the jitter
+/// video plays behind its arrivals to ride out.
+const LEEWAY: Duration = VIDEO_DELAY;
+
 impl Reach {
 	/// Holding `held` until frames are counted, from `now`.
 	fn new(held: Duration, now: Instant) -> Self {
@@ -250,24 +255,24 @@ impl Reach {
 	}
 
 	/// Count a frame read at `now` that waits `wait` before it plays,
-	/// returning the new reach once it moves more than `step`, a frame's
-	/// length, from the one held: longer at once, so no frame on time is
-	/// skipped, and shorter only once every frame of a whole [`SHRINK`] waited
-	/// that much less. At most [`DELAY_MAX`](moq_mux::container::DELAY_MAX),
-	/// however a peer stamps its frames.
+	/// returning a new reach, the longest wait and [`LEEWAY`]: longer at once
+	/// when a wait comes within `step`, a frame's length, of the one held, so
+	/// no frame on time is skipped, and shorter only once every frame of a
+	/// whole [`SHRINK`] waited more than a frame less. At most
+	/// [`DELAY_MAX`](moq_mux::container::DELAY_MAX), however a peer stamps its
+	/// frames.
 	fn count(&mut self, wait: Duration, step: Duration, now: Instant) -> Option<Duration> {
-		let wait = wait.min(moq_mux::container::DELAY_MAX);
 		let mut shrink = None;
 		if now.saturating_duration_since(self.since) >= SHRINK {
 			shrink = Some(std::mem::take(&mut self.peak).max(wait));
 			self.since = now;
 		}
 		self.peak = self.peak.max(wait);
+		let reach = |wait: Duration| wait.saturating_add(LEEWAY).min(moq_mux::container::DELAY_MAX);
 		let held = self.held;
-		let next = if wait > held.saturating_add(step) {
-			wait
-		} else {
-			shrink.filter(|peak| peak.saturating_add(step) < held)?
+		let next = match wait.saturating_add(step) > held {
+			true => Some(reach(wait)).filter(|next| *next != held)?,
+			false => Some(reach(shrink?)).filter(|next| next.saturating_add(step) < held)?,
 		};
 		self.held = next;
 		Some(next)
@@ -3833,9 +3838,10 @@ mod tests {
 		.await;
 	}
 
-	/// A layer's reach grows at once past a frame's length, ignores what moves
-	/// less, shrinks only once a whole window waited that much less, and stops
-	/// at the longest playout delay whatever a peer stamps.
+	/// A layer's reach holds [`LEEWAY`] past the longest wait: it grows once a
+	/// wait comes within a frame of it, shrinks only once a whole window waited
+	/// more than a frame less, and stops at the longest playout delay whatever
+	/// a peer stamps.
 	#[test]
 	fn a_reach_follows_the_longest_wait() {
 		let ms = Duration::from_millis;
@@ -3843,19 +3849,23 @@ mod tests {
 		let start = Instant::ZERO;
 		let at = |millis| start.saturating_add(ms(millis));
 		let mut reach = Reach::new(ms(100), start);
-		assert_eq!(reach.count(ms(130), step, at(0)), None, "within a frame");
-		assert_eq!(reach.count(ms(500), step, at(10)), Some(ms(500)));
-		assert_eq!(reach.count(ms(520), step, at(20)), None, "within a frame");
-		// Late frames after a loss, within the window that saw 520 ms.
+		assert_eq!(reach.count(ms(50), step, at(0)), None, "covered");
+		assert_eq!(reach.count(ms(500), step, at(10)), Some(ms(500) + LEEWAY));
+		assert_eq!(reach.count(ms(560), step, at(20)), None, "covered");
+		// Late frames after a loss, within the window that saw 560 ms.
 		assert_eq!(reach.count(ms(50), step, at(500)), None);
-		// The window that saw 520 ms ends, so the next still holds.
+		// The window that saw 560 ms ends: its peak is longer than held, but
+		// that only ever grows on a wait of its own.
 		assert_eq!(reach.count(ms(200), step, at(1_020)), None);
 		assert_eq!(reach.count(ms(200), step, at(1_500)), None);
-		assert_eq!(reach.count(ms(210), step, at(2_020)), Some(ms(210)));
+		assert_eq!(reach.count(ms(210), step, at(2_020)), Some(ms(210) + LEEWAY));
+		// Shorter by no more than a frame holds.
+		assert_eq!(reach.count(ms(190), step, at(3_100)), None);
 		assert_eq!(
-			reach.count(Duration::MAX, step, at(2_030)),
+			reach.count(Duration::MAX, step, at(3_110)),
 			Some(moq_mux::container::DELAY_MAX)
 		);
+		assert_eq!(reach.count(Duration::MAX, step, at(3_120)), None, "capped");
 	}
 
 	/// Copy `name` from `from` into `to` as its groups arrive, but of the group
