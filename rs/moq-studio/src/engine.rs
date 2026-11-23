@@ -3382,12 +3382,24 @@ fn grants(scene: &Path) -> anyhow::Result<Option<moq_scene::Grants>> {
 	Ok(Some(moq_scene::Grants::new(file, &grant_key(scene)?)))
 }
 
+/// Keep the system picker's grants of the scene file that had the key `from`,
+/// [`grant_key`] taken before a rename, under the scene file now at `to`.
+pub(crate) fn move_grants(from: &Path, to: &Path) -> anyhow::Result<()> {
+	let to = grant_key(to)?;
+	if to == from {
+		return Ok(());
+	}
+	let Some(grants) = grants(from)? else { return Ok(()) };
+	grants.rename(&to)?;
+	Ok(())
+}
+
 /// The one path the scene file at `scene` keeps its grants under, however
 /// it was named: with `..` and symlinks resolved, so opening it another way
 /// shows no picker again. A scene file not written yet resolves as autosave
 /// will write it, through any dangling symlinks and then its directory, so it
 /// keeps the key it gets once written.
-fn grant_key(scene: &Path) -> std::io::Result<PathBuf> {
+pub(crate) fn grant_key(scene: &Path) -> std::io::Result<PathBuf> {
 	let scene = std::path::absolute(crate::autosave::resolve(scene)?)?;
 	if let Ok(scene) = std::fs::canonicalize(&scene) {
 		return Ok(scene);

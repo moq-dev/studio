@@ -51,8 +51,8 @@ impl Opener {
 		)?;
 		let (autosave, mut loaded) = Autosave::open(path.clone())?;
 		let new = !autosave.exists();
-		// The stream settings this writes for a new show, to take back if it
-		// cannot be made, so its name stays free.
+		// The stream settings a new show had before this wrote its recordings
+		// folder, `None` for no file, to put back if it cannot be made.
 		let mut wrote = None;
 		anyhow::ensure!(create || !new, "{} is no longer there", autosave.path().display());
 		if new {
@@ -65,18 +65,16 @@ impl Opener {
 			};
 			// Kept out of the app's storage, where nobody would find them.
 			if in_storage(autosave.path())
+				&& stream.saved().recordings.is_none()
 				&& let Some(videos) = videos()
 			{
-				let file = stream::path(&path);
-				let there = file
-					.try_exists()
-					.with_context(|| format!("reading {}", file.display()))?;
+				let before = exists(stream.path())?.then(|| stream.saved().clone());
 				let saved = stream::Saved {
 					recordings: Some(videos),
 					..stream.saved().clone()
 				};
 				stream.save(saved)?;
-				wrote = (!there).then_some(file);
+				wrote = Some(before);
 			}
 		}
 		let launch = Launch {
@@ -98,10 +96,13 @@ impl Opener {
 		match started.await {
 			Ok(engine) => Ok((engine, stream)),
 			Err(err) => {
-				if let Some(file) = wrote
-					&& let Err(err) = std::fs::remove_file(&file)
-				{
-					tracing::warn!(%err, file = %file.display(), "cannot remove a show's stream settings");
+				let undone = match wrote {
+					None => Ok(()),
+					Some(Some(before)) => stream.save(before),
+					Some(None) => std::fs::remove_file(stream.path()).map_err(Into::into),
+				};
+				if let Err(err) = undone {
+					tracing::warn!(error = format!("{err:#}"), "cannot put back a show's stream settings");
 				}
 				Err(err)
 			}
@@ -260,6 +261,8 @@ pub fn rename(path: &Path, name: &str, recordings: &Path) -> anyhow::Result<Path
 		"{} holds recordings of another show called {name}",
 		recordings.display()
 	);
+	// Taken while the file is there to resolve.
+	let key = engine::grant_key(path).with_context(|| format!("reading {}", path.display()))?;
 
 	let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
 	let put_back = |moved: Vec<(PathBuf, PathBuf)>| {
@@ -290,6 +293,11 @@ pub fn rename(path: &Path, name: &str, recordings: &Path) -> anyhow::Result<Path
 		}
 		put_back(moved);
 		return Err(err).with_context(|| format!("writing {}", settings.display()));
+	}
+	// The picker asks again for each screen without them, which is no reason
+	// to undo the rename.
+	if let Err(err) = engine::move_grants(&key, &to) {
+		tracing::warn!(error = format!("{err:#}"), "cannot keep the screens' grants");
 	}
 	Ok(to)
 }
@@ -376,10 +384,16 @@ pub fn export(collection: &Collection, path: &Path, to: &Path) -> anyhow::Result
 		let dir = path.parent().filter(|dir| !dir.as_os_str().is_empty());
 		std::path::absolute(dir.unwrap_or(Path::new(".")))
 	};
-	// The file the write lands in, through any links at `to`.
-	let (dir, into) = (parent(path)?, parent(&autosave::resolve(to)?)?);
+	let dir = parent(path)?;
+	// Opened as `to`, it reads beside the link; the file the write lands in,
+	// through any links, may be read where it is. Beside the show both ways,
+	// its paths hold as they are.
+	let mut beside = true;
+	for to in [to.to_path_buf(), autosave::resolve(to)?] {
+		beside &= same_file::is_same_file(&dir, parent(&to)?).unwrap_or(false);
+	}
 	let mut copy = collection.clone();
-	if !same_file::is_same_file(&dir, &into).unwrap_or(false) {
+	if !beside {
 		copy.root(&dir)?;
 	}
 	let text = copy.to_toml()?;

@@ -1596,7 +1596,7 @@ fn nav_width(ui: &Ui, compact: bool) -> f32 {
 
 /// The window's minimize, maximize, and close, right to left, which the
 /// desktop draws none of since the title bar is the studio's.
-fn window_buttons(ui: &mut Ui) {
+pub(crate) fn window_buttons(ui: &mut Ui) {
 	let maximized = ui.ctx().input(|input| input.viewport().maximized.unwrap_or(false));
 	if ui.add(IconButton::new(Icon::Close, "Close").small()).clicked() {
 		ui.ctx().send_viewport_cmd(ViewportCommand::Close);

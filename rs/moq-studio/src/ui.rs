@@ -55,7 +55,7 @@ mod start;
 use levels::Levels;
 #[cfg(test)]
 pub(crate) use mixer::View as MixView;
-pub(crate) use shell::dashed;
+pub(crate) use shell::{dashed, window_buttons};
 pub use shows::Leave;
 
 /// The smallest the window gets, at which every part still has room.

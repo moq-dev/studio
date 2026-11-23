@@ -122,8 +122,12 @@ impl Panels {
 impl Studio {
 	/// What the Show menu asked for since this last said so, which the window
 	/// answers by closing the show and opening the next, or
-	/// [`refuse`](Self::refuse).
+	/// [`refuse`](Self::refuse). Held while a settings save is under way,
+	/// which writes the stream settings where the show is now.
 	pub fn leaving(&mut self) -> Option<Leave> {
+		if self.panels.saving.is_some() {
+			return None;
+		}
 		self.panels.leaving.take()
 	}
 

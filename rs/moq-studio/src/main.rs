@@ -244,6 +244,13 @@ enum Target {
 	Create(PathBuf),
 	/// A new show in the app's storage.
 	New,
+	/// The closed show at `from`, renamed to `name` first, as
+	/// [`show::rename`] does with its recordings in `recordings`.
+	Rename {
+		from: PathBuf,
+		name: String,
+		recordings: PathBuf,
+	},
 }
 
 /// A show being opened off the window's thread.
@@ -254,6 +261,8 @@ struct Opening {
 	/// What to open if it cannot be, saying why in the studio; with none, the
 	/// window closes with the error.
 	instead: Option<Target>,
+	/// Where a rename moves the show from, for the recent list.
+	renamed: Option<PathBuf>,
 }
 
 /// What the window shows.
@@ -357,28 +366,37 @@ impl Window {
 	/// Start opening `target` off this thread, to open `instead` if it cannot
 	/// be.
 	fn open(&mut self, target: Target, instead: Option<Target>) {
-		let (path, create) = match target {
-			Target::Open(path) => (Ok(path), false),
-			Target::Create(path) => (Ok(path), true),
-			Target::New => (
-				self.shows
-					.as_deref()
-					.context("this system has no app storage to keep a show in")
-					.and_then(|dir| show::new_path(dir, show::videos().as_deref())),
-				true,
-			),
+		let (name, renamed) = match &target {
+			Target::Open(path) | Target::Create(path) => (show::name(path), None),
+			Target::New => ("a new show".to_string(), None),
+			Target::Rename { from, name, .. } => (name.trim().to_string(), Some(from.clone())),
 		};
-		let name = path.as_deref().map_or_else(|_| "a new show".to_string(), show::name);
 		let opener = self.opener.clone();
-		let task = match path {
-			Ok(path) => task::Task::spawn(
-				&self.opener.runtime,
-				move || async move { opener.open(path, create).await },
-			)
-			.unwrap_or_else(|err| task::Task::Done(Err(anyhow::Error::new(err).context("cannot open the show")))),
-			Err(err) => task::Task::Done(Err(err)),
-		};
-		self.app = App::Opening(Box::new(Opening { task, name, instead }));
+		let shows = self.shows.clone();
+		// Naming a new show, or renaming one, reads its folders too.
+		let spawned = task::Task::spawn(&self.opener.runtime, move || async move {
+			let (path, create) = match target {
+				Target::Open(path) => (path, false),
+				Target::Create(path) => (path, true),
+				Target::New => {
+					let shows = shows.context("this system has no app storage to keep a show in")?;
+					(show::new_path(&shows, show::videos().as_deref())?, true)
+				}
+				Target::Rename { from, name, recordings } => {
+					let to = show::rename(&from, &name, &recordings).context("cannot rename the show")?;
+					(to, false)
+				}
+			};
+			opener.open(path, create).await
+		});
+		let task = spawned
+			.unwrap_or_else(|err| task::Task::Done(Err(anyhow::Error::new(err).context("cannot open the show"))));
+		self.app = App::Opening(Box::new(Opening {
+			task,
+			name,
+			instead,
+			renamed,
+		}));
 	}
 
 	/// Wait for the show opening, then build its studio; if it cannot open,
@@ -395,7 +413,12 @@ impl Window {
 		};
 		ui.ctx().request_repaint();
 		match opened {
-			Ok((engine, stream)) => self.app = App::Starting(engine, Box::new(stream)),
+			Ok((engine, stream)) => {
+				if let Some(from) = &opening.renamed {
+					self.recent.moved(from, engine.autosave.path());
+				}
+				self.app = App::Starting(engine, Box::new(stream));
+			}
 			Err(err) => {
 				let err = err.context(format!("cannot open {}", opening.name));
 				tracing::error!(error = format!("{err:#}"), "cannot open the show");
@@ -406,7 +429,9 @@ impl Window {
 							Target::New => None,
 							_ => Some(Target::New),
 						};
-						self.notice = Some(err);
+						// Why the show asked for did not open, rather than why
+						// what was tried instead did not either.
+						self.notice.get_or_insert(err);
 						self.open(instead, then);
 					}
 					None => {
@@ -486,22 +511,17 @@ impl Window {
 		let target = match leave {
 			ui::Leave::Open(path) => Target::Open(path),
 			ui::Leave::New => Target::New,
-			ui::Leave::Rename(name) => match show::rename(&path, &name, &recordings) {
-				Ok(renamed) => {
-					self.recent.moved(&path, &renamed);
-					Target::Open(renamed)
-				}
-				Err(err) => {
-					self.notice = Some(err.context("cannot rename the show"));
-					Target::Open(path.clone())
-				}
+			ui::Leave::Rename(name) => Target::Rename {
+				from: path.clone(),
+				name,
+				recordings,
 			},
 		};
+		// Itself again, unless that is what failed. After a rename that moved
+		// it, its old path is gone, and a new show opens instead.
 		let instead = match &target {
-			// Itself again, which a rename may have moved.
-			Target::Open(opened) if *opened != path => Some(Target::Open(path)),
-			Target::New => Some(Target::Open(path)),
-			_ => Some(Target::New),
+			Target::Open(opened) if *opened == path => Some(Target::New),
+			_ => Some(Target::Open(path)),
 		};
 		self.open(target, instead);
 		ctx.request_repaint();
@@ -523,14 +543,24 @@ impl Window {
 }
 
 /// What the window shows while the show called `name` opens: its name, over
-/// the wash the studio opens on. Dragging it moves the window, which has no
-/// frame of the desktop's.
+/// the wash the studio opens on, and the window's buttons. Dragging it moves
+/// the window, which has no frame of the desktop's.
 fn draw_opening(ui: &mut egui::Ui, name: &str) {
 	let window = ui.max_rect();
 	kit::wash(ui.painter(), window);
 	let drag = ui.interact(window, ui.id().with("opening"), egui::Sense::drag());
 	if drag.drag_started_by(egui::PointerButton::Primary) {
 		ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+	}
+	// Where the title bar's are, so a show slow to open can still be closed;
+	// macOS draws its own.
+	if !cfg!(target_os = "macos") {
+		let bar =
+			egui::Rect::from_min_size(window.min, egui::vec2(window.width(), 48.0)).shrink2(egui::vec2(14.0, 0.0));
+		let builder = egui::UiBuilder::new()
+			.max_rect(bar)
+			.layout(egui::Layout::right_to_left(egui::Align::Center));
+		ui.scope_builder(builder, ui::window_buttons);
 	}
 	let builder = egui::UiBuilder::new()
 		.max_rect(egui::Rect::from_center_size(
