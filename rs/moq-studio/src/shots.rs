@@ -1769,8 +1769,7 @@ fn a_mod_off_holds_its_feature_back() {
 	};
 	studio.build(Side::Add, Inspect::Layer, None);
 	harness.run_steps(2);
-	let adds: Vec<_> = harness.get_all_by_role_and_label(Role::Button, "Add").collect();
-	adds.last().expect("the waiting guest's Add").click();
+	harness.get_by_label("Add waiting").click();
 	harness.run_steps(2);
 	{
 		let state = engine.state.lock().unwrap();
