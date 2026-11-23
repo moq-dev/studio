@@ -121,9 +121,11 @@ pub fn run(scenes: Option<PathBuf>, opener: show::Opener, socket: Socket) -> any
 	}
 
 	drop(harness);
-	if let Some(engine) = started.take() {
-		crate::shutdown(&engine, &runtime)?;
-	}
+	let saved = started.take().map(|engine| crate::shutdown(&engine, &runtime));
+	// As a window's exit does, so a rename under way lands before the
+	// process ends, and none starts.
+	show::settle();
+	saved.transpose()?;
 	match failed.lock().unwrap().take() {
 		Some(err) => Err(err),
 		None => Ok(()),
