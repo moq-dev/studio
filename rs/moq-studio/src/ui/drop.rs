@@ -246,6 +246,12 @@ impl Dropping {
 		self.menu_paste = Some((self.menu_at, 0));
 	}
 
+	/// Paste at `at` on screen once the text the window was asked for comes,
+	/// as a menu's Paste does.
+	pub(super) fn paste_asked(&mut self, at: Option<egui::Pos2>) {
+		self.menu_paste = Some((at, 0));
+	}
+
 	/// Where a menu's Paste lands, on the frame it lands: with the clipboard's
 	/// text, if `text` arrived this frame, or else, once none has arrived for
 	/// `MENU_PASTE_FRAMES`, with what the clipboard holds besides text
@@ -1118,6 +1124,25 @@ mod tests {
 		height: 1080,
 		framerate: 30,
 	};
+
+	/// A paste asked of the window lands once: with its text when that comes
+	/// in time, or else once with what the clipboard holds besides text.
+	#[test]
+	fn an_asked_paste_lands_once() {
+		let ctx = egui::Context::default();
+		let at = Some(egui::pos2(10.0, 20.0));
+		let mut dropping = Dropping::default();
+		dropping.paste_asked(at);
+		assert_eq!(dropping.menu_pasted(&ctx, false), None);
+		assert_eq!(dropping.menu_pasted(&ctx, true), Some((at, false)), "the text came");
+		assert_eq!(dropping.menu_pasted(&ctx, false), None, "and nothing else");
+
+		dropping.paste_asked(at);
+		let landed: Vec<_> = (0..MENU_PASTE_FRAMES + 2)
+			.filter_map(|_| dropping.menu_pasted(&ctx, false))
+			.collect();
+		assert_eq!(landed, [(at, true)], "no text came");
+	}
 
 	/// A picture lands at its own size where it is dropped, no larger than
 	/// half the canvas, and never off it.

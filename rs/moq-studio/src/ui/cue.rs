@@ -101,7 +101,8 @@ impl Panels {
 		};
 		let card = Rect::from_min_size(at, vec2(width, height));
 		// Under the card's controls, so a click on it never reaches the picture.
-		ui.interact(card, ui.id().with("next card"), Sense::click_and_drag());
+		ui.interact(card, ui.id().with("next card"), Sense::click_and_drag())
+			.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "Cued scene"));
 		let painter = ui.painter();
 		let shadow = egui::Shadow {
 			offset: [0, 8],

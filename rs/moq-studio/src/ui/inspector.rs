@@ -115,7 +115,7 @@ impl Panels {
 			};
 			let mut slot = item.slot;
 			ui.horizontal(|ui| {
-				ui.label("Slot");
+				let label = ui.label("Slot");
 				egui::ComboBox::from_id_salt("slot")
 					.selected_text(name(slot))
 					.show_ui(ui, |ui| {
@@ -124,6 +124,7 @@ impl Panels {
 						}
 					})
 					.response
+					.labelled_by(label.id)
 					.on_hover_text(
 						"A layer in a slot is placed by the scene's arrangement, which closes the slot up when \
 						 its source goes away; a free one stays where its rect says",
@@ -310,20 +311,20 @@ impl Panels {
 		}
 		let mut shape = item.shape;
 		egui::Grid::new("shape").num_columns(3).show(ui, |ui| {
-			ui.label("Border");
+			let label = ui.label("Border");
 			let mut width = (shape.border / BORDER).clamp(0.0, 1.0);
-			let slid = ui.add(kit::Slider::new(&mut width).width(130.0));
+			let slid = ui.add(kit::Slider::new(&mut width).width(130.0)).labelled_by(label.id);
 			if let Some(gesture) = changed(&slid, &mut self.gestures) {
 				shape.border = (width * BORDER).round();
 				let label = format!("Set the border of `{name}`");
 				asked = Some(Asked::Item(Item { shape, ..item.clone() }, label, gesture));
 			}
-			if color_ui(ui, &mut shape.color).changed() {
+			if kit::named(color_ui(ui, &mut shape.color), "Border color").changed() {
 				let label = format!("Color the border of `{name}`");
 				asked = Some(Asked::Item(Item { shape, ..item.clone() }, label, None));
 			}
 			ui.end_row();
-			ui.label("Shadow");
+			let label = ui.label("Shadow");
 			let shadow = item
 				.filters
 				.iter()
@@ -334,6 +335,7 @@ impl Panels {
 			};
 			let slid = ui
 				.add(kit::Slider::new(&mut strength).width(130.0))
+				.labelled_by(label.id)
 				.on_hover_text("A soft shadow under the layer, which follows its shape");
 			if let Some(gesture) = changed(&slid, &mut self.gestures) {
 				let mut filters = item.filters.clone();
@@ -406,7 +408,7 @@ impl Panels {
 		});
 		let before = grade.clone();
 		ui.horizontal(|ui| {
-			ui.label("Color grade");
+			let label = ui.label("Color grade");
 			egui::ComboBox::from_id_salt("grade")
 				.selected_text(grade.as_deref().unwrap_or("None"))
 				.show_ui(ui, |ui| {
@@ -416,6 +418,7 @@ impl Panels {
 					}
 				})
 				.response
+				.labelled_by(label.id)
 				.on_hover_text("A LUT source's look over the layer; add one with Add, Any source, LUT");
 		});
 		if grade != before {
@@ -780,7 +783,7 @@ impl Panels {
 			});
 			if let Some(blend) = &mut next.blend {
 				ui.horizontal(|ui| {
-					ui.label("Blend");
+					let label = ui.label("Blend");
 					let before = *blend;
 					egui::ComboBox::from_id_salt("blend")
 						.selected_text(blend_name(*blend))
@@ -788,7 +791,9 @@ impl Panels {
 							for mode in Blend::ALL {
 								ui.selectable_value(blend, mode, blend_name(mode));
 							}
-						});
+						})
+						.response
+						.labelled_by(label.id);
 					if *blend != before {
 						action = Some((format!("Set the blend mode of {what}"), None));
 					}
@@ -902,7 +907,7 @@ impl Panels {
 			.collect();
 		let mut gesture = None;
 		ui.horizontal_wrapped(|ui| {
-			ui.label("Transition");
+			let label = ui.label("Transition");
 			match &next {
 				Transition::Slide { direction, .. } | Transition::Wipe { direction, .. } => self.direction = *direction,
 				Transition::Stinger { cut, .. } => self.cut = *cut,
@@ -936,19 +941,22 @@ impl Panels {
 					}
 				})
 				.response
+				.labelled_by(label.id)
 				.on_hover_text("How a scene goes on air; a stinger plays a media source's clip over it");
 			match &mut next {
 				Transition::Slide { direction, .. } | Transition::Wipe { direction, .. } => {
-					egui::ComboBox::from_id_salt("direction")
+					let response = egui::ComboBox::from_id_salt("direction")
 						.selected_text(direction_name(*direction))
 						.show_ui(ui, |ui| {
 							for to in Direction::ALL {
 								ui.selectable_value(direction, to, direction_name(to));
 							}
-						});
+						})
+						.response;
+					kit::named(response, "Direction");
 				}
 				Transition::Stinger { source, cut } => {
-					egui::ComboBox::from_id_salt("stinger")
+					let response = egui::ComboBox::from_id_salt("stinger")
 						.selected_text(source.as_str())
 						.show_ui(ui, |ui| {
 							for name in &media {
@@ -957,10 +965,12 @@ impl Panels {
 						})
 						.response
 						.on_hover_text("The media source whose clip plays");
+					kit::named(response, "Stinger");
 					let mut millis = cut.as_millis() as u64;
 					let response = ui
 						.add(egui::DragValue::new(&mut millis).prefix("cut at ").suffix(" ms"))
 						.on_hover_text("How far into the clip the scenes switch, while it covers the canvas");
+					let response = kit::named(response, "Stinger cut");
 					let dragging = self.gestures.of(&response);
 					if response.changed() {
 						*cut = Duration::from_millis(millis);
@@ -974,6 +984,7 @@ impl Panels {
 				let response = ui
 					.add(egui::DragValue::new(&mut millis).suffix(" ms"))
 					.on_hover_text("How long the transition takes");
+				let response = kit::named(response, "Transition duration");
 				let dragging = self.gestures.of(&response);
 				if response.changed() {
 					*duration = Duration::from_millis(millis);
@@ -1257,6 +1268,7 @@ fn crop_ui(ui: &mut Ui, crop: &mut Crop, gestures: &mut Gestures) -> Option<Opti
 				.max_decimals(1)
 				.suffix("%"),
 		);
+		let response = kit::named(response, ["Crop left", "Crop top", "Crop right", "Crop bottom"][at]);
 		if let Some(gesture) = changed(&response, gestures) {
 			edited = Some(gesture);
 		}

@@ -152,11 +152,12 @@ pub(super) fn inspector(
 ) -> Option<(Option<KeepClear>, &'static str)> {
 	let mut asked = None;
 	ui.horizontal(|ui| {
-		ui.label("Keep out of the way");
+		let label = ui.label("Keep out of the way");
 		ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
 			let mut on = keep.is_some();
 			if ui
 				.add(kit::Toggle::new(&mut on))
+				.labelled_by(label.id)
 				.on_hover_text(
 					"Move off what matters in the picture under it: motion, text, and a HUD that holds still. \
 					 Decided on this machine.",

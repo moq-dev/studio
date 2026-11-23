@@ -610,6 +610,7 @@ impl Panels {
 			let response = ui
 				.put(fader, kit::Fader::new(&mut at).height(fader.height()).mark(UNITY))
 				.on_hover_text("Gain: drag; double-click for unity");
+			let response = kit::named(response, &format!("{name} fader"));
 			let gesture = self.gestures.of(&response);
 			let reset = double_clicked(ui, &response);
 			if response.changed() || reset {
@@ -626,6 +627,7 @@ impl Panels {
 					kit::Number::new(gain_field(&mut typed)).unit("dB").width(field.width()),
 				)
 				.on_hover_text("Gain in decibels: drag, or type a level such as 0");
+			let response = kit::named(response, &format!("{name} gain"));
 			let gesture = self.gestures.of(&response);
 			if response.changed() {
 				changes.push(gain_change(sound, typed, gesture));
@@ -644,7 +646,7 @@ impl Panels {
 			.look(kit::Look::Boxed)
 			.lit(muted, kit::CUE)
 			.width(parts.buttons.width());
-		if ui.put(parts.buttons, button).clicked() {
+		if kit::named(ui.put(parts.buttons, button), &format!("{verb} {name}")).clicked() {
 			changes.push(Change::Audio {
 				name: name.clone(),
 				set: Setting::Muted(!muted),
@@ -785,7 +787,7 @@ impl Panels {
 					ui.label("Gain");
 					let db = decibels(audio.gain);
 					let mut at = taper(db);
-					let slid = ui.add(kit::Slider::new(&mut at).width(130.0));
+					let slid = kit::named(ui.add(kit::Slider::new(&mut at).width(130.0)), &format!("{name} gain"));
 					let gesture = self.gestures.of(&slid);
 					let reset = double_clicked(ui, &slid);
 					if slid.changed() || reset {
@@ -793,7 +795,10 @@ impl Panels {
 						changes.push(gain_change(sound, db, gesture));
 					}
 					let mut typed = db;
-					let field = ui.add(kit::Number::new(gain_field(&mut typed)).unit("dB").width(84.0));
+					let field = kit::named(
+						ui.add(kit::Number::new(gain_field(&mut typed)).unit("dB").width(84.0)),
+						&format!("{name} gain in dB"),
+					);
 					let gesture = self.gestures.of(&field);
 					if field.changed() {
 						changes.push(gain_change(sound, typed, gesture));
@@ -806,6 +811,7 @@ impl Panels {
 					let slid = ui
 						.add(kit::Slider::new(&mut at).width(130.0))
 						.on_hover_text("Place the sound between left and right; double-click to center");
+					let slid = kit::named(slid, &format!("{name} pan"));
 					let gesture = self.gestures.of(&slid);
 					let reset = double_clicked(ui, &slid);
 					let mut pan = audio.pan;
@@ -816,7 +822,10 @@ impl Panels {
 						pan = 0.0;
 					}
 					let mut typed = audio.pan;
-					let field = ui.add(kit::Number::new(pan_field(&mut typed)).width(84.0));
+					let field = kit::named(
+						ui.add(kit::Number::new(pan_field(&mut typed)).width(84.0)),
+						&format!("{name} pan value"),
+					);
 					let field_gesture = self.gestures.of(&field);
 					if field.changed() {
 						pan = typed;
@@ -838,16 +847,20 @@ impl Panels {
 					let slid = ui
 						.add(kit::Slider::new(&mut at).width(130.0))
 						.on_hover_text("Hold the sound back to line it up with a camera that lags it");
+					let slid = kit::named(slid, &format!("{name} delay"));
 					let mut millis = audio.delay.as_millis() as u64;
 					let gesture = self.gestures.of(&slid);
 					if slid.changed() {
 						millis = (at * max as f32).round() as u64;
 					}
 					let mut typed = millis;
-					let field = ui.add(
-						kit::Number::new(egui::DragValue::new(&mut typed).range(0..=max))
-							.unit("ms")
-							.width(84.0),
+					let field = kit::named(
+						ui.add(
+							kit::Number::new(egui::DragValue::new(&mut typed).range(0..=max))
+								.unit("ms")
+								.width(84.0),
+						),
+						&format!("{name} delay in ms"),
 					);
 					let field_gesture = self.gestures.of(&field);
 					if field.changed() {

@@ -15,7 +15,7 @@ use std::time::Duration;
 use eframe::egui_wgpu;
 use egui::accesskit::Role;
 use egui_kittest::Harness;
-use egui_kittest::kittest::{NodeT, Queryable};
+use egui_kittest::kittest::{NodeT, Queryable, by};
 use moq_scene::Source;
 use moq_scene::source::Status;
 
@@ -1876,8 +1876,7 @@ fn a_mod_off_holds_its_feature_back() {
 	};
 	studio.build(Side::Add, Inspect::Layer, None);
 	harness.run_steps(2);
-	let adds: Vec<_> = harness.get_all_by_role_and_label(Role::Button, "Add").collect();
-	adds.last().expect("the waiting guest's Add").click();
+	harness.get_by_label("Add waiting").click();
 	harness.run_steps(2);
 	{
 		let state = engine.state.lock().unwrap();
@@ -2249,7 +2248,11 @@ fn mix_sends_and_mutes() {
 	assert!(harness.query_by_label("Delay").is_none(), "closed");
 
 	// The mute, and putting another audio scene on the stream.
-	harness.get_all_by_label("Mute").next().expect("a mute").click();
+	harness
+		.get_all(by().label_contains("Mute "))
+		.next()
+		.expect("a mute")
+		.click();
 	harness.run_steps(2);
 	assert_eq!(undo().as_deref(), Some("Mute `guest`"));
 	harness
@@ -2648,7 +2651,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		}
 		View::History => {
 			harness
-				.get_all_by_label("Mute")
+				.get_all(by().label_contains("Mute "))
 				.next()
 				.expect("a sound to mute")
 				.click();
@@ -2725,6 +2728,7 @@ fn window<'a>(
 				fx,
 				framed: true,
 				closed: window_closed,
+				control: None,
 			}
 		});
 	(harness, started, closed)
@@ -2858,7 +2862,7 @@ fn enable(harness: &mut Harness<'_, Window>, mods: &[Mod]) {
 /// on undo until its tooltip shows.
 fn hover(harness: &mut Harness<'_, Window>) {
 	harness
-		.get_all_by_label("Mute")
+		.get_all(by().label_contains("Mute "))
 		.next()
 		.expect("a sound to mute")
 		.click();
@@ -3052,20 +3056,5 @@ async fn settle(harness: &mut Harness<'_, Window>, engine: &engine::Engine) {
 
 /// A renderer on `gpu`'s device, as the window's is.
 fn render_state(gpu: &engine::Gpu) -> egui_wgpu::RenderState {
-	let config = egui_wgpu::WgpuConfiguration {
-		wgpu_setup: egui_wgpu::WgpuSetup::Existing(egui_wgpu::WgpuSetupExisting {
-			instance: gpu.instance.clone(),
-			adapter: gpu.adapter.clone(),
-			device: gpu.device.clone(),
-			queue: gpu.queue.clone(),
-		}),
-		..Default::default()
-	};
-	pollster::block_on(egui_wgpu::RenderState::create(
-		&config,
-		&gpu.instance,
-		None,
-		egui_wgpu::RendererOptions::PREDICTABLE,
-	))
-	.unwrap()
+	crate::control::headless::render_state(gpu).unwrap()
 }
