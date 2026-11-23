@@ -54,14 +54,7 @@ bytes = { workspace = true }
 # `persistence` keeps per-user picks, such as the output Listen plays on, out
 # of the shared scene file. `accesskit` describes every widget to screen
 # readers, and to `--control`, which drives the window by those descriptions.
-eframe = { version = "0.36", default-features = false, features = [
-    "accesskit",
-    "default_fonts",
-    "persistence",
-    "wayland",
-    "wgpu",
-    "x11",
-] }
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "persistence", "wayland", "wgpu", "x11"] }
 egui = "0.36"
 # The kit's icons, Lucide's SVGs, drawn at whatever size and scale they are shown.
 egui_extras = { version = "0.36", default-features = false, features = ["svg"] }

@@ -154,15 +154,28 @@ impl Driver {
 
 		let mut read = std::io::BufReader::new(&stream);
 		let mut answer = String::new();
-		read.read_line(&mut answer)
-			.with_context(|| format!("no answer within {}", humantime::format_duration(timeout)))?;
+		match read.read_line(&mut answer) {
+			Ok(0) => anyhow::bail!("the studio hung up without answering"),
+			Ok(_) => {}
+			Err(err)
+				if matches!(
+					err.kind(),
+					std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+				) =>
+			{
+				anyhow::bail!("no answer within {}", humantime::format_duration(timeout))
+			}
+			Err(err) => return Err(err).context("cannot read the studio's answer"),
+		}
 		let answer: serde_json::Value = serde_json::from_str(&answer).context("the studio's answer is not JSON")?;
 		if let Some(err) = answer.get("error") {
 			anyhow::bail!("{}", err.as_str().unwrap_or("the studio failed"));
 		}
 		match out {
 			Some(out) => {
-				let length = answer["screenshot"]["png"].as_u64().context("the answer is no screenshot")?;
+				let length = answer["screenshot"]["png"]
+					.as_u64()
+					.context("the answer is no screenshot")?;
 				let mut png = Vec::new();
 				read.take(length).read_to_end(&mut png)?;
 				anyhow::ensure!(png.len() as u64 == length, "the screenshot ended early");

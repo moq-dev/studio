@@ -108,7 +108,10 @@ impl Target {
 		if let Some(at) = text.strip_prefix("at:") {
 			let (x, y) = at.split_once(',').context("a point is `at:<x>,<y>`")?;
 			let coord = |value: &str| -> anyhow::Result<f32> {
-				let value: f32 = value.trim().parse().with_context(|| format!("`{value}` is no coordinate"))?;
+				let value: f32 = value
+					.trim()
+					.parse()
+					.with_context(|| format!("`{value}` is no coordinate"))?;
 				anyhow::ensure!(value.is_finite(), "`{value}` is no coordinate");
 				Ok(value)
 			};
@@ -162,7 +165,7 @@ pub enum Until {
 enum Reply {
 	Done,
 	Snapshot {
-		tree: Option<Node>,
+		tree: Option<Box<Node>>,
 		focus: Option<u64>,
 		state: serde_json::Value,
 	},
@@ -252,7 +255,9 @@ impl Tree {
 			disabled: node.is_disabled(),
 			checked: node.toggled().map(|toggled| toggled == accesskit::Toggled::True),
 			selected: node.is_selected(),
-			rect: node.bounds().map(|r| [r.x0 as f32, r.y0 as f32, r.x1 as f32, r.y1 as f32]),
+			rect: node
+				.bounds()
+				.map(|r| [r.x0 as f32, r.y0 as f32, r.x1 as f32, r.y1 as f32]),
 			children: node.children().iter().filter_map(|child| self.node(*child)).collect(),
 		})
 	}
@@ -260,7 +265,7 @@ impl Tree {
 	/// `node`'s accessible name: its label, or else the text of what labels
 	/// it, as a field beside its label in a form is named.
 	fn name(&self, node: &accesskit::Node) -> Option<String> {
-		if let Some(label) = node.label() {
+		if let Some(label) = node.label().filter(|label| !label.is_empty()) {
 			return Some(label.to_string());
 		}
 		let by: Vec<&str> = node
@@ -292,14 +297,29 @@ impl Tree {
 
 	/// The one widget `target` names, or why there is not one.
 	fn one(&self, target: &Target) -> anyhow::Result<(accesskit::NodeId, &accesskit::Node)> {
-		let mut found = self.find(target);
+		// A group stands for the controls in it, such as a form row's, unless a
+		// widget is named so itself.
+		let (groups, mut found): (Vec<_>, Vec<_>) = self
+			.find(target)
+			.into_iter()
+			.partition(|(_, node)| node.role() == accesskit::Role::Group);
+		if found.is_empty() {
+			found = groups.into_iter().flat_map(|(id, _)| self.controls(id)).collect();
+		}
 		match found.len() {
 			0 => anyhow::bail!("no widget is {}", describe(target)),
 			1 => Ok(found.remove(0)),
 			_ => {
 				let each: Vec<String> = found
 					.iter()
-					.map(|(id, node)| format!("id:{} ({:?} {:?})", id.0, node.role(), self.name(node).unwrap_or_default()))
+					.map(|(id, node)| {
+						format!(
+							"id:{} ({:?} {:?})",
+							id.0,
+							node.role(),
+							self.name(node).unwrap_or_default()
+						)
+					})
 					.collect();
 				anyhow::bail!(
 					"{} widgets are {}; pick one by ID: {}",
@@ -311,6 +331,21 @@ impl Tree {
 		}
 	}
 
+	/// The controls under `id`, not counting `id`.
+	fn controls(&self, id: accesskit::NodeId) -> Vec<(accesskit::NodeId, &accesskit::Node)> {
+		let Some(node) = self.nodes.get(&id) else {
+			return Vec::new();
+		};
+		node.children()
+			.iter()
+			.filter_map(|child| Some((*child, self.nodes.get(child)?)))
+			.flat_map(|(child, node)| match control(node) {
+				true => vec![(child, node)],
+				false => self.controls(child),
+			})
+			.collect()
+	}
+
 	/// Where a press on `target` lands: a point, or the middle of its widget,
 	/// which must be enabled and have bounds.
 	fn point(&self, target: &Target, screen: egui::Rect) -> anyhow::Result<egui::Pos2> {
@@ -319,7 +354,9 @@ impl Tree {
 			_ => {
 				let (_, node) = self.one(target)?;
 				anyhow::ensure!(!node.is_disabled(), "{} is disabled", describe(target));
-				let rect = node.bounds().with_context(|| format!("{} has no bounds", describe(target)))?;
+				let rect = node
+					.bounds()
+					.with_context(|| format!("{} has no bounds", describe(target)))?;
 				egui::pos2(((rect.x0 + rect.x1) / 2.0) as f32, ((rect.y0 + rect.y1) / 2.0) as f32)
 			}
 		};
@@ -330,6 +367,12 @@ impl Tree {
 		);
 		Ok(pos)
 	}
+}
+
+/// Whether a person can act on `node`: press it, or give it the keyboard.
+fn control(node: &accesskit::Node) -> bool {
+	node.role() != accesskit::Role::Label
+		&& (node.supports_action(accesskit::Action::Click) || node.supports_action(accesskit::Action::Focus))
 }
 
 /// How an error names `target`.
@@ -371,7 +414,9 @@ impl Socket {
 				Err(err) if err.kind() == std::io::ErrorKind::ConnectionRefused => {
 					std::fs::remove_file(path).with_context(|| format!("cannot replace {}", path.display()))?;
 				}
-				Err(err) => return Err(err).with_context(|| format!("cannot tell whether {} is in use", path.display())),
+				Err(err) => {
+					return Err(err).with_context(|| format!("cannot tell whether {} is in use", path.display()));
+				}
 			}
 		}
 		let listener = std::os::unix::net::UnixListener::bind(path)
@@ -425,7 +470,10 @@ pub enum Socket {}
 #[cfg(not(unix))]
 impl Socket {
 	pub fn bind(path: &Path) -> anyhow::Result<Self> {
-		anyhow::bail!("--control {} takes a Unix socket, which this system lacks", path.display())
+		anyhow::bail!(
+			"--control {} takes a Unix socket, which this system lacks",
+			path.display()
+		)
 	}
 
 	pub fn serve(self, _: &egui::Context, _: &tokio::runtime::Handle) -> Control {
@@ -470,7 +518,11 @@ struct Shared {
 
 #[cfg(unix)]
 /// Take connections one at a time from this user's processes.
-async fn accept(listener: tokio::net::UnixListener, send: mpsc::Sender<Asked>, ctx: egui::Context) -> anyhow::Result<()> {
+async fn accept(
+	listener: tokio::net::UnixListener,
+	send: mpsc::Sender<Asked>,
+	ctx: egui::Context,
+) -> anyhow::Result<()> {
 	let uid = rustix::process::getuid().as_raw();
 	loop {
 		let (stream, _) = listener.accept().await?;
@@ -493,7 +545,11 @@ async fn accept(listener: tokio::net::UnixListener, send: mpsc::Sender<Asked>, c
 
 #[cfg(unix)]
 /// Answer one connection's requests in turn until it closes.
-async fn connection(stream: tokio::net::UnixStream, send: &mpsc::Sender<Asked>, ctx: &egui::Context) -> anyhow::Result<()> {
+async fn connection(
+	stream: tokio::net::UnixStream,
+	send: &mpsc::Sender<Asked>,
+	ctx: &egui::Context,
+) -> anyhow::Result<()> {
 	let (read, mut write) = stream.into_split();
 	let mut read = tokio::io::BufReader::new(read);
 	let mut line = Vec::new();
@@ -761,7 +817,9 @@ fn keys(combo: &str) -> anyhow::Result<VecDeque<Frame>> {
 			}
 			"shift" => modifiers.shift = true,
 			"alt" | "option" => modifiers.alt = true,
-			"cmd" | "command" if cfg!(target_os = "macos") => modifiers |= egui::Modifiers::MAC_CMD | egui::Modifiers::COMMAND,
+			"cmd" | "command" if cfg!(target_os = "macos") => {
+				modifiers |= egui::Modifiers::MAC_CMD | egui::Modifiers::COMMAND
+			}
 			"cmd" | "command" => modifiers |= egui::Modifiers::CTRL | egui::Modifiers::COMMAND,
 			other => anyhow::bail!("`{other}` is no modifier: ctrl, shift, alt, or cmd"),
 		}
@@ -809,16 +867,22 @@ impl egui::Plugin for Plugin {
 				if find.stage == Stage::Reveal {
 					find.stage = Stage::Point;
 					if let Ok((id, _)) = self.tree.one(&find.targets[0]) {
-						input.events.push(egui::Event::AccessKitActionRequest(accesskit::ActionRequest {
-							action: accesskit::Action::ScrollIntoView,
-							target_tree: accesskit::TreeId::ROOT,
-							target_node: id,
-							data: None,
-						}));
+						input
+							.events
+							.push(egui::Event::AccessKitActionRequest(accesskit::ActionRequest {
+								action: accesskit::Action::ScrollIntoView,
+								target_tree: accesskit::TreeId::ROOT,
+								target_node: id,
+								data: None,
+							}));
 					}
 					return;
 				}
-				let found: anyhow::Result<Vec<_>> = find.targets.iter().map(|target| self.tree.point(target, screen)).collect();
+				let found: anyhow::Result<Vec<_>> = find
+					.targets
+					.iter()
+					.map(|target| self.tree.point(target, screen))
+					.collect();
 				match found {
 					Ok(at) => {
 						*frames = (find.make)(&at, &find.request);
@@ -848,7 +912,10 @@ impl egui::Plugin for Plugin {
 				});
 				if let Some(image) = image {
 					let reply = match png(&image) {
-						Ok(bytes) => Reply::Screenshot { png: bytes.len(), bytes },
+						Ok(bytes) => Reply::Screenshot {
+							png: bytes.len(),
+							bytes,
+						},
 						Err(err) => Reply::error(format!("{err:#}")),
 					};
 					self.finish(reply);
@@ -896,7 +963,7 @@ impl egui::Plugin for Plugin {
 		let Some(op) = &mut self.op else { return };
 		let reply = match &mut op.work {
 			Work::Snapshot => Some(Reply::Snapshot {
-				tree: self.tree.snapshot(),
+				tree: self.tree.snapshot().map(Box::new),
 				focus: self.tree.focus.map(|id| id.0),
 				state: state.unwrap_or(serde_json::Value::Null),
 			}),
@@ -962,7 +1029,9 @@ fn settled(state: Option<&serde_json::Value>, since: &mut Option<u64>) -> bool {
 	let Some(studio) = state.and_then(|state| state.get("studio")) else {
 		return false;
 	};
-	let starting = studio["starting"].as_array().is_some_and(|starting| !starting.is_empty());
+	let starting = studio["starting"]
+		.as_array()
+		.is_some_and(|starting| !starting.is_empty());
 	let (Some(frames), Some(rate)) = (studio["frames"].as_u64(), studio["framerate"].as_u64()) else {
 		return false;
 	};
@@ -1015,7 +1084,13 @@ mod tests {
 	fn keys_parse() {
 		let frames = keys("ctrl+shift+Z").unwrap();
 		assert_eq!(frames.len(), 2);
-		let egui::Event::Key { key, pressed, modifiers, .. } = &frames[0].0[1] else {
+		let egui::Event::Key {
+			key,
+			pressed,
+			modifiers,
+			..
+		} = &frames[0].0[1]
+		else {
 			panic!("a key event")
 		};
 		assert_eq!((*key, *pressed), (egui::Key::Z, true));
@@ -1047,7 +1122,10 @@ mod tests {
 			timeout: Duration::from_secs(5),
 		};
 		let line = serde_json::to_string(&request).unwrap();
-		assert_eq!(line, r#"{"cmd":"wait","until":{"shown":{"contains":"Undo"}},"timeout":"5s"}"#);
+		assert_eq!(
+			line,
+			r#"{"cmd":"wait","until":{"shown":{"contains":"Undo"}},"timeout":"5s"}"#
+		);
 		assert_eq!(serde_json::from_str::<Request>(&line).unwrap(), request);
 		assert!(serde_json::from_str::<Request>(r#"{"cmd":"quit","extra":1}"#).is_err());
 		assert!(serde_json::from_str::<Request>(r#"{"cmd":"format-disk"}"#).is_err());

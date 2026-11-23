@@ -448,7 +448,7 @@ impl Panels {
 		if seeking(ui.ctx(), SCENE_SIZES) {
 			sizes.set_open(true);
 		}
-		sizes
+		let (toggle, ..) = sizes
 			.show_header(ui, |ui| {
 				ui.label(RichText::new(SCENE_SIZES).font(kit::ui_strong(13.5)).color(kit::TEXT));
 				ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -512,6 +512,7 @@ impl Panels {
 					"A scene of another size cannot go on air. Publish it as its own broadcast instead, under Advanced.",
 				);
 			});
+		kit::named(toggle, SCENE_SIZES);
 		let rect = Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=ui.cursor().top());
 		sought(ui, SCENE_SIZES, rect);
 		action
@@ -953,12 +954,13 @@ impl Panels {
 				|ui| {
 					ui.horizontal(|ui| {
 						pick_key = ui.button("Choose").clicked();
-						ui.add(
+						let field = ui.add(
 							egui::TextEdit::singleline(&mut form.key)
 								.id_salt("guests room key")
 								.hint_text("room.jwk")
 								.desired_width(f32::INFINITY),
 						);
+						kit::named(field, "Room key file");
 					});
 				},
 			);
@@ -1519,23 +1521,34 @@ fn labeled(ui: &mut Ui, name: &str, help: &str, share: f32, control: impl FnOnce
 	ui.add_space(14.0);
 	let width = ui.available_width();
 	let label = |ui: &mut Ui| {
-		ui.label(RichText::new(name).font(kit::ui_strong(13.5)).color(kit::TEXT));
+		let label = ui.label(RichText::new(name).font(kit::ui_strong(13.5)).color(kit::TEXT));
 		if !help.is_empty() {
 			ui.add_space(2.0);
 			help_label(ui, help);
 		}
+		label.id
+	};
+	// The control is a group the row's name labels, which names a control
+	// alone in it.
+	let control = |ui: &mut Ui, label: egui::Id| {
+		ui.scope(|ui| {
+			kit::labelled_group(ui, label);
+			control(ui);
+		});
 	};
 	if width < stack(ui) {
-		label(ui);
+		let label = label(ui);
 		ui.add_space(10.0);
-		control(ui);
+		control(ui, label);
 	} else {
 		ui.horizontal(|ui| {
-			ui.vertical(|ui| {
-				ui.set_width(width * share);
-				label(ui);
-			});
-			control(ui);
+			let label = ui
+				.vertical(|ui| {
+					ui.set_width(width * share);
+					label(ui)
+				})
+				.inner;
+			control(ui, label);
 		});
 	}
 	ui.add_space(14.0);
@@ -1752,7 +1765,7 @@ fn hotkey_row(
 						}
 					}
 					None => {
-						if ui.button("Bind").clicked() {
+						if kit::named(ui.button("Bind"), &format!("Bind {name}")).clicked() {
 							asked = Some(true);
 						}
 					}

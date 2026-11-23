@@ -409,6 +409,7 @@ impl Panels {
 			.hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, kit::LINE));
 		// Under every control on the bar, so each takes its own clicks.
 		let bar = ui.interact(rect, ui.id().with("title bar"), Sense::click_and_drag());
+		bar.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "Title bar"));
 		if bar.drag_started_by(egui::PointerButton::Primary) {
 			ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
 		}
@@ -1163,7 +1164,7 @@ impl Panels {
 			.lit(muted, kit::CUE)
 			.look(kit::Look::Boxed)
 			.small();
-		ui.add(button).clicked()
+		kit::named(ui.add(button), &format!("{name} {}", sound.name)).clicked()
 	}
 
 	/// The stream's meter, the mix of the audio scene it carries, with Listen.
@@ -1660,6 +1661,19 @@ fn edges(ui: &mut Ui, window: Rect) {
 	for (index, (direction, from, to)) in edges.into_iter().enumerate() {
 		let rect = Rect::from_min_max(from, to);
 		let response = ui.interact(rect, ui.id().with(("edge", index)), Sense::drag());
+		response.widget_info(|| {
+			let edge = match direction {
+				ResizeDirection::North => "top",
+				ResizeDirection::South => "bottom",
+				ResizeDirection::East => "right",
+				ResizeDirection::West => "left",
+				ResizeDirection::NorthWest => "top left",
+				ResizeDirection::NorthEast => "top right",
+				ResizeDirection::SouthWest => "bottom left",
+				ResizeDirection::SouthEast => "bottom right",
+			};
+			egui::WidgetInfo::labeled(egui::WidgetType::Other, true, format!("Resize from the {edge}"))
+		});
 		if response.hovered() || response.dragged() {
 			ui.ctx().set_cursor_icon(match direction {
 				ResizeDirection::North | ResizeDirection::South => CursorIcon::ResizeVertical,
