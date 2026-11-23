@@ -1606,6 +1606,8 @@ pub(super) struct Form {
 	/// The last save it started, which is not tried again until the form
 	/// changes, so one refused waits for the next edit.
 	tried: Option<(Saved, Vec<Token>)>,
+	/// Each relay's token field and forget box as that save sent them.
+	sent_tokens: [(String, bool); 2],
 }
 
 /// A token to keep for a relay, or `None` to forget its saved one.
@@ -1626,6 +1628,7 @@ impl Form {
 			broadcast: saved.broadcast.clone().unwrap_or_default(),
 			on_demand: saved.on_demand,
 			tried: None,
+			sent_tokens: Default::default(),
 		}
 	}
 
@@ -1670,22 +1673,29 @@ impl Form {
 			return None;
 		}
 		self.tried = Some(next.clone());
+		self.sent_tokens = [
+			(self.relay_token.clone(), self.forget_relay_token),
+			(self.failover_token.clone(), self.forget_failover_token),
+		];
 		Some(next)
 	}
 
 	/// Let go of the tokens its save kept, since they went with the
 	/// relays it sent, not the ones edited since, and let the rest save.
 	fn settle_tokens(&mut self) {
-		let Some((_, kept)) = self.tried.take() else { return };
-		for (field, forget) in [
+		self.tried = None;
+		let sent = std::mem::take(&mut self.sent_tokens);
+		for ((field, forget), sent) in [
 			(&mut self.relay_token, &mut self.forget_relay_token),
 			(&mut self.failover_token, &mut self.forget_failover_token),
-		] {
-			let token = field.trim();
-			match token.is_empty() {
-				true if *forget && kept.iter().any(|(_, kept)| kept.is_none()) => *forget = false,
-				false if kept.iter().any(|(_, kept)| kept.as_deref() == Some(token)) => field.clear(),
-				_ => {}
+		]
+		.into_iter()
+		.zip(sent)
+		{
+			// Only a field still as sent; one edited since saves next.
+			if (field.as_str(), *forget) == (sent.0.as_str(), sent.1) {
+				field.clear();
+				*forget = false;
 			}
 		}
 	}
@@ -1855,10 +1865,18 @@ mod tests {
 		assert_eq!(tokens, [("https://a.example/".parse().unwrap(), Some("secret".into()))]);
 
 		form.relay = "https://b.example/".into();
+		// The same token typed for the failover while it saved is a new edit.
+		form.failover = "https://c.example/".into();
+		form.failover_token = "secret".into();
 		form.settle_tokens();
 		assert!(form.relay_token.is_empty(), "the token went with the relay sent");
-		let (saved, tokens) = form.next(&stream).expect("the new address saves");
+		assert_eq!(form.failover_token, "secret", "and the failover's is kept");
+		let (saved, tokens) = form.next(&stream).expect("the new addresses save");
 		assert_eq!(saved.relay.unwrap().as_str(), "https://b.example/");
-		assert!(tokens.is_empty(), "with no token: {tokens:?}");
+		assert_eq!(
+			tokens,
+			[("https://c.example/".parse().unwrap(), Some("secret".into()))],
+			"with only the failover's token"
+		);
 	}
 }
