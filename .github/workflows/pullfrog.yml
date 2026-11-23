@@ -64,7 +64,7 @@ jobs:
             exit 1
           fi
       - name: Run agent
-        uses: pullfrog/pullfrog@0741f79ecebfa4469a010644d2aed2d96d32d489 # v0.1.127
+        uses: pullfrog/pullfrog@75f7ee99ad40922d195eff131f025f4ba79035ff # v0.1.131
         with:
           prompt: ${{ inputs.prompt }}
         # No provider keys from this repository: model access is configured
