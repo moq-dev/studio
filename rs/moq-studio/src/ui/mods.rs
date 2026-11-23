@@ -43,7 +43,7 @@ fn used(state: &State) -> Vec<Mod> {
 
 /// The sources the stream's mix leaves out: each sent only to another audio
 /// scene, or making a sound and sent to none. A source with a picture that
-/// no layer shows, such as a guest waiting to be placed, is not left out:
+/// nothing draws, such as a guest waiting to be placed, is not left out:
 /// Add places it and hears it.
 fn unheard(state: &State) -> BTreeSet<String> {
 	let collection = state.collection();
@@ -52,8 +52,9 @@ fn unheard(state: &State) -> BTreeSet<String> {
 		.map(|program| collection.heard(program))
 		.unwrap_or_default();
 	let sent = collection.audio_scenes.iter().flat_map(|scene| &scene.sounds);
-	let shown = |name: &str| (collection.layers()).any(|(_, items)| items.iter().any(|item| item.source == name));
-	let waiting = |name: &str| collection.sources.get(name).is_some_and(Source::has_video) && !shown(name);
+	let waiting = |name: &str| {
+		collection.sources.get(name).is_some_and(Source::has_video) && super::layers::unplaced(collection, name)
+	};
 	let sounding = collection
 		.sources
 		.keys()

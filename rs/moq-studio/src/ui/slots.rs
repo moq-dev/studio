@@ -74,10 +74,18 @@ pub(super) fn drawn(state: &State, layer: &Layer, index: usize, format: Format) 
 	})
 }
 
-/// Whether the layer at `index` of `layer` is in a slot its arrangement
-/// closes, as while its source is offline, so it is drawn nowhere.
+/// Whether the layer at `index` of `layer` is in a slot closed in each
+/// picture it is shown in, as while its source is offline, so it is drawn
+/// nowhere.
 pub(super) fn closed(state: &State, layer: &Layer, index: usize) -> bool {
-	arranged(state, layer, index, Format::Landscape).is_some_and(|item| item.slot.is_some() && !item.visible)
+	let collection = state.collection();
+	let Some(item) = collection.items(layer).and_then(|items| items.get(index)) else {
+		return false;
+	};
+	let mut shown = [Format::Landscape, Format::Portrait]
+		.into_iter()
+		.filter(|format| item.shown_in(*format) && collection.format_of(layer, *format) == *format);
+	shown.all(|format| arranged(state, layer, index, format).is_some_and(|item| item.slot.is_some() && !item.visible))
 }
 
 /// The layer at `index` of `layer` as `format`'s picture arranges it now,

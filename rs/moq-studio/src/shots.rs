@@ -1829,16 +1829,34 @@ fn a_mod_switched_off_turns_its_feature_off() {
 	// Going out in portrait too, where keeping clear leaves the portrait
 	// picture be.
 	let keep = read("keep.toml").replacen("version = 1\n", "version = 1\nportrait = true\n", 1);
-	let shows = [
-		(mix, Mod::Audio),
-		(one, Mod::Audio),
-		(slots, Mod::Layout),
-		(keep, Mod::Layout),
-		(read("dual.toml"), Mod::Formats),
-		(read("portrait.toml"), Mod::Formats),
-		(read("published.toml"), Mod::Published),
+	// A guest shown through a role, their sound sent nowhere.
+	let role = read("show.toml")
+		.replacen(
+			"[sources.caller]",
+			"[sources.Guest]\nkind = \"role\"\nsource = \"guest\"\n\n[sources.caller]",
+			1,
+		)
+		.replacen(r#"{ source = "guest", rect"#, r#"{ source = "Guest", rect"#, 1)
+		.replacen(r#"sounds = ["caller", "guest"]"#, r#"sounds = ["caller"]"#, 1);
+	// Slots in both pictures, one tile shown only in portrait.
+	let dual_slots = read("dual.toml").replacen(
+		r#"{ source = "Dana", slot = "tile" },"#,
+		r#"{ source = "Dana", slot = "tile", format = "portrait" },"#,
+		1,
+	);
+	let every: &[&str] = &["caller", "guest", "mic", "music"];
+	let shows: [(String, Mod, &[&str]); 9] = [
+		(mix, Mod::Audio, every),
+		(one, Mod::Audio, every),
+		(role, Mod::Audio, &["caller", "guest"]),
+		(slots, Mod::Layout, &[]),
+		(keep, Mod::Layout, &[]),
+		(dual_slots, Mod::Layout, &[]),
+		(read("dual.toml"), Mod::Formats, &[]),
+		(read("portrait.toml"), Mod::Formats, &[]),
+		(read("published.toml"), Mod::Published, &[]),
 	];
-	for (show, which) in shows {
+	for (show, which, sounds) in shows {
 		std::fs::write("show.toml", show).unwrap();
 		let app = start(launch(&gpu), stream(None), &runtime);
 		let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
@@ -1874,11 +1892,7 @@ fn a_mod_switched_off_turns_its_feature_off() {
 				assert!(program.program && !program.recorded && program.scenes.is_empty());
 				let heard: std::collections::BTreeSet<&str> = before.heard(before.program_audio().unwrap());
 				let all: Vec<&str> = program.sounds.iter().map(String::as_str).collect();
-				assert_eq!(
-					all,
-					["caller", "guest", "mic", "music"],
-					"every sound, those left out too"
-				);
+				assert_eq!(all, sounds, "every sound, those left out too");
 				let muted = |name: &str| after.audio.get(name).is_some_and(|audio| audio.muted);
 				for left in all.iter().filter(|name| !heard.contains(*name)) {
 					assert!(muted(left), "{left} muted, as the stream left it out");
