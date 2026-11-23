@@ -322,6 +322,8 @@ struct Window {
 	framed: bool,
 	/// Set once the window is asked to close, as [`Events::closed`] is.
 	closed: Arc<AtomicBool>,
+	/// Set once the event loop ends, for any reason, as [`Events::exiting`] is.
+	exiting: Arc<AtomicBool>,
 	/// The control socket's window side, with `--control`.
 	control: Option<control::Control>,
 }
@@ -351,7 +353,7 @@ impl eframe::App for Window {
 	fn save(&mut self, storage: &mut dyn eframe::Storage) {
 		if let App::Studio(studio) = &mut self.app {
 			// On the way out, a settings edit still being typed saves too.
-			if self.closed.load(Ordering::Relaxed)
+			if (self.closed.load(Ordering::Relaxed) || self.exiting.load(Ordering::Relaxed))
 				&& let Err(err) = studio.flush_settings()
 			{
 				tracing::error!(error = format!("{err:#}"), "cannot save the settings on quit");
@@ -558,6 +560,8 @@ struct Events<'a> {
 	/// Whether the window was asked to close, by the desktop or the studio's
 	/// own title bar, since eframe only logs the error that stops it otherwise.
 	closed: Arc<AtomicBool>,
+	/// Set once the loop ends, which the window's last save reads.
+	exiting: Arc<AtomicBool>,
 	/// The studio's own window, the first to hear an event: the multiview's
 	/// opens after it, closing that one closes nothing else, and typing into
 	/// the studio's holds back no key pressed in it.
@@ -622,8 +626,8 @@ impl winit::application::ApplicationHandler<eframe::UserEvent> for Events<'_> {
 
 	fn exiting(&mut self, event_loop: &ActiveEventLoop) {
 		// Quitting from the macOS app menu asks no window to close first, and
-		// the window's last save flushes the settings only once it is closing.
-		self.closed.store(true, Ordering::Relaxed);
+		// the window's last save flushes the settings only on the way out.
+		self.exiting.store(true, Ordering::Relaxed);
 		self.eframe.exiting(event_loop);
 		// Here rather than once the loop returns: quitting from the macOS app
 		// menu or Dock, or logging out, ends the process as this returns.
@@ -704,6 +708,8 @@ fn run(app: App, opener: show::Opener, socket: Option<control::Socket>) -> anyho
 	let runtime = opener.runtime.clone();
 	let closed = Arc::new(AtomicBool::new(false));
 	let window_closed = closed.clone();
+	let exiting = Arc::new(AtomicBool::new(false));
+	let window_exiting = exiting.clone();
 	let eframe = eframe::create_native(
 		"moq-studio",
 		options,
@@ -728,6 +734,7 @@ fn run(app: App, opener: show::Opener, socket: Option<control::Socket>) -> anyho
 				fx,
 				framed,
 				closed: window_closed,
+				exiting: window_exiting,
 				control,
 			}))
 		}),
@@ -737,6 +744,7 @@ fn run(app: App, opener: show::Opener, socket: Option<control::Socket>) -> anyho
 		eframe,
 		keyboard,
 		closed: closed.clone(),
+		exiting,
 		root: None,
 		started,
 		runtime,

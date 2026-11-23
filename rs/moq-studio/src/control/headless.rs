@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use anyhow::Context;
 use eframe::egui_wgpu;
 use egui_kittest::Harness;
 
@@ -58,6 +59,7 @@ pub fn run(app: App, opener: show::Opener, socket: Socket) -> anyhow::Result<()>
 				keyboard,
 				framed,
 				closed,
+				exiting: Default::default(),
 				control: Some(control),
 			}
 		}
@@ -111,11 +113,16 @@ pub fn run(app: App, opener: show::Opener, socket: Socket) -> anyhow::Result<()>
 		}
 	}
 
+	// A settings edit still being typed saves on the way out, as on quit.
+	let flushed = match &mut harness.state_mut().app {
+		App::Studio(studio) => studio.flush_settings(),
+		_ => Ok(()),
+	};
 	drop(harness);
 	if let Some(engine) = started.take() {
 		crate::shutdown(&engine, &runtime)?;
 	}
-	Ok(())
+	flushed.context("cannot save the settings on quit")
 }
 
 /// The last frame's output for the window.

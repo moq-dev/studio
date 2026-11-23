@@ -2771,6 +2771,7 @@ fn window<'a>(
 				fx,
 				framed: true,
 				closed: window_closed,
+				exiting: Default::default(),
 				control: None,
 			}
 		});
