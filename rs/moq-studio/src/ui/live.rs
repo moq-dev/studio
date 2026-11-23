@@ -1692,9 +1692,11 @@ impl Form {
 		.into_iter()
 		.zip(sent)
 		{
-			// Only a field still as sent; one edited since saves next.
-			if (field.as_str(), *forget) == (sent.0.as_str(), sent.1) {
+			// Each only while still as sent; one edited since saves next.
+			if *field == sent.0 {
 				field.clear();
+			}
+			if *forget && sent.1 {
 				*forget = false;
 			}
 		}
@@ -1871,6 +1873,22 @@ mod tests {
 		form.settle_tokens();
 		assert!(form.relay_token.is_empty(), "the token went with the relay sent");
 		assert_eq!(form.failover_token, "secret", "and the failover's is kept");
+
+		// Nor with the forget box ticked during the save, which still forgets.
+		let mut ticked = Form::new(&stream);
+		ticked.relay = "https://a.example/".into();
+		ticked.relay_token = "secret".into();
+		ticked.next(&stream).expect("the edit saves");
+		ticked.relay = "https://b.example/".into();
+		ticked.forget_relay_token = true;
+		ticked.settle_tokens();
+		assert!(ticked.relay_token.is_empty(), "the token went with the relay sent");
+		let (_, tokens) = ticked.next(&stream).expect("the new address saves");
+		assert_eq!(
+			tokens,
+			[("https://b.example/".parse().unwrap(), None)],
+			"forgetting B's"
+		);
 		let (saved, tokens) = form.next(&stream).expect("the new addresses save");
 		assert_eq!(saved.relay.unwrap().as_str(), "https://b.example/");
 		assert_eq!(
