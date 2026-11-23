@@ -64,32 +64,29 @@ impl Panels {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		let used = uses(state.collection()).contains(&each);
-		let result = match each {
-			Mod::Audio if used => self.audio_off(&mut state),
-			Mod::Layout if used => layout_off(&mut state),
-			Mod::Published if used => self.published_off(&mut state),
-			Mod::Formats if used => {
-				let canvas = state.collection().canvas;
-				drop(state);
-				// A portrait show turns to landscape, which restarts the
-				// video, so on air it asks first and the mod waits for it.
-				if canvas.height > canvas.width {
-					let turned = Canvas {
-						width: canvas.height,
-						height: canvas.width,
-						..canvas
-					};
-					match self.engine.on_air() != crate::engine::OnAir::Off {
-						true => self.restart = Some(Restart::Landscape(turned)),
-						false => self.apply_restart(Restart::Landscape(turned)),
-					}
-				} else {
-					self.set_both(false);
-				}
-				return;
+		let canvas = state.collection().canvas;
+		// A portrait show turns to landscape, which restarts the video, so on
+		// air it asks first and the mod waits for the answer.
+		if each == Mod::Formats && canvas.height > canvas.width {
+			drop(state);
+			let turned = Restart::Landscape(canvas.turned());
+			match self.engine.on_air() != crate::engine::OnAir::Off {
+				true => self.restart = Some(turned),
+				false => self.apply_restart(turned),
 			}
+			return;
+		}
+		let label = format!("Switch off {}", each.name());
+		let result = match each {
+			Mod::Audio if used => self.audio_off(&mut state, label),
+			Mod::Layout if used => layout_off(&mut state, label),
+			Mod::Published if used => self.published_off(&mut state, label),
+			Mod::Formats if used => edit(&mut state, label, None, |draft| draft.set_portrait(false)),
 			Mod::Studio => {
-				state.uncue();
+				// A scene open off air stays cued, for its banner to take live.
+				if self.editing.is_none() {
+					state.uncue();
+				}
 				self.controls.set_studio(false);
 				Ok(())
 			}
@@ -113,10 +110,11 @@ impl Panels {
 		}
 	}
 
-	/// Switch on each mod the show uses, saying so, and turn from a page or
-	/// pane whose mod is off. Run before each frame draws, so an undo, a
-	/// reload, or an outside edit that brings a feature back brings its UI.
-	pub(super) fn follow_mods(&mut self) {
+	/// Switch on each mod the show uses, saying so if `say`, and turn from a
+	/// page or pane whose mod is off. Run as the show opens, and before each
+	/// frame draws, so an undo, a reload, or an outside edit that brings a
+	/// feature back brings its UI.
+	pub(super) fn follow_mods(&mut self, say: bool) {
 		let used = uses(self.engine.state.lock().unwrap().collection());
 		let mods = &self.controls.mods;
 		let switched: Vec<&str> = used
@@ -125,7 +123,7 @@ impl Panels {
 			.inspect(|each| mods.set(*each, true))
 			.map(Mod::name)
 			.collect();
-		if !switched.is_empty() {
+		if say && !switched.is_empty() {
 			let names = switched.join(", ");
 			self.say(Ok(format!(
 				"switched on {names} in Settings, Mods, since the show uses it"
@@ -149,7 +147,7 @@ impl Panels {
 	/// One mix: the audio scene on program, holding what it plays now and
 	/// every other sound, muted, so the stream sounds as it did and no
 	/// sound is left where only MIX could reach it.
-	fn audio_off(&self, state: &mut State) -> anyhow::Result<()> {
+	fn audio_off(&self, state: &mut State, label: String) -> anyhow::Result<()> {
 		let collection = state.collection();
 		let program = collection.program_audio().context("no audio scene is on program")?;
 		let heard: BTreeSet<String> = collection.heard(program).into_iter().map(String::from).collect();
@@ -190,7 +188,7 @@ impl Panels {
 			})
 			.collect();
 		let program = program.to_string();
-		edit(state, format!("Switch off {}", Mod::Audio.name()), None, |draft| {
+		edit(state, label, None, |draft| {
 			for (index, scene) in carrying {
 				draft.set_scene(index, scene)?;
 			}
@@ -207,7 +205,7 @@ impl Panels {
 
 	/// No scene published or of its own size, no source published
 	/// independently, and no published scene's virtual camera.
-	fn published_off(&self, state: &mut State) -> anyhow::Result<()> {
+	fn published_off(&self, state: &mut State, label: String) -> anyhow::Result<()> {
 		let collection = state.collection();
 		let scenes: Vec<(usize, String)> = collection
 			.scenes
@@ -223,7 +221,7 @@ impl Panels {
 		}
 		let collection = state.collection();
 		let sources: Vec<String> = collection.published.keys().cloned().collect();
-		edit(state, format!("Switch off {}", Mod::Published.name()), None, |draft| {
+		edit(state, label, None, |draft| {
 			for (index, _) in scenes {
 				let scene = draft.collection().scenes[index].clone();
 				draft.set_scene(
@@ -245,7 +243,7 @@ impl Panels {
 
 /// Every layer set free where it is drawn now, in each picture, and kept
 /// there rather than out of the way.
-fn layout_off(state: &mut State) -> anyhow::Result<()> {
+fn layout_off(state: &mut State, label: String) -> anyhow::Result<()> {
 	let collection = state.collection();
 	let mut freed = Vec::new();
 	let mut arranged = Vec::new();
@@ -284,7 +282,7 @@ fn layout_off(state: &mut State) -> anyhow::Result<()> {
 			arranged.push(number);
 		}
 	}
-	edit(state, format!("Switch off {}", Mod::Layout.name()), None, |draft| {
+	edit(state, label, None, |draft| {
 		for (layer, index, item) in freed {
 			draft.set_item(&layer, index, item)?;
 		}

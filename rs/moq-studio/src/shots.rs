@@ -160,6 +160,8 @@ enum View {
 	Palette(&'static str),
 	/// Settings, Mods, each switched on, as a power user has it.
 	ModsOn,
+	/// Settings, Mods, scrolled to the row of this name.
+	ModsAt(&'static str),
 }
 
 /// The studio on the dual-format views' show, at the mock-ups' size, turned
@@ -352,7 +354,7 @@ views! {
 	build_off_air: Still, studio(View::OffAir("Break"));
 	/// A scene that cannot go on air opens off air too, its Take it live
 	/// dimmed, saying why under the pointer.
-	build_off_air_refused: Still, studio(View::OffAir("Vertical"));
+	build_off_air_refused: Still, Open::Studio { view: View::OffAir("Vertical"), size: SIZE, show: "published.toml", relay: false };
 	/// Too narrow for the banner beside the live picture, it goes under it.
 	build_off_air_compact: Still, Open::Studio { view: View::OffAir("Break"), size: HALF, show: "show.toml", relay: false };
 	/// A facecam keeping out of the way of a game: what matters glowing on the
@@ -481,7 +483,7 @@ views! {
 	/// Settings, Mods on a show with a source published, which switched
 	/// Published scenes on as it opened: how viewers may treat it, as a
 	/// sound alone, with no layer to inspect, sets it.
-	settings_mods_published: Still, Open::Studio { view: View::Setting(Setting::Mods), size: SIZE, show: "published.toml", relay: false };
+	settings_mods_published: Still, Open::Studio { view: View::ModsAt("Priority"), size: SIZE, show: "published.toml", relay: false };
 	/// The scene graph, in a window of its own.
 	graph: Still, studio(View::Graph);
 	/// The command palette as its key opens it: every action, each with its
@@ -1046,6 +1048,14 @@ fn the_palette_finds_and_runs_anything() {
 
 	// Each setting the palette finds by name is a row of its pane while its
 	// mod is on, and absent while off, as is a pane whose mod is off.
+	{
+		let App::Studio(studio) = &mut harness.state_mut().app else {
+			unreachable!("the studio is open")
+		};
+		for which in Mod::ALL {
+			studio.switch(which, false);
+		}
+	}
 	for all in [false, true] {
 		if all {
 			enable(&mut harness, &Mod::ALL);
@@ -1142,6 +1152,8 @@ fn settings_change_the_show_and_move_the_guests() {
 	harness.get_by_label("720p").click();
 	harness.run_steps(2);
 	assert_eq!((canvas().width, canvas().height), (1280, 720));
+	assert!(harness.query_by_label("Portrait").is_none(), "Both formats is off");
+	enable(&mut harness, &[Mod::Formats]);
 	harness.get_by_label("Portrait").click();
 	harness.run_steps(2);
 	assert_eq!((canvas().width, canvas().height), (720, 1280));
@@ -1195,6 +1207,8 @@ fn settings_change_the_show_and_move_the_guests() {
 		"{muted}"
 	);
 	// Remote, with no room to pair in, sends the host to the room's pane.
+	assert!(harness.query_by_label("Remote").is_none(), "Phone remote is off");
+	enable(&mut harness, &[Mod::Remote]);
 	harness.get_by_label("Remote").click();
 	harness.run_steps(2);
 	harness.get_by_label("Set up the room").click();
@@ -1287,12 +1301,22 @@ fn settings_change_the_show_and_move_the_guests() {
 	let saved = std::fs::read_to_string("show.stream.toml").unwrap();
 	assert!(!saved.contains("recordings"), "{saved}");
 
-	// The scene graph opens in place of Settings, so it takes the clicks.
-	harness.get_by_label("Advanced").click();
+	// The scene graph, switched on, opens in place of Settings, so it takes
+	// the clicks.
+	harness.get_by_label("Mods").click();
+	harness.run_steps(2);
+	assert!(harness.query_by_label("Open").is_none(), "Scene graph is off");
+	harness
+		.get_by_role_and_label(Role::CheckBox, "Scene graph")
+		.scroll_to_me();
+	harness.run_steps(2);
+	harness
+		.get_by_role_and_label(Role::CheckBox, "Scene graph")
+		.click_accesskit();
 	harness.run_steps(2);
 	harness.get_by_label("Open").click();
 	harness.run_steps(2);
-	assert!(harness.query_by_label("Advanced").is_none(), "Settings closed");
+	assert!(harness.query_by_label("Mods").is_none(), "Settings closed");
 	assert!(harness.query_by_label("Scene graph").is_some(), "the graph is open");
 
 	drop(harness);
@@ -1681,6 +1705,125 @@ fn studio_mode_cues_and_takes() {
 	quit(&engine, &runtime);
 }
 
+/// Switching a mod off in Settings, Mods turns its feature off as one edit,
+/// which undo takes back, switching the mod on again with it: on a show
+/// using each, on a real engine. It draws no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn a_mod_switched_off_turns_its_feature_off() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	let read = |file: &str| std::fs::read_to_string(fixture.join("shots").join(file)).unwrap();
+	// Music the stream leaves out, heard only in the headphones.
+	let mix = read("mix.toml")
+		.replacen(
+			r#"sounds = ["caller", "guest", "mic", "music"]"#,
+			r#"sounds = ["caller", "guest", "mic"]"#,
+			1,
+		)
+		.replacen(r#"sounds = ["caller"]"#, r#"sounds = ["caller", "music"]"#, 1);
+	let shows = [
+		(mix, Mod::Audio),
+		(read("slots.toml"), Mod::Layout),
+		(read("keep.toml"), Mod::Layout),
+		(read("dual.toml"), Mod::Formats),
+		(read("portrait.toml"), Mod::Formats),
+		(read("published.toml"), Mod::Published),
+	];
+	for (show, which) in shows {
+		std::fs::write("show.toml", show).unwrap();
+		let app = start(launch(&gpu), stream(None), &runtime);
+		let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, library::Recent::default());
+		harness.step();
+		let engine = started.get().expect("the studio started").clone();
+		runtime
+			.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
+			.expect("the sources and pictures settle");
+		let App::Studio(studio) = &mut harness.state_mut().app else {
+			unreachable!("the studio is open")
+		};
+		let controls = studio.controls();
+		studio.open(Setting::Mods);
+		harness.run_steps(2);
+		assert!(controls.mods.on(which), "{which:?} switched on, as the show uses it");
+		let before = engine.state.lock().unwrap().collection().clone();
+
+		harness
+			.get_by_role_and_label(Role::CheckBox, which.name())
+			.scroll_to_me();
+		harness.run_steps(2);
+		harness
+			.get_by_role_and_label(Role::CheckBox, which.name())
+			.click_accesskit();
+		harness.run_steps(4);
+		assert!(!controls.mods.on(which), "{which:?} switched off");
+		let after = engine.state.lock().unwrap().collection().clone();
+		match which {
+			Mod::Audio => {
+				let [program] = after.audio_scenes.as_slice() else {
+					panic!("one audio scene: {:?}", after.audio_scenes)
+				};
+				assert!(program.program && !program.recorded && program.scenes.is_empty());
+				let heard: Vec<&str> = before.heard(before.program_audio().unwrap()).into_iter().collect();
+				assert_eq!(heard, ["caller", "guest", "mic"]);
+				let all: Vec<&str> = program.sounds.iter().map(String::as_str).collect();
+				assert_eq!(all, ["caller", "guest", "mic", "music"], "every sound, the music too");
+				let muted = |name: &str| after.audio.get(name).is_some_and(|audio| audio.muted);
+				assert!(muted("music"), "muted, as the stream left it out");
+				assert!(
+					heard
+						.iter()
+						.all(|name| muted(name) == before.audio.get(*name).is_some_and(|a| a.muted))
+				);
+			}
+			Mod::Layout => {
+				for (scene, was) in after.scenes.iter().zip(&before.scenes) {
+					for (item, was) in scene.items.iter().zip(&was.items) {
+						assert!(
+							item.slot.is_none() && item.keep_clear.is_none(),
+							"{} set free",
+							item.source
+						);
+						if was.slot.is_some() {
+							assert!(!item.rect.is_empty(), "{} kept where it was drawn", item.source);
+						}
+					}
+				}
+			}
+			Mod::Formats => {
+				assert!(!after.portrait, "landscape only");
+				assert!(after.canvas.width > after.canvas.height, "a landscape canvas");
+			}
+			Mod::Published => {
+				assert!(after.published.is_empty(), "no source published independently");
+				assert!(
+					after
+						.scenes
+						.iter()
+						.all(|scene| !scene.published && scene.size.is_none())
+				);
+			}
+			_ => unreachable!(),
+		}
+
+		// Under Settings, the title bar's undo.
+		harness.key_press(egui::Key::Escape);
+		harness.run_steps(2);
+		harness.get_by_label_contains("Undo: Switch off").click();
+		harness.run_steps(4);
+		assert_eq!(
+			*engine.state.lock().unwrap().collection(),
+			before,
+			"undo brings it back"
+		);
+		assert!(controls.mods.on(which), "{which:?} back on with it");
+
+		drop(harness);
+		quit(&engine, &runtime);
+	}
+}
+
 /// The show's menu opens the multiview. On it, a click on
 /// a scene's tile takes it, or cues it in Studio mode, a source's menu leaves
 /// it out, and the sources' popover picks one: on a real engine. It draws no
@@ -1691,7 +1834,11 @@ fn the_multiview_takes_cues_and_picks() {
 	let (_show, runtime, gpu) = lavapipe();
 	let _entered = runtime.enter();
 	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
-	std::fs::copy(fixture.join("shots/show.toml"), "show.toml").unwrap();
+	// A scene of its own size, which the program refuses.
+	let published = std::fs::read_to_string(fixture.join("shots/published.toml")).unwrap();
+	let vertical = &published[published.find("[[scenes]]\nname = \"Vertical\"").unwrap()..];
+	let show = std::fs::read_to_string(fixture.join("shots/show.toml")).unwrap();
+	std::fs::write("show.toml", format!("{show}\n{vertical}")).unwrap();
 	let (mut harness, started, _) = window(
 		start(launch(&gpu), stream(None), &runtime),
 		&gpu,
@@ -1955,7 +2102,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		View::KeepClear { .. } => studio.build(Side::Layers, Inspect::Layer, Some(0)),
 		View::Menu | View::Published => studio.build(Side::Layers, Inspect::Layer, Some(1)),
 		View::Setting(setting) | View::OnAirSetting(setting) => studio.open(*setting),
-		View::ModsOn => studio.open(Setting::Mods),
+		View::ModsOn | View::ModsAt(_) => studio.open(Setting::Mods),
 		View::Restart | View::CustomCanvas => studio.open(Setting::Show),
 		View::GuestsFailed => studio.open(Setting::Guests),
 		View::Paired => studio.open(Setting::Remote),
@@ -2096,6 +2243,10 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		}
 		View::Published => {
 			harness.get_by_label("Priority").scroll_to_me();
+			harness.run_steps(4);
+		}
+		View::ModsAt(row) => {
+			harness.get_by_label(row).scroll_to_me();
 			harness.run_steps(4);
 		}
 		View::CustomCanvas => {

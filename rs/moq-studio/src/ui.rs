@@ -587,6 +587,8 @@ impl Studio {
 			let multiview = eframe::get_value(storage, multiview::KEY).unwrap_or_default();
 			panels.multiview.load(multiview);
 		}
+		// The show as it opens switches on what it uses without a word.
+		self.panels.follow_mods(false);
 		self.panels.keyboard = Some(window.keyboard.clone());
 		let hotkeys = Hotkeys::new(window, self.panels.controls.clone(), &self.panels.runtime, bindings);
 		self.panels.hotkeys = Some(hotkeys);
@@ -629,7 +631,7 @@ impl Studio {
 		// Everything the title bar, the strip, and the live picture show,
 		// under one short lock, so drawing them never holds the engine's
 		// state, which the program's render thread wants each frame.
-		panels.follow_mods();
+		panels.follow_mods(true);
 		let snapshot = panels.snapshot(ui.ctx(), frame);
 		if let Some(fired) = panels.controls.fired() {
 			panels.say(fired);

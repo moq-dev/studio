@@ -56,15 +56,6 @@ items = [
     { source = "bar", rect = { x = 460, y = 480, width = 1000, height = 120 } },
 ]
 
-# A scene the program refuses, at a size of its own, whose pad says why.
-[[scenes]]
-name = "Vertical"
-size = { width = 1080, height = 1920 }
-items = [
-    { source = "backdrop", rect = { x = 0, y = 0, width = 1080, height = 1920 } },
-    { source = "host", rect = { x = 0, y = 656, width = 1080, height = 608 } },
-]
-
 [[audio_scenes]]
 name = "Program"
 program = true

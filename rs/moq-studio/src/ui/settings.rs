@@ -637,7 +637,7 @@ impl Panels {
 	}
 
 	/// Send a portrait picture too, or stop, as an edit undo takes back.
-	pub(super) fn set_both(&mut self, on: bool) {
+	fn set_both(&mut self, on: bool) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		let label = match on {
