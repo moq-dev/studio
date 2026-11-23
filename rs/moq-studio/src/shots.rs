@@ -1872,6 +1872,25 @@ fn a_mod_switched_off_turns_its_feature_off() {
 		studio.open(Setting::Mods);
 		harness.run_steps(2);
 		assert!(controls.mods.on(which), "{which:?} switched on, as the show uses it");
+		if which == Mod::Layout {
+			// A frame behind a reorder, held there by the lock, where each slot
+			// is drawn is not known yet: switching off refuses rather than
+			// saving a guess.
+			let mut state = engine.state.lock().unwrap();
+			let slotted = state
+				.collection()
+				.scenes
+				.iter()
+				.find(|scene| scene.items.len() > 1 && scene.items.iter().any(|item| item.slot.is_some()));
+			if let Some(scene) = slotted.map(|scene| moq_scene::Layer::scene(&scene.name)) {
+				let mut draft = state.collection().draft("Reorder");
+				draft.move_item(&scene, 0, 1).unwrap();
+				state.commit(draft, None).unwrap();
+				let err = crate::ui::layout_off(&mut state, "Switch off".into()).unwrap_err();
+				assert!(err.to_string().contains("still settling"), "{err:#}");
+				state.undo().unwrap();
+			}
+		}
 		let before = engine.state.lock().unwrap().collection().clone();
 
 		harness

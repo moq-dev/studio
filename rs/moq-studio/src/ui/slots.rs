@@ -88,7 +88,7 @@ pub(super) fn closed(state: &State, layer: &Layer, index: usize) -> bool {
 
 /// The layer at `index` of `layer` as `format`'s picture arranges it now,
 /// once the compositor has arranged its scene.
-fn arranged<'a>(state: &'a State, layer: &Layer, index: usize, format: Format) -> Option<&'a Item> {
+pub(super) fn arranged<'a>(state: &'a State, layer: &Layer, index: usize, format: Format) -> Option<&'a Item> {
 	let collection = state.collection();
 	let format = collection.format_of(layer, format);
 	rendered(state, layer.scene.as_deref(), format, collection.items(layer)?)?.get(index)

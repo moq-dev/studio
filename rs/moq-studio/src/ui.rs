@@ -56,6 +56,8 @@ pub(crate) use layout::fit;
 use levels::Levels;
 #[cfg(test)]
 pub(crate) use mixer::View as MixView;
+#[cfg(test)]
+pub(crate) use mods::layout_off;
 pub(crate) use shell::dashed;
 
 /// The smallest the window gets, at which every part still has room.

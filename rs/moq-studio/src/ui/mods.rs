@@ -269,7 +269,7 @@ fn published_off(state: &mut State, label: String) -> anyhow::Result<()> {
 
 /// Every layer set free where it is drawn now, in each picture, and kept
 /// there rather than out of the way.
-fn layout_off(state: &mut State, label: String) -> anyhow::Result<()> {
+pub(crate) fn layout_off(state: &mut State, label: String) -> anyhow::Result<()> {
 	let collection = state.collection();
 	let mut freed = Vec::new();
 	let mut arranged = Vec::new();
@@ -280,13 +280,22 @@ fn layout_off(state: &mut State, label: String) -> anyhow::Result<()> {
 			let (rect, crop, portrait) = match (item.slot, item.keep_clear) {
 				(None, None) => continue,
 				(Some(_), _) => {
-					let drawn =
-						|format| super::slots::drawn(state, &layer, index, format).unwrap_or((item.rect, item.crop));
-					let (rect, crop) = drawn(Format::Landscape);
-					let portrait = (dual && item.shown_in(Format::Portrait)).then(|| {
-						let (rect, crop) = drawn(Format::Portrait);
-						Placement { rect, crop }
-					});
+					let drawn = |format| {
+						// A frame behind an edit, where the slot is drawn is not
+						// known yet, and a guess would be saved.
+						anyhow::ensure!(
+							super::slots::arranged(state, &layer, index, format).is_some(),
+							"the layout is still settling; switch {} off again",
+							Mod::Layout.name()
+						);
+						let (rect, crop) =
+							super::slots::drawn(state, &layer, index, format).unwrap_or((item.rect, item.crop));
+						Ok(Placement { rect, crop })
+					};
+					let Placement { rect, crop } = drawn(Format::Landscape)?;
+					let portrait = (dual && item.shown_in(Format::Portrait))
+						.then(|| drawn(Format::Portrait))
+						.transpose()?;
 					(rect, crop, portrait)
 				}
 				// Keeping clear moves only the landscape picture, so the
