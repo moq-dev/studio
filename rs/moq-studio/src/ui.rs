@@ -399,6 +399,75 @@ impl Studio {
 		&self.panels.engine
 	}
 
+	/// What `--control` reports of the studio: the page, what is on program
+	/// and cued, the selected layer, each source's status and level, whether
+	/// it is on air or recording, and the show's whole scene document.
+	pub fn describe(&self) -> serde_json::Value {
+		let panels = &self.panels;
+		let state = panels.engine.state.lock().unwrap();
+		let collection = state.collection();
+		let status = |status: Status| match status {
+			Status::Starting => "starting".to_string(),
+			Status::Live => "live".to_string(),
+			Status::Offline => "offline".to_string(),
+			Status::Failed(why) => format!("failed: {why}"),
+			Status::Ended => "ended".to_string(),
+			other => format!("{other:?}").to_lowercase(),
+		};
+		let sources: BTreeMap<&str, serde_json::Value> = state
+			.sources
+			.iter()
+			.map(|(name, feed)| {
+				let peak = levels::latest(panels.levels.sound(name)).peak();
+				let value = serde_json::json!({
+					"status": status(feed.status()),
+					"track": feed.track().map(status),
+					"peak_db": (peak > 0.0).then(|| decibels(peak)),
+				});
+				(name, value)
+			})
+			.collect();
+		// As a view settles: a replay source's track starts only with its
+		// first replay.
+		let starting: Vec<&str> = state
+			.sources
+			.iter()
+			.filter(|(_, feed)| {
+				matches!(feed.status(), Status::Starting)
+					|| (!matches!(feed.source(), Source::Replay) && matches!(feed.track(), Some(Status::Starting)))
+			})
+			.map(|(name, _)| name)
+			.collect();
+		let selection = panels.selection.as_ref().and_then(|picked| {
+			let item = picked.item(collection)?;
+			Some(serde_json::json!({
+				"scene": picked.layer.scene,
+				"index": picked.index,
+				"source": item.source,
+			}))
+		});
+		let on_air = match panels.engine.on_air() {
+			crate::engine::OnAir::Off => "off",
+			crate::engine::OnAir::Starting => "starting",
+			crate::engine::OnAir::Live(_) => "live",
+			crate::engine::OnAir::Ending => "ending",
+		};
+		let recording = panels.engine.recorder.status().is_some_and(|status| !status.done);
+		serde_json::json!({
+			"page": panels.page.name(),
+			"program": state.compositor.program_scene(),
+			"cued": state.cued(),
+			"selection": selection,
+			"on_air": on_air,
+			"recording": recording,
+			"sources": sources,
+			"starting": starting,
+			"frames": panels.engine.stats.rendered.load(Ordering::Relaxed),
+			"framerate": state.compositor.canvas().framerate,
+			"show": collection,
+		})
+	}
+
 	/// Claim the show for closing against a go-live, which a hotkey could
 	/// start after an off-air check alone.
 	pub fn reserve_close(&self) -> anyhow::Result<()> {
@@ -1153,8 +1222,13 @@ impl Panels {
 		if ctx.input_mut(|input| input.consume_shortcut(&palette::OPEN)) {
 			self.toggle_palette();
 		}
-		// egui pastes only text, so a paste it does not report may be a picture.
-		let pressed = self.keyboard.as_ref().is_some_and(hotkeys::Keyboard::pasted);
+		// egui pastes only text, so a paste it does not report may be a picture;
+		// one asked of the window waits for its text as a menu's Paste does.
+		let pasted = self.keyboard.as_ref().and_then(hotkeys::Keyboard::pasted);
+		if pasted == Some(hotkeys::Pasted::Asked) {
+			self.dropping.paste_asked(ctx.pointer_latest_pos());
+		}
+		let pressed = pasted == Some(hotkeys::Pasted::Read);
 		let text = ctx.input(|input| input.events.iter().any(|event| matches!(event, egui::Event::Paste(_))));
 		let menu = self.dropping.menu_pasted(ctx, text);
 		// A focused text field, or a page the picture passes the keyboard to,
@@ -2550,6 +2624,31 @@ impl View {
 				let handle = egui::Rect::from_center_size(egui::pos2(x, y), size);
 				let edge = egui::Stroke::new(1.0, Color32::WHITE);
 				painter.rect(handle, 1.0, color, edge, egui::StrokeKind::Outside);
+				// Painted, not a widget: the picture takes the drag. Named in the
+				// tree so a screen reader, or `--control`, can find it.
+				let side = |at: f32, low: f32, high: f32, names: [&'static str; 2]| match at {
+					_ if at == low => Some(names[0]),
+					_ if at == high => Some(names[1]),
+					_ => None,
+				};
+				let place = [
+					side(y, rect.top(), rect.bottom(), ["top", "bottom"]),
+					side(x, rect.left(), rect.right(), ["left", "right"]),
+				];
+				let place: Vec<&str> = place.into_iter().flatten().collect();
+				let verb = if cropping { "Crop" } else { "Resize" };
+				let name = format!("{verb} the layer from the {}", place.join(" "));
+				painter
+					.ctx()
+					.accesskit_node_builder(egui::Id::new(("handle", verb, &name)), |node| {
+						node.set_label(name.as_str());
+						node.set_bounds(egui::accesskit::Rect {
+							x0: handle.min.x.into(),
+							y0: handle.min.y.into(),
+							x1: handle.max.x.into(),
+							y1: handle.max.y.into(),
+						});
+					});
 			}
 		}
 	}
@@ -2830,10 +2929,10 @@ impl AddSource {
 		}
 		let mut add = false;
 		egui::Grid::new("add source").show(ui, |ui| {
-			ui.label("Name");
-			ui.text_edit_singleline(&mut self.name);
+			let label = ui.label("Name");
+			ui.text_edit_singleline(&mut self.name).labelled_by(label.id);
 			ui.end_row();
-			ui.label("Kind");
+			let label = ui.label("Kind");
 			egui::ComboBox::from_id_salt("kind")
 				.selected_text(self.kind.label())
 				.show_ui(ui, |ui| {
@@ -2844,29 +2943,33 @@ impl AddSource {
 					for kind in Kind::ALL.into_iter().filter(picker).filter(on) {
 						ui.selectable_value(&mut self.kind, kind, kind.label());
 					}
-				});
+				})
+				.response
+				.labelled_by(label.id);
 			ui.end_row();
 			if let Some(label) = self.kind.value() {
-				ui.label(label);
-				if self.kind == Kind::Overlay {
-					ui.add(egui::TextEdit::multiline(&mut self.value).code_editor());
+				let label = ui.label(label);
+				let response = if self.kind == Kind::Overlay {
+					ui.add(egui::TextEdit::multiline(&mut self.value).code_editor())
 				} else {
-					ui.text_edit_singleline(&mut self.value);
-				}
+					ui.text_edit_singleline(&mut self.value)
+				};
+				response.labelled_by(label.id);
 				ui.end_row();
 			}
 			if matches!(self.kind, Kind::Browser | Kind::Overlay) {
 				ui.label("Size");
 				ui.horizontal(|ui| {
-					ui.add(egui::DragValue::new(&mut self.width).range(1..=4096));
+					kit::named(ui.add(egui::DragValue::new(&mut self.width).range(1..=4096)), "Width");
 					ui.label("x");
-					ui.add(egui::DragValue::new(&mut self.height).range(1..=4096));
+					kit::named(ui.add(egui::DragValue::new(&mut self.height).range(1..=4096)), "Height");
 				});
 				ui.end_row();
 			}
 			if self.kind == Kind::Color {
-				ui.label("Color");
-				egui::color_picker::color_edit_button_srgba(ui, &mut self.color, egui::color_picker::Alpha::OnlyBlend);
+				let label = ui.label("Color");
+				egui::color_picker::color_edit_button_srgba(ui, &mut self.color, egui::color_picker::Alpha::OnlyBlend)
+					.labelled_by(label.id);
 				ui.end_row();
 			}
 			if self.kind == Kind::Scene {
@@ -2874,7 +2977,7 @@ impl AddSource {
 				if self.scene.as_ref().is_some_and(|scene| !scenes.contains(scene)) {
 					self.scene = None;
 				}
-				ui.label("Draws");
+				let label = ui.label("Draws");
 				egui::ComboBox::from_id_salt("scene")
 					.selected_text(self.scene.as_deref().unwrap_or("Program"))
 					.show_ui(ui, |ui| {
@@ -2883,7 +2986,9 @@ impl AddSource {
 						for scene in scenes {
 							ui.selectable_value(&mut self.scene, Some(scene.clone()), scene);
 						}
-					});
+					})
+					.response
+					.labelled_by(label.id);
 				ui.end_row();
 			}
 			if self.kind == Kind::Overlay {

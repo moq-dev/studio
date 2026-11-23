@@ -15,6 +15,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
 mod autosave;
+mod control;
 mod controls;
 mod devices;
 mod engine;
@@ -106,6 +107,17 @@ pub struct Config {
 	#[usage(flatten)]
 	pub quic: moq_tokio::quic::Config,
 
+	/// Take requests that drive the window, as `moq-studio ctl` sends them,
+	/// on a Unix socket made at this path, for this user alone. Off unless
+	/// given.
+	#[usage(long, value_hint = usage_rs::ValueHint::FilePath)]
+	pub control: Option<PathBuf>,
+
+	/// Run with no window, drawn off-screen and driven only through
+	/// `--control`, until `moq-studio ctl quit`.
+	#[usage(long)]
+	pub headless: bool,
+
 	/// The log configuration.
 	#[usage(flatten)]
 	pub log: moq_tokio::Log,
@@ -128,6 +140,19 @@ impl Config {
 		anyhow::ensure!(
 			self.guests.room.is_none(),
 			"--watch publishes nothing, so it has no --room"
+		);
+		anyhow::ensure!(
+			self.control.is_none() && !self.headless,
+			"--watch plays in a window of its own, which takes no --control or --headless"
+		);
+		Ok(())
+	}
+
+	/// Refuse `--headless` without a socket to drive it through.
+	fn check_control(&self) -> anyhow::Result<()> {
+		anyhow::ensure!(
+			!self.headless || self.control.is_some(),
+			"--headless has no window, so it needs --control to be driven"
 		);
 		Ok(())
 	}
@@ -176,10 +201,17 @@ fn main() -> anyhow::Result<ExitCode> {
 		return Ok(code);
 	}
 
+	// A show file called `ctl` is opened as `./ctl`.
+	if std::env::args_os().nth(1).is_some_and(|arg| arg == "ctl") {
+		control::ctl()?;
+		return Ok(ExitCode::SUCCESS);
+	}
+
 	let config = Config::parse();
 	config.log.init()?;
 	config.check_deprecated()?;
 	config.check_watch()?;
+	config.check_control()?;
 	if let Some(url) = config.watch.clone() {
 		let broadcast = config.broadcast.as_deref().unwrap_or(stream::BROADCAST);
 		watch::run(config.client.clone(), config.quic.clone(), url, broadcast)?;
@@ -189,6 +221,8 @@ fn main() -> anyhow::Result<ExitCode> {
 	let runtime = tokio::runtime::Runtime::new()?;
 	// The QUIC client binds its socket on the current runtime.
 	let _runtime = runtime.enter();
+	// Before anything opens, so a socket in use fails the launch.
+	let socket = config.control.as_deref().map(control::Socket::bind).transpose()?;
 	let gpu = pollster::block_on(engine::Gpu::new(wgpu::Backends::all()))?;
 	let opener = show::Opener {
 		gpu: gpu.clone(),
@@ -198,7 +232,12 @@ fn main() -> anyhow::Result<ExitCode> {
 		quic: config.quic.clone(),
 		credentials: stream::Credentials::system(),
 	};
-	run(config.scenes.clone(), opener)?;
+	if config.headless {
+		let socket = socket.expect("--headless is checked to have --control");
+		control::headless::run(config.scenes.clone(), opener, socket)?;
+		return Ok(ExitCode::SUCCESS);
+	}
+	run(config.scenes.clone(), opener, socket)?;
 	Ok(ExitCode::SUCCESS)
 }
 
@@ -303,6 +342,8 @@ struct Window {
 	failed: Arc<Mutex<Option<anyhow::Error>>>,
 	/// Set once the window is asked to close, as [`Events::closed`] is.
 	closed: Arc<AtomicBool>,
+	/// The control socket's window side, with `--control`.
+	control: Option<control::Control>,
 }
 
 impl eframe::App for Window {
@@ -315,6 +356,9 @@ impl eframe::App for Window {
 		self.follow_air();
 		if let App::Studio(studio) = &mut self.app {
 			studio.logic(ctx, frame);
+		}
+		if let Some(control) = &self.control {
+			control.logic(ctx, || self.describe());
 		}
 	}
 
@@ -343,6 +387,17 @@ impl eframe::App for Window {
 }
 
 impl Window {
+	/// What `--control` reports of the window: which page of the app it
+	/// shows, and the studio's state once a show is open.
+	fn describe(&self) -> serde_json::Value {
+		match &self.app {
+			App::Opening(opening) => serde_json::json!({ "app": "opening", "show": opening.name }),
+			App::Starting(..) | App::Moving => serde_json::json!({ "app": "starting" }),
+			App::Studio(studio) => serde_json::json!({ "app": "studio", "studio": studio.describe() }),
+			App::Closing => serde_json::json!({ "app": "closing" }),
+		}
+	}
+
 	/// Draw the show opening or the studio, building the studio once its
 	/// engine starts.
 	fn show(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -686,10 +741,26 @@ fn icon() -> egui::IconData {
 	}
 }
 
+/// What a launch opens, and what to open instead if it cannot be: the show
+/// at `scenes`, created if it is not there, and the only one; else the
+/// newest show in `recent` still there, or the last one saved in `shows`,
+/// with a new show if it cannot be opened; else a new show.
+fn first(scenes: Option<PathBuf>, recent: &recent::Recent, shows: Option<&Path>) -> (Target, Option<Target>) {
+	let last = recent
+		.last()
+		.map(Path::to_path_buf)
+		.or_else(|| shows.and_then(show::latest));
+	match (scenes, last) {
+		(Some(scenes), _) => (Target::Create(scenes), None),
+		(None, Some(last)) => (Target::Open(last), Some(Target::New)),
+		(None, None) => (Target::New, None),
+	}
+}
+
 /// Show the window on the show at `scenes`, created if it is not there, or
-/// else on the last show opened or a new one, until it is closed, then end
-/// the studio.
-fn run(scenes: Option<PathBuf>, opener: show::Opener) -> anyhow::Result<()> {
+/// else on the last show opened or a new one, serving `socket` if given,
+/// until it is closed, then end the studio.
+fn run(scenes: Option<PathBuf>, opener: show::Opener, socket: Option<control::Socket>) -> anyhow::Result<()> {
 	let started = Arc::<Started>::default();
 	let viewport = egui::ViewportBuilder::default()
 		.with_title("kixel.live Studio")
@@ -749,19 +820,9 @@ fn run(scenes: Option<PathBuf>, opener: show::Opener) -> anyhow::Result<()> {
 			kit::install(&cc.egui_ctx);
 			let fx = fx::Fx::new(&render, &cc.egui_ctx, &opener.runtime);
 			let recent = recent::Recent::load(cc.storage);
-			// The newest listed show still there is reopened, else the last one
-			// saved in app data, and a new one made if there is none or it cannot
-			// be opened; a show named on the command line is the only one.
 			let shows = show::dir();
-			let last = recent
-				.last()
-				.map(Path::to_path_buf)
-				.or_else(|| shows.as_deref().and_then(show::latest));
-			let (target, instead) = match (scenes, last) {
-				(Some(scenes), _) => (Target::Create(scenes), None),
-				(None, Some(last)) => (Target::Open(last), Some(Target::New)),
-				(None, None) => (Target::New, None),
-			};
+			let (target, instead) = first(scenes, &recent, shows.as_deref());
+			let control = socket.map(|socket| socket.serve(&cc.egui_ctx, &opener.runtime, window_keyboard.clone()));
 			let mut window = Window {
 				app: App::Moving,
 				render,
@@ -775,6 +836,7 @@ fn run(scenes: Option<PathBuf>, opener: show::Opener) -> anyhow::Result<()> {
 				notice: None,
 				failed: window_failed,
 				closed: window_closed,
+				control,
 			};
 			window.open(target, instead);
 			Ok(Box::new(window))

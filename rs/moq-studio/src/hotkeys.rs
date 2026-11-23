@@ -134,8 +134,17 @@ struct Pressing {
 	/// The modifiers held now, as egui names them.
 	modifiers: egui::Modifiers,
 	taking: Taking,
-	/// Whether a paste reached egui since [`Keyboard::pasted`] last said so.
-	pasted: bool,
+	/// The latest paste to reach egui since [`Keyboard::pasted`] last said so.
+	pasted: Option<Pasted>,
+}
+
+/// How a paste pressed in the studio's window reads the clipboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pasted {
+	/// Read with the key, so egui reports any text on the same frame.
+	Read,
+	/// Asked of the window, which reports any text on a later frame.
+	Asked,
 }
 
 /// What a key pressed in the window does besides reaching egui.
@@ -154,6 +163,14 @@ enum Taking {
 		bound: Arc<Mutex<Bindings>>,
 		fire: mpsc::Sender<Binding>,
 		typing: bool,
+	},
+	/// The platform hears bound keys itself, wherever they are pressed, and
+	/// fires them, so the window's own presses reach egui. One pressed for the
+	/// window by `--control` rather than the desktop fires as the platform's
+	/// would.
+	Global {
+		bound: Arc<Mutex<Bindings>>,
+		fire: mpsc::Sender<Binding>,
 	},
 }
 
@@ -180,14 +197,41 @@ impl Keyboard {
 		// A paste lands in the studio's window, never from the multiview's.
 		let paste = studio && !repeat && paste(pressing.modifiers, key, &name);
 		let heard = Self::hear(&mut pressing, key, name, repeat, studio);
-		pressing.pasted |= heard && paste;
+		if heard && paste {
+			pressing.pasted = Some(Pasted::Read);
+		}
 		heard
 	}
 
-	/// Whether a paste was pressed since this last said so, which egui reports
-	/// only when the clipboard holds text.
-	pub fn pasted(&self) -> bool {
-		std::mem::take(&mut self.0.lock().unwrap().pasted)
+	/// Hear `key`, where the layout puts `name`, pressed in the studio's window
+	/// by `--control` rather than the desktop, returning whether egui hears it
+	/// too: as [`pressed`](Self::pressed), but a bound key fires even where
+	/// the platform would have fired it before the window heard it.
+	pub fn injected(&self, key: PhysicalKey, name: Key) -> bool {
+		let mut pressing = self.0.lock().unwrap();
+		let paste = paste(pressing.modifiers, key, &name);
+		let heard = match &pressing.taking {
+			Taking::Global { bound, fire } => {
+				let pressed = Binding {
+					modifiers: pressing.modifiers,
+					key,
+					name,
+				};
+				!fired(bound, fire, pressed, false)
+			}
+			_ => Self::hear(&mut pressing, key, name, false, true),
+		};
+		// `--control` asks the window for the clipboard's text.
+		if heard && paste {
+			pressing.pasted = Some(Pasted::Asked);
+		}
+		heard
+	}
+
+	/// How the latest paste pressed since this last said so reads the
+	/// clipboard, whose text egui reports only when there is some.
+	pub fn pasted(&self) -> Option<Pasted> {
+		self.0.lock().unwrap().pasted.take()
 	}
 
 	fn hear(pressing: &mut Pressing, key: PhysicalKey, name: Key, repeat: bool, studio: bool) -> bool {
@@ -197,7 +241,7 @@ impl Keyboard {
 			name,
 		};
 		match &mut pressing.taking {
-			Taking::Nothing => true,
+			Taking::Nothing | Taking::Global { .. } => true,
 			// A modifier is held with the key it waits for.
 			Taking::Binding(_) if modifier(key) => true,
 			Taking::Binding(taken) => {
@@ -207,22 +251,25 @@ impl Keyboard {
 				false
 			}
 			Taking::Firing { typing: true, .. } if studio => true,
-			Taking::Firing { bound, fire, .. } => {
-				if !bound.lock().unwrap().values().any(|bound| bound.same(&pressed)) {
-					return true;
-				}
-				// A held key fires once, and its repeats are taken too.
-				if !repeat {
-					let _ = fire.send(pressed);
-				}
-				false
-			}
+			Taking::Firing { bound, fire, .. } => !fired(bound, fire, pressed, repeat),
 		}
 	}
 
 	fn take(&self, taking: Taking) {
 		self.0.lock().unwrap().taking = taking;
 	}
+}
+
+/// Fire `pressed` if it is bound, returning whether it was, so nothing else
+/// hears it. A held key fires once, and its repeats are taken too.
+fn fired(bound: &Mutex<Bindings>, fire: &mpsc::Sender<Binding>, pressed: Binding, repeat: bool) -> bool {
+	if !bound.lock().unwrap().values().any(|bound| bound.same(&pressed)) {
+		return false;
+	}
+	if !repeat {
+		let _ = fire.send(pressed);
+	}
+	true
 }
 
 /// Whether `key`, where the layout puts `name`, held with `modifiers`
@@ -528,14 +575,10 @@ impl Hotkeys {
 		if self.suspended.load(Ordering::Relaxed) {
 			return;
 		}
-		let firing = matches!(self.reach(), Reach::Focused(_));
-		self.keyboard.take(match firing {
-			true => Taking::Firing {
-				bound: self.live.clone(),
-				fire: self.fire.clone(),
-				typing,
-			},
-			false => Taking::Nothing,
+		let (bound, fire) = (self.live.clone(), self.fire.clone());
+		self.keyboard.take(match self.reach() {
+			Reach::Focused(_) => Taking::Firing { bound, fire, typing },
+			_ => Taking::Global { bound, fire },
 		});
 	}
 }
@@ -725,9 +768,12 @@ mod tests {
 			)
 		};
 		assert!(paste(false));
-		assert!(!keyboard.pasted(), "the multiview pasted");
+		assert_eq!(keyboard.pasted(), None, "the multiview pasted");
 		assert!(paste(true));
-		assert!(keyboard.pasted(), "the studio's window pasted");
+		assert_eq!(keyboard.pasted(), Some(Pasted::Read), "the studio's window pasted");
+		let v = (PhysicalKey::Code(KeyCode::KeyV), Key::Character("v".into()));
+		assert!(keyboard.injected(v.0, v.1));
+		assert_eq!(keyboard.pasted(), Some(Pasted::Asked), "--control asked the window");
 	}
 
 	/// Typing into the studio's window holds its keys back, not those the
@@ -757,6 +803,28 @@ mod tests {
 		assert_eq!(fired.try_iter().count(), 0);
 		assert!(!press(false), "fired in the multiview");
 		assert_eq!(fired.try_iter().count(), 1);
+	}
+
+	/// Where the platform hears bound keys, the window's own presses of them
+	/// reach egui, while one `--control` presses fires as the platform's would.
+	#[test]
+	fn an_injected_key_fires_where_the_platform_hears_keys() {
+		let keyboard = Keyboard::default();
+		let (fire, fired) = mpsc::channel();
+		let bound = Arc::new(Mutex::new(Bindings::from([(Action::Panic, key(KeyCode::F9, "F9"))])));
+		keyboard.take(Taking::Global { bound, fire });
+		let f9 = || (PhysicalKey::Code(KeyCode::F9), Key::Named(NamedKey::F9));
+		let (code, name) = f9();
+		assert!(
+			keyboard.pressed(code, name, false, true),
+			"the desktop's press reached egui"
+		);
+		assert_eq!(fired.try_iter().count(), 0);
+		let (code, name) = f9();
+		assert!(!keyboard.injected(code, name), "the injected press fired instead");
+		assert_eq!(fired.try_iter().count(), 1);
+		let unbound = keyboard.injected(PhysicalKey::Code(KeyCode::F8), Key::Named(NamedKey::F8));
+		assert!(unbound, "an unbound key reaches egui");
 	}
 
 	#[test]

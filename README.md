@@ -94,6 +94,9 @@ cargo run --release -p moq-studio --features capture,openh264
   [moq-cli's](https://doc.moq.dev/bin/cli); see `moq-studio --help`.
 - `moq-studio --watch <url>` opens no scene file and plays a studio broadcast
   instead, as a viewer sees it; see [Watching](#watching).
+- `moq-studio --control <socket>` lets a script or an AI agent drive the
+  window, and `--headless` runs it with no window at all; see
+  [Driving the studio](#driving-the-studio).
 
 ## First launch
 
@@ -2247,6 +2250,62 @@ cannot be added as a source of the picture it shows.
   extension's cameras, so the studio run from a build outside the app has no
   virtual camera.
 - **Windows:** not available yet.
+
+## Driving the studio
+
+`moq-studio --control <socket> show.toml` opens the studio as usual and also
+listens on a Unix socket at that path, so a script or an AI agent can see the
+window and use it as you would. The socket is yours alone: the studio makes
+it readable and writable only by you, answers only processes running as you,
+refuses a path where another file or a running studio already is, and removes
+the socket when it exits. It never listens on the network, and without
+`--control` it does not listen at all. Add `--headless` to run the studio
+with no window, drawing off-screen on the GPU at 1440x900, for CI or a
+machine with no display. Its clipboard text is its own: what it copies, it
+pastes, and the desktop's clipboard text is neither read nor replaced.
+
+`moq-studio ctl --socket <socket> <command>` sends one command and prints the
+answer:
+
+- `snapshot` prints the window's accessibility tree, each widget with its
+  name, role, value, and bounds, and the studio's state: the page, the
+  program, the selection, each source's status, and the whole show.
+- `screenshot <file.png>` saves what the window shows.
+- `click`, `right-click`, `double-click`, and `hover` act on a target, and
+  `drag <from> <to>` presses on one and lets go on another.
+- `scroll <target> --dy <points>` scrolls what is under it, down for a
+  positive `dy`, and `--dx` sideways.
+- `type <text>` types into the focused field, and `key <combo>` presses a
+  key, such as `Enter`, `Escape`, or `ctrl+z`, as the keyboard would: a
+  bound hotkey fires, Settings > Hotkeys binds it, and `ctrl+c`, `ctrl+x`,
+  and `ctrl+v` copy, cut, and paste.
+- `wait` blocks until `--shown <target>` is in the window, `--gone <target>`
+  is not, `--settled` (every source started and drawing), or
+  `--state '<JSON pointer>=<JSON>'`, such as `--state
+  '/studio/page="Mix"'`, failing after `--timeout` (10s by default).
+- `quit` closes the studio, as its Close button does.
+
+A target is a widget's name as `snapshot` lists it, such as `"Add source"`
+or `"tone fader"`; `contains:<text>` for a name holding the text; `id:<n>`
+for a node ID from the same layout; or `at:<x>,<y>` for a point in logical
+pixels. A click that matches no widget, several, or a disabled one fails and
+says so, and a widget scrolled out of view is scrolled in first. Commands act
+on the studio's own window, never the multiview's. A minimized window draws
+nothing to act on, so every command but `quit` fails until it shows again.
+For example:
+
+```bash
+moq-studio --headless --control studio.sock show.toml &
+moq-studio ctl --socket studio.sock click Build
+moq-studio ctl --socket studio.sock click Add
+moq-studio ctl --socket studio.sock wait --settled
+moq-studio ctl --socket studio.sock screenshot build.png
+moq-studio ctl --socket studio.sock quit
+```
+
+To watch the real window's frame times with no display, run it under
+`WLR_BACKENDS=headless sway`; the dev shell has `sway`, and `grim` for its
+screenshots.
 
 ## Development
 

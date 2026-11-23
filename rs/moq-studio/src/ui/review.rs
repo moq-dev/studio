@@ -813,6 +813,7 @@ impl Panels {
 			ui.id().with("past strip"),
 			Sense::click_and_drag(),
 		);
+		response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "Replay strip"));
 		let pointer = response.interact_pointer_pos().or(response.hover_pos());
 		if let Some(pointer) = pointer {
 			let over = grip_at(pointer.x, from_x, to_x);
