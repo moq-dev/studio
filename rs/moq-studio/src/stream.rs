@@ -213,8 +213,8 @@ impl Stream {
 			}
 		}
 		let text = toml::to_string(&saved).context("cannot write the stream settings")?;
-		// On disk before it replaces the old file, and the replacing synced, so
-		// a crash leaves one or the other whole, as a scene save does.
+		// On disk before it replaces the old file, as a scene save is, so a
+		// crash leaves one or the other whole; an error leaves the old one.
 		crate::autosave::write_file(&self.path, &text).with_context(|| format!("writing {}", self.path.display()))?;
 		self.saved = saved;
 		Ok(())

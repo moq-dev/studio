@@ -601,11 +601,16 @@ fn write(
 }
 
 /// Write `text` to the file at `path` whole, as a save does: through any
-/// symlinks there, keeping the permissions of a file it replaces.
+/// symlinks there, keeping the permissions of a file it replaces. An error
+/// means the old file is still there; once the new one replaces it, a folder
+/// that cannot be synced is only logged, since what is on disk is the new
+/// text either way.
 pub(crate) fn write_file(path: &Path, text: &str) -> std::io::Result<()> {
 	// Only a new file, or one found changed, is left as it is.
-	if let Some(dir) = write(path, text, false, || Ok(true))? {
-		sync(&dir)?;
+	if let Some(dir) = write(path, text, false, || Ok(true))?
+		&& let Err(err) = sync(&dir)
+	{
+		tracing::warn!(%err, dir = %dir.display(), "cannot sync a folder after writing into it");
 	}
 	Ok(())
 }
