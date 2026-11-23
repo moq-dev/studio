@@ -262,13 +262,13 @@ fn first<'a>(devices: &'a [Pick], own: &[String]) -> Option<&'a Pick> {
 		.find(|pick| !matches!(&pick.source, Source::Camera { id: Some(id) } if own.contains(id)))
 }
 
-/// The display the Screen card adds: the first listed, or on macOS, the main
-/// display when none is, since listing them needs the Screen Recording access
-/// that only opening one asks for.
+/// The display the Screen card adds: the first listed, or on macOS with
+/// capture, the main display when none is, since listing them needs the
+/// Screen Recording access that only opening one asks for.
 fn display(displays: &Result<Vec<Pick>, String>) -> Option<Pick> {
 	let listed = displays.as_ref().ok().and_then(|displays| displays.first()).cloned();
 	listed.or_else(|| {
-		cfg!(target_os = "macos").then(|| Pick {
+		cfg!(all(target_os = "macos", feature = "capture")).then(|| Pick {
 			name: "Display".into(),
 			source: Source::Display { id: None },
 		})

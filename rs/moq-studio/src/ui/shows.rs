@@ -36,12 +36,17 @@ pub(super) enum Dialog {
 impl Panels {
 	/// The Show menu's shows, under the open show's file: the other recent
 	/// ones, then New show, Open show file, Rename, and Export a copy. Only
-	/// the export works on air, since the rest close the show.
+	/// the export works on air, since the rest close the show, which they
+	/// also wait to do while a copy is written.
 	pub(super) fn show_list(&mut self, ui: &mut Ui) {
-		let off = matches!(self.engine.on_air(), crate::engine::OnAir::Off) && !self.controls.going();
-		let why = |response: egui::Response| match off {
-			true => response,
-			false => kit::tip(response, "End the stream first", None),
+		let aired = !matches!(self.engine.on_air(), crate::engine::OnAir::Off) || self.controls.going();
+		// Its result is this show's to report, which closing it would lose.
+		let exporting = matches!(self.show_dialog, Some(Dialog::Exporting(_)));
+		let off = !aired && !exporting;
+		let why = |response: egui::Response| match (aired, exporting) {
+			(true, _) => kit::tip(response, "End the stream first", None),
+			(false, true) => kit::tip(response, "Wait for the copy to be written", None),
+			(false, false) => response,
 		};
 		let now = recent::now();
 		let mut leave = None;
