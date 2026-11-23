@@ -1,6 +1,6 @@
 //! The shows this user has opened, newest first, kept per user in the app's
-//! storage rather than beside any show. The window reopens the first on
-//! launch, and the title bar's Show menu lists them.
+//! storage rather than beside any show. The window reopens the first still
+//! there on launch, and the title bar's Show menu lists them.
 
 use std::path::{Path, PathBuf};
 

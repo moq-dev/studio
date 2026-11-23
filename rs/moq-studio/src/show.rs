@@ -151,6 +151,24 @@ pub fn new_path(dir: &Path) -> anyhow::Result<PathBuf> {
 	unreachable!("a free name")
 }
 
+/// The show in `dir` whose scene file was written last, for a launch whose
+/// recent list lost track of it, such as one after a crash before the list
+/// was saved.
+pub fn latest(dir: &Path) -> Option<PathBuf> {
+	let entries = std::fs::read_dir(dir).ok()?;
+	let scenes = entries.filter_map(|entry| {
+		let entry = entry.ok()?;
+		let name = entry.file_name().into_string().ok()?;
+		let sibling = name.ends_with(".history.toml") || name.ends_with(".stream.toml");
+		if !name.ends_with(".toml") || sibling {
+			return None;
+		}
+		let written = entry.metadata().ok()?.modified().ok()?;
+		Some((written, entry.path()))
+	});
+	scenes.max().map(|(_, path)| path)
+}
+
 /// The files a show keeps at `path`: its scene file, then the history and
 /// the stream settings beside it.
 fn files(path: &Path) -> [PathBuf; 3] {
@@ -285,6 +303,27 @@ mod tests {
 		std::fs::write(shows.join("My Show.toml"), "").unwrap();
 		std::fs::write(shows.join("My Show 2.stream.toml"), "").unwrap();
 		assert_eq!(new_path(&shows).unwrap(), shows.join("My Show 3.toml"));
+	}
+
+	/// The latest show is the scene file written last, never a history or
+	/// stream settings beside one.
+	#[test]
+	#[expect(clippy::disallowed_types, reason = "a file's modified time, which std sets")]
+	fn finds_the_latest_show() {
+		let dir = tempfile::tempdir().unwrap();
+		assert_eq!(latest(dir.path()), None);
+		let at = |secs| std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+		for (name, secs) in [
+			("My Show.toml", 10),
+			("My Show 2.toml", 20),
+			("My Show.history.toml", 30),
+			("My Show.stream.toml", 30),
+			("logo.png", 40),
+		] {
+			let file = std::fs::File::create(dir.path().join(name)).unwrap();
+			file.set_modified(at(secs)).unwrap();
+		}
+		assert_eq!(latest(dir.path()), Some(dir.path().join("My Show 2.toml")));
 	}
 
 	/// A rename moves the show's files and nothing else, and refuses a name

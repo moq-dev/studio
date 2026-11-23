@@ -109,8 +109,9 @@ impl Panels {
 		let cards = [Card::Camera, Card::Screen, Card::Media, Card::Web];
 		for (index, kind) in cards.into_iter().enumerate() {
 			let rect = Rect::from_min_size(pos2(left + index as f32 * (card.x + gap), cards_top), card);
-			let (enabled, line) = self.card_line(kind);
+			let (enabled, line, tip) = self.card_line(kind);
 			let response = draw_card(ui, rect, kind, &line, enabled, scale);
+			let response = response.on_hover_text(tip.unwrap_or(line));
 			match kind {
 				Card::Web => self.web_popover(&response, &layer),
 				_ if response.clicked() => self.quick_add(kind, &layer),
@@ -119,26 +120,27 @@ impl Panels {
 		}
 	}
 
-	/// Whether `card` can add anything now, and the line under its name: the
-	/// device it adds, or why there is none.
-	fn card_line(&self, card: Card) -> (bool, String) {
+	/// Whether `card` can add anything now, the line under its name, and its
+	/// hover when that says more: the device it adds, or why there is none.
+	fn card_line(&self, card: Card) -> (bool, String, Option<String>) {
 		let first = |devices: &Option<&Result<Vec<Pick>, String>>| match devices {
-			None => (false, "Looking…".to_string()),
+			None => (false, "Looking…".to_string(), None),
 			Some(Ok(devices)) => match devices.first() {
-				Some(device) => (true, device.name.clone()),
-				None => (false, "None found".to_string()),
+				Some(device) => (true, device.name.clone(), None),
+				None => (false, "None found".to_string(), None),
 			},
-			Some(Err(err)) => (false, err.clone()),
+			// An error is too long for the card, so it goes in the hover.
+			Some(Err(err)) => (false, "Unavailable".to_string(), Some(err.clone())),
 		};
 		let listing = self.devices.listing.as_ref();
 		match card {
 			Card::Camera => first(&listing.map(|listing| &listing.cameras)),
 			Card::Screen => match first(&listing.map(|listing| &listing.displays)) {
-				(true, _) => (true, "Display or app".to_string()),
+				(true, _, _) => (true, "Display or app".to_string(), None),
 				not => not,
 			},
-			Card::Media => (self.quick.dialog.is_none(), "Image or video".to_string()),
-			Card::Web => (true, "Web page or text".to_string()),
+			Card::Media => (self.quick.dialog.is_none(), "Image or video".to_string(), None),
+			Card::Web => (true, "Web page or text".to_string(), None),
 		}
 	}
 
@@ -266,7 +268,6 @@ fn draw_card(ui: &mut Ui, rect: Rect, card: Card, line: &str, enabled: bool, sca
 	};
 	let response = ui.interact(rect, ui.id().with(("quick start", name)), sense);
 	response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, name));
-	let response = response.on_hover_text(line);
 	// The camera is the first a broadcaster adds, so it leads.
 	let lit = enabled && (response.hovered() || card == Card::Camera);
 	let painter = ui.painter();

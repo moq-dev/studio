@@ -4,7 +4,7 @@
 //! The scenes, sources, and compositor live in `moq-scene`; this binary is the
 //! window around them and the program clock that publishes the result.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -431,6 +431,12 @@ impl Window {
 	) {
 		self.started.set(engine.clone());
 		self.recent.opened(engine.autosave.path(), recent::now());
+		// Now rather than at eframe's next save, so a crash or a kill still
+		// reopens this show.
+		if let Some(storage) = frame.storage_mut() {
+			self.recent.save(storage);
+			storage.flush();
+		}
 		let runtime = self.opener.runtime.clone();
 		let mut studio = ui::Studio::new(&self.render, engine, *stream, runtime, true);
 		studio.load(hotkeys::Window {
@@ -490,9 +496,6 @@ impl Window {
 				}
 			},
 		};
-		if let Some(storage) = frame.storage_mut() {
-			self.recent.save(storage);
-		}
 		let instead = match &target {
 			// Itself again, which a rename may have moved.
 			Target::Open(opened) if *opened != path => Some(Target::Open(path)),
@@ -713,9 +716,14 @@ fn run(scenes: Option<PathBuf>, opener: show::Opener) -> anyhow::Result<()> {
 			let recent = recent::Recent::load(cc.storage);
 			// The last show is reopened while it is there, and a new one made if
 			// it cannot be; a show named on the command line is the only one.
-			let (target, instead) = match (scenes, recent.last()) {
+			let shows = show::dir();
+			let last = recent
+				.last()
+				.map(Path::to_path_buf)
+				.or_else(|| shows.as_deref().and_then(show::latest));
+			let (target, instead) = match (scenes, last) {
 				(Some(scenes), _) => (Target::Create(scenes), None),
-				(None, Some(last)) => (Target::Open(last.to_path_buf()), Some(Target::New)),
+				(None, Some(last)) => (Target::Open(last), Some(Target::New)),
 				(None, None) => (Target::New, None),
 			};
 			let mut window = Window {
@@ -724,7 +732,7 @@ fn run(scenes: Option<PathBuf>, opener: show::Opener) -> anyhow::Result<()> {
 				opener,
 				started: window_started,
 				recent,
-				shows: show::dir(),
+				shows,
 				aired: None,
 				keyboard: window_keyboard,
 				fx,
