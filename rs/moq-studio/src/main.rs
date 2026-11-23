@@ -364,7 +364,7 @@ impl Window {
 				self.shows
 					.as_deref()
 					.context("this system has no app storage to keep a show in")
-					.and_then(show::new_path),
+					.and_then(|dir| show::new_path(dir, show::videos().as_deref())),
 				true,
 			),
 		};

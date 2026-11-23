@@ -283,9 +283,9 @@ impl Studio {
 				state.dropped,
 			)
 		};
+		let review = review::Review::new(&engine, &stream.saved().earlier, &runtime);
 		let controls = Arc::new(Controls::new(engine.clone(), stream, runtime.clone()));
 		drop(controls.follow_relays());
-		let review = review::Review::new(&engine, &runtime);
 		let multiview = multiview::Multiview::new(render.clone(), engine.clone(), controls.clone());
 		let mut panels = Panels {
 			engine,

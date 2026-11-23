@@ -130,9 +130,10 @@ last live under the pointer, and:
 - **New show** creates another show in the app's storage, named **My Show 2**
   and so on, and opens it.
 - **Open show file…** opens any scene file, where it is.
-- **Rename show…** renames the show's scene file, its history, its stream
-  settings, and its recordings and clips, so REVIEW still lists them, and
-  opens it again.
+- **Rename show…** renames the show's scene file, its history, and its
+  stream settings, and opens it again. Its recordings and clips keep their
+  names, and REVIEW still lists them: the stream settings note the show's
+  earlier names (`earlier`), which no new or renamed show takes.
 - **Export show copy…** saves the scenes as a scene file of its own, to share
   or keep under version control. In another folder, each file a source reads
   is named from the root, so the copy reads the same files; an overlay that
@@ -463,7 +464,8 @@ you go live. A new relay or token is followed for broadcast sources and
 guests at once off air, and once the stream ends on air. The recordings
 folder (Settings, Recording) and the guests' room (Settings, Guests) are kept
 in the same file, as `recordings`, `room`, `room_key`, `join_page`,
-`guest_expiry`, and `guests_appear`.
+`guest_expiry`, and `guests_appear`, beside `earlier`, the names a renamed
+show had, whose recordings are still its own.
 
 ### Settings
 

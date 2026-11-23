@@ -59,11 +59,13 @@ enum Grip {
 }
 
 impl Review {
-	pub(super) fn new(engine: &Arc<Engine>, runtime: &tokio::runtime::Handle) -> Self {
+	/// REVIEW for `engine`'s show, which was called each of `earlier` before.
+	pub(super) fn new(engine: &Arc<Engine>, earlier: &[String], runtime: &tokio::runtime::Handle) -> Self {
 		let recorder = &engine.recorder;
+		let names = std::iter::once(recorder.show()).chain(earlier.iter().map(String::as_str));
 		Self {
 			past: Past::new(engine.clone()),
-			shelf: Shelf::new(&recorder.dir(), recorder.show(), runtime.clone()),
+			shelf: Shelf::new(&recorder.dir(), names.map(str::to_string).collect(), runtime.clone()),
 			textures: BTreeMap::new(),
 			head: None,
 			grip: None,
@@ -75,8 +77,8 @@ impl Review {
 
 	/// List the recordings folder `engine` records into now, as it moved.
 	pub(super) fn shelve(&mut self, engine: &Engine, runtime: &tokio::runtime::Handle) {
-		let recorder = &engine.recorder;
-		self.shelf = Shelf::new(&recorder.dir(), recorder.show(), runtime.clone());
+		let names = self.shelf.names().to_vec();
+		self.shelf = Shelf::new(&engine.recorder.dir(), names, runtime.clone());
 	}
 
 	/// Show `listing` as the cards, for the window's views.

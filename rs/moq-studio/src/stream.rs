@@ -49,6 +49,10 @@ pub struct Saved {
 	/// program, rather than waiting under Add.
 	#[serde(skip_serializing_if = "std::ops::Not::not")]
 	pub guests_appear: bool,
+	/// The show's names before it was renamed: its recordings and clips named
+	/// after any are still its own.
+	#[serde(skip_serializing_if = "Vec::is_empty")]
+	pub earlier: Vec<String>,
 }
 
 impl Saved {
