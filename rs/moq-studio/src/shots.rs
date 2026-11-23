@@ -15,7 +15,7 @@ use std::time::Duration;
 use eframe::egui_wgpu;
 use egui::accesskit::Role;
 use egui_kittest::Harness;
-use egui_kittest::kittest::{NodeT, Queryable};
+use egui_kittest::kittest::{NodeT, Queryable, by};
 use moq_scene::Source;
 use moq_scene::source::Status;
 
@@ -1777,7 +1777,7 @@ fn mix_sends_and_mutes() {
 	assert!(harness.query_by_label("Delay").is_none(), "closed");
 
 	// The mute, and putting another audio scene on the stream.
-	harness.get_all_by_label("Mute").next().expect("a mute").click();
+	harness.get_all(by().label_contains("Mute ")).next().expect("a mute").click();
 	harness.run_steps(2);
 	assert_eq!(undo().as_deref(), Some("Mute `guest`"));
 	harness
@@ -2162,7 +2162,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		}
 		View::History => {
 			harness
-				.get_all_by_label("Mute")
+				.get_all(by().label_contains("Mute "))
 				.next()
 				.expect("a sound to mute")
 				.click();
@@ -2362,7 +2362,7 @@ fn drag(harness: &mut Harness<'_, Window>, engine: &engine::Engine, drop: Drop) 
 /// on undo until its tooltip shows.
 fn hover(harness: &mut Harness<'_, Window>) {
 	harness
-		.get_all_by_label("Mute")
+		.get_all(by().label_contains("Mute "))
 		.next()
 		.expect("a sound to mute")
 		.click();
