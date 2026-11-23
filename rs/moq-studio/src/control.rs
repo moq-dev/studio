@@ -186,10 +186,15 @@ impl Reply {
 pub struct Node {
 	id: u64,
 	role: String,
+	/// Its name, as a screen reader says it: its own label, or the text of
+	/// the labels it is labelled by.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	label: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	value: Option<String>,
+	/// What it can be asked to do, such as `click` or `focus`.
+	#[serde(skip_serializing_if = "Vec::is_empty")]
+	actions: Vec<&'static str>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	number: Option<f64>,
 	#[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -204,6 +209,15 @@ pub struct Node {
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	children: Vec<Node>,
 }
+
+/// The actions a snapshot lists, by the name it gives each.
+const ACTIONS: [(accesskit::Action, &str); 5] = [
+	(accesskit::Action::Click, "click"),
+	(accesskit::Action::Focus, "focus"),
+	(accesskit::Action::SetValue, "set-value"),
+	(accesskit::Action::Increment, "increment"),
+	(accesskit::Action::Decrement, "decrement"),
+];
 
 /// The window's latest AccessKit tree, egui's whole tree each frame.
 #[derive(Default)]
@@ -227,8 +241,13 @@ impl Tree {
 		Some(Node {
 			id: id.0,
 			role: format!("{:?}", node.role()),
-			label: node.label().map(str::to_string),
+			label: self.name(node),
 			value: node.value().map(str::to_string),
+			actions: ACTIONS
+				.iter()
+				.filter(|(action, _)| node.supports_action(*action))
+				.map(|(_, name)| *name)
+				.collect(),
 			number: node.numeric_value(),
 			disabled: node.is_disabled(),
 			checked: node.toggled().map(|toggled| toggled == accesskit::Toggled::True),
@@ -236,6 +255,21 @@ impl Tree {
 			rect: node.bounds().map(|r| [r.x0 as f32, r.y0 as f32, r.x1 as f32, r.y1 as f32]),
 			children: node.children().iter().filter_map(|child| self.node(*child)).collect(),
 		})
+	}
+
+	/// `node`'s accessible name: its label, or else the text of what labels
+	/// it, as a field beside its label in a form is named.
+	fn name(&self, node: &accesskit::Node) -> Option<String> {
+		if let Some(label) = node.label() {
+			return Some(label.to_string());
+		}
+		let by: Vec<&str> = node
+			.labelled_by()
+			.iter()
+			.filter_map(|id| self.nodes.get(id))
+			.filter_map(|label| label.label().or(label.value()))
+			.collect();
+		(!by.is_empty()).then(|| by.join(" "))
 	}
 
 	fn snapshot(&self) -> Option<Node> {
@@ -247,8 +281,8 @@ impl Tree {
 		self.nodes
 			.iter()
 			.filter(|(id, node)| match target {
-				Target::Label(label) => node.label() == Some(label.as_str()),
-				Target::Contains(text) => node.label().is_some_and(|label| label.contains(text.as_str())),
+				Target::Label(label) => self.name(node).as_deref() == Some(label.as_str()),
+				Target::Contains(text) => self.name(node).is_some_and(|name| name.contains(text.as_str())),
 				Target::Id(want) => id.0 == *want,
 				Target::At(_) => false,
 			})
@@ -265,7 +299,7 @@ impl Tree {
 			_ => {
 				let each: Vec<String> = found
 					.iter()
-					.map(|(id, node)| format!("id:{} ({:?} {:?})", id.0, node.role(), node.label().unwrap_or("")))
+					.map(|(id, node)| format!("id:{} ({:?} {:?})", id.0, node.role(), self.name(node).unwrap_or_default()))
 					.collect();
 				anyhow::bail!(
 					"{} widgets are {}; pick one by ID: {}",
@@ -315,7 +349,7 @@ type Asked = (Request, oneshot::Sender<Reply>);
 #[cfg(unix)]
 pub struct Socket {
 	listener: tokio::net::UnixListener,
-	path: PathBuf,
+	path: Unlink,
 }
 
 #[cfg(unix)]
@@ -342,6 +376,8 @@ impl Socket {
 		}
 		let listener = std::os::unix::net::UnixListener::bind(path)
 			.with_context(|| format!("cannot listen on {}", path.display()))?;
+		// Gone with the studio, even one that fails to start.
+		let unlink = Unlink(path.to_path_buf());
 		// Until this, the umask's mode let others connect; each connection's
 		// peer is checked as well.
 		std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
@@ -349,7 +385,7 @@ impl Socket {
 		listener.set_nonblocking(true)?;
 		Ok(Self {
 			listener: tokio::net::UnixListener::from_std(listener)?,
-			path: path.to_path_buf(),
+			path: unlink,
 		})
 	}
 
@@ -377,7 +413,7 @@ impl Socket {
 		});
 		Control {
 			shared,
-			_path: Unlink(self.path),
+			_path: self.path,
 		}
 	}
 }
@@ -550,10 +586,22 @@ enum Work {
 /// they land.
 struct Find {
 	targets: Vec<Target>,
-	/// Whether the first target was asked to scroll into view.
-	revealed: bool,
+	stage: Stage,
 	make: fn(&[egui::Pos2], &Request) -> VecDeque<Frame>,
 	request: Request,
+}
+
+/// How far finding an input's targets has come, a frame each.
+#[derive(Clone, Copy, PartialEq)]
+enum Stage {
+	/// Drawing a frame with the tree on, which a screen reader leaving may
+	/// have turned off since the last request.
+	Look,
+	/// Scrolling the first target into view, where a person would scroll to
+	/// it first.
+	Reveal,
+	/// Pointing at where the targets are now.
+	Point,
 }
 
 /// The events of one frame.
@@ -636,7 +684,7 @@ fn input(targets: Vec<Target>, request: Request, make: fn(&[egui::Pos2], &Reques
 	Work::Input {
 		find: Some(Find {
 			targets,
-			revealed: false,
+			stage: Stage::Look,
 			make,
 			request,
 		}),
@@ -706,10 +754,15 @@ fn keys(combo: &str) -> anyhow::Result<VecDeque<Frame>> {
 	let name = parts.pop().filter(|name| !name.is_empty()).context("no key named")?;
 	for part in parts {
 		match part.to_ascii_lowercase().as_str() {
-			"ctrl" | "control" => modifiers.ctrl = true,
+			// As egui-winit sets them: Command is Ctrl, except on macOS.
+			"ctrl" | "control" => {
+				modifiers.ctrl = true;
+				modifiers.command |= !cfg!(target_os = "macos");
+			}
 			"shift" => modifiers.shift = true,
 			"alt" | "option" => modifiers.alt = true,
-			"cmd" | "command" => modifiers |= egui::Modifiers::COMMAND,
+			"cmd" | "command" if cfg!(target_os = "macos") => modifiers |= egui::Modifiers::MAC_CMD | egui::Modifiers::COMMAND,
+			"cmd" | "command" => modifiers |= egui::Modifiers::CTRL | egui::Modifiers::COMMAND,
 			other => anyhow::bail!("`{other}` is no modifier: ctrl, shift, alt, or cmd"),
 		}
 	}
@@ -740,6 +793,8 @@ impl egui::Plugin for Plugin {
 		}
 		self.next(ctx);
 		let Some(op) = &mut self.op else { return };
+		// eframe turns the tree off when a screen reader leaves.
+		ctx.enable_accesskit();
 		match &mut op.work {
 			Work::Input {
 				find: Some(find),
@@ -747,9 +802,12 @@ impl egui::Plugin for Plugin {
 				..
 			} => {
 				let screen = input.screen_rect.unwrap_or(egui::Rect::EVERYTHING);
-				if !find.revealed {
-					find.revealed = true;
-					// Scrolled into view first, where a person would scroll to it.
+				if find.stage == Stage::Look {
+					find.stage = Stage::Reveal;
+					return;
+				}
+				if find.stage == Stage::Reveal {
+					find.stage = Stage::Point;
 					if let Ok((id, _)) = self.tree.one(&find.targets[0]) {
 						input.events.push(egui::Event::AccessKitActionRequest(accesskit::ActionRequest {
 							action: accesskit::Action::ScrollIntoView,
@@ -962,6 +1020,18 @@ mod tests {
 		};
 		assert_eq!((*key, *pressed), (egui::Key::Z, true));
 		assert!(modifiers.ctrl && modifiers.shift && !modifiers.alt);
+		// What a shortcut on Command, such as the palette's, matches.
+		let egui::Event::Key { modifiers, .. } = &keys("cmd+k").unwrap()[0].0[1] else {
+			panic!("a key event")
+		};
+		assert!(modifiers.matches_logically(egui::Modifiers::COMMAND));
+		#[cfg(not(target_os = "macos"))]
+		{
+			let egui::Event::Key { modifiers, .. } = &keys("ctrl+k").unwrap()[0].0[1] else {
+				panic!("a key event")
+			};
+			assert!(modifiers.matches_logically(egui::Modifiers::COMMAND));
+		}
 		assert!(keys("Escape").is_ok());
 		for refused in ["hyper+a", "ctrl+", "ctrl+NoSuchKey", ""] {
 			assert!(keys(refused).is_err(), "{refused} was accepted");
