@@ -19,6 +19,16 @@ const NAME: &str = "My Show";
 /// What no file name holds on some system.
 const RESERVED: [char; 9] = ['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
 
+/// Held while a rename moves a show's files, so quitting waits for them to
+/// land together; true once the studio is quitting, when no rename starts.
+static MOVING: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+
+/// Wait for a rename moving a show's files, and start no other, so the
+/// process never ends with a show split across two names.
+pub fn settle() {
+	*MOVING.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+}
+
 /// What the microphone a new show hears is called.
 const MIC: &str = "Mic";
 
@@ -263,6 +273,8 @@ pub fn rename(path: &Path, name: &str, recordings: &Path) -> anyhow::Result<Path
 	);
 	// Taken while the file is there to resolve.
 	let key = engine::grant_key(path).with_context(|| format!("reading {}", path.display()))?;
+	let quitting = MOVING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+	anyhow::ensure!(!*quitting, "the studio is quitting");
 
 	let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
 	let put_back = |moved: Vec<(PathBuf, PathBuf)>| {

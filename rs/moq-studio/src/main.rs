@@ -664,6 +664,7 @@ impl winit::application::ApplicationHandler<eframe::UserEvent> for Events<'_> {
 			tracing::error!(error = format!("{err:#}"), "cannot save on quit");
 			self.unsaved = true;
 		}
+		show::settle();
 	}
 
 	fn memory_warning(&mut self, event_loop: &ActiveEventLoop) {
