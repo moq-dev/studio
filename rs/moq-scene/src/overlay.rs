@@ -357,6 +357,13 @@ pub(crate) struct Content {
 	assets: HashMap<String, Asset>,
 }
 
+impl Content {
+	/// Whether it loads any file, rather than only `data:` URLs.
+	pub(crate) fn loads_files(&self) -> bool {
+		self.assets.keys().any(|url| url.starts_with("file:"))
+	}
+}
+
 /// An image or font an overlay loads, decoded as far as Blitz needs it.
 #[derive(Clone)]
 enum Asset {

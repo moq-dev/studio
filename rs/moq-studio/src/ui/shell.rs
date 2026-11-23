@@ -302,6 +302,7 @@ impl Panels {
 		self.details(ui.ctx(), layout.stage);
 		self.going_sheet(ui.ctx());
 		self.follow_shows(ui.ctx());
+		self.follow_media_dialog(ui.ctx());
 		// macOS keeps its own frame's edges, and resizes by them.
 		if self.framed && !cfg!(target_os = "macos") {
 			edges(ui, window);

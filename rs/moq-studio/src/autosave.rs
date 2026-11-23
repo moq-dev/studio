@@ -600,6 +600,16 @@ fn write(
 	Ok(Some(dir))
 }
 
+/// Write `text` to the file at `path` whole, as a save does: through any
+/// symlinks there, keeping the permissions of a file it replaces.
+pub(crate) fn write_file(path: &Path, text: &str) -> std::io::Result<()> {
+	// Only a new file, or one found changed, is left as it is.
+	if let Some(dir) = write(path, text, false, || Ok(true))? {
+		sync(&dir)?;
+	}
+	Ok(())
+}
+
 /// Sync the directory `dir` a file was renamed into, so a power loss cannot
 /// undo the rename.
 fn sync(dir: &Path) -> std::io::Result<()> {

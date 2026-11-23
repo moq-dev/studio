@@ -85,6 +85,9 @@ impl Recent {
 	/// live.
 	pub fn moved(&mut self, from: &Path, to: &Path) {
 		let to = absolute(to);
+		if absolute(from) == to {
+			return;
+		}
 		self.shows.retain(|show| show.path != to);
 		if let Some(show) = self.find(from) {
 			show.path = to;
@@ -225,6 +228,8 @@ mod tests {
 		let paths: Vec<_> = recent.shows.iter().map(|show| show.path.clone()).collect();
 		assert_eq!(paths, [c.clone(), b.clone()]);
 		assert_eq!(recent.shows[0].live, Some(Aired { at: 12, lasted: 60 }));
+		recent.moved(&c, &c);
+		assert_eq!(recent.shows[0].live, Some(Aired { at: 12, lasted: 60 }), "no move");
 
 		assert_eq!(recent.last(), None, "neither file is there");
 		std::fs::write(&b, "").unwrap();

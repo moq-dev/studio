@@ -8,6 +8,9 @@ use super::*;
 use crate::recent;
 use crate::task::Task;
 
+/// The most room the recent shows take in the Show menu: about eight rows.
+const RECENT_HEIGHT: f32 = 240.0;
+
 /// What the Show menu asks the window for; each closes the open show first.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Leave {
@@ -40,17 +43,22 @@ impl Panels {
 		let now = recent::now();
 		let mut leave = None;
 		ui.add_enabled_ui(off, |ui| {
-			for show in &self.shows {
-				let name = crate::show::name(&show.path);
-				let row = ui.add(kit::button(Icon::Open, &name));
-				let row = match off {
-					true => row.on_hover_text(format!("{}\n{}", recent::said(show, now), show.path.display())),
-					false => why(row),
-				};
-				if row.clicked() {
-					leave = Some(Leave::Open(show.path.clone()));
+			// Up to 30 shows, which scroll so the rest stay in reach in a short
+			// window.
+			let height = (ui.ctx().content_rect().height() / 3.0).min(RECENT_HEIGHT);
+			egui::ScrollArea::vertical().max_height(height).show(ui, |ui| {
+				for show in &self.shows {
+					let name = crate::show::name(&show.path);
+					let row = ui.add(kit::button(Icon::Open, &name));
+					let row = match off {
+						true => row.on_hover_text(format!("{}\n{}", recent::said(show, now), show.path.display())),
+						false => why(row),
+					};
+					if row.clicked() {
+						leave = Some(Leave::Open(show.path.clone()));
+					}
 				}
-			}
+			});
 			if !self.shows.is_empty() {
 				ui.separator();
 			}
@@ -84,7 +92,9 @@ impl Panels {
 	/// Follow the Show menu's file dialog and the rename sheet, which outlive
 	/// the menu.
 	pub(super) fn follow_shows(&mut self, ctx: &egui::Context) {
-		if let Some((_, to)) = super::shell::rename_sheet(ctx, "rename show", &mut self.renaming_show) {
+		if let Some((from, to)) = super::shell::rename_sheet(ctx, "rename show", &mut self.renaming_show)
+			&& to != from
+		{
 			self.leaving = Some(Leave::Rename(to));
 		}
 		let picked = match &mut self.show_dialog {

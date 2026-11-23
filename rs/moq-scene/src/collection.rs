@@ -309,12 +309,24 @@ impl Collection {
 
 	/// Join each file a source reads onto `dir`, the scene file's directory,
 	/// so a copy of the collection kept anywhere else reads the same files.
-	pub fn root(&mut self, dir: &std::path::Path) {
+	/// Refuses, changing nothing, if an overlay loads a file, since an overlay
+	/// reads files only from its own scene file's directory.
+	pub fn root(&mut self, dir: &std::path::Path) -> Result<(), crate::Error> {
+		for (name, source) in &self.sources {
+			let Source::Overlay { html, .. } = source else { continue };
+			// One that cannot load is no worse for the move.
+			if crate::overlay::check(html, dir).is_ok_and(|content| content.loads_files()) {
+				return Err(crate::Error::Overlay(format!(
+					"`{name}` loads files from beside the scene file, which a copy kept elsewhere cannot"
+				)));
+			}
+		}
 		for source in self.sources.values_mut() {
 			if let Some(path) = source.path_mut() {
 				*path = dir.join(&path);
 			}
 		}
+		Ok(())
 	}
 
 	/// The source a [`Source::Role`] called `name` names, or `name` itself
@@ -2729,6 +2741,38 @@ impl FromStr for Rgba {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// Rooting names each file from `dir`, but refuses an overlay that loads
+	/// a file, which a copy elsewhere could not read, and then changes nothing.
+	#[test]
+	fn roots_files_but_not_an_overlay_that_loads_one() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("face.jpg"), include_bytes!("test_data/person.jpg")).unwrap();
+		let overlay = |html: &str| Source::Overlay {
+			html: html.into(),
+			width: 64,
+			height: 64,
+			restart: true,
+		};
+		let mut collection = Collection::new();
+		let image = Source::Image { path: "logo.png".into() };
+		collection.sources.insert("logo".into(), image);
+		collection.sources.insert("text".into(), overlay("<p>Hello</p>"));
+
+		let mut copy = collection.clone();
+		copy.root(dir.path()).unwrap();
+		let rooted = Source::Image {
+			path: dir.path().join("logo.png"),
+		};
+		assert_eq!(copy.sources["logo"], rooted);
+
+		let mut copy = collection.clone();
+		copy.sources.insert("face".into(), overlay(r#"<img src="face.jpg" alt="">"#));
+		let before = copy.clone();
+		let err = copy.root(dir.path()).unwrap_err();
+		assert!(err.to_string().contains("`face`"), "{err}");
+		assert_eq!(copy, before);
+	}
 
 	/// A reload of an unchanged file gives each item the identity it had,
 	/// two showing one source at one rect included; one the file adds under

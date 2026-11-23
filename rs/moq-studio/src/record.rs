@@ -747,7 +747,7 @@ const NUMBER: &str = " (4294967295)";
 
 /// What a file's marker adds to its name. Specific to the studio, since a
 /// launch removes a marker whose recording is gone.
-const MARKER: &str = ".unfinished";
+pub(crate) const MARKER: &str = ".unfinished";
 
 /// What a repaired file's stem adds to the recording's.
 const REPAIRED: &str = ".repaired";

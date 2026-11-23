@@ -368,7 +368,9 @@ impl Window {
 				true,
 			),
 		};
-		let name = path.as_deref().map(show::name).unwrap_or_default();
+		let name = path
+			.as_deref()
+			.map_or_else(|_| "a new show".to_string(), show::name);
 		let opener = self.opener.clone();
 		let task = match path {
 			Ok(path) => task::Task::spawn(
@@ -481,11 +483,12 @@ impl Window {
 		// closed show.
 		studio.release(&self.render);
 		let path = engine.autosave.path().to_path_buf();
+		let recordings = engine.recorder.dir();
 		drop(engine);
 		let target = match leave {
 			ui::Leave::Open(path) => Target::Open(path),
 			ui::Leave::New => Target::New,
-			ui::Leave::Rename(name) => match show::rename(&path, &name) {
+			ui::Leave::Rename(name) => match show::rename(&path, &name, &recordings) {
 				Ok(renamed) => {
 					self.recent.moved(&path, &renamed);
 					Target::Open(renamed)

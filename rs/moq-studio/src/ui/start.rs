@@ -42,9 +42,8 @@ impl Panels {
 	/// start: four cards, each adding the scene's first layer, and a word that
 	/// anything dropped or pasted on the picture lands there too.
 	pub(super) fn quick_start(&mut self, ui: &mut Ui, picture: Rect) {
-		self.follow_media_dialog();
 		let engine = self.engine.clone();
-		let layer = {
+		let (layer, own) = {
 			let state = engine.state.lock().unwrap();
 			let Ok(layer) = self.scene(&state) else { return };
 			let collection = state.collection();
@@ -54,7 +53,10 @@ impl Panels {
 			if !shown || !empty(&layer) || !empty(&Layer::top()) {
 				return;
 			}
-			layer
+			// Never the studio's own virtual cameras, which would feed the
+			// picture back into itself.
+			let own: Vec<String> = state.cameras().map(|camera| camera.id).collect();
+			(layer, own)
 		};
 		self.devices.poll();
 		if self.devices.listing.is_none()
@@ -109,12 +111,12 @@ impl Panels {
 		let cards = [Card::Camera, Card::Screen, Card::Media, Card::Web];
 		for (index, kind) in cards.into_iter().enumerate() {
 			let rect = Rect::from_min_size(pos2(left + index as f32 * (card.x + gap), cards_top), card);
-			let (enabled, line, tip) = self.card_line(kind);
+			let (enabled, line, tip) = self.card_line(kind, &own);
 			let response = draw_card(ui, rect, kind, &line, enabled, scale);
 			let response = response.on_hover_text(tip.unwrap_or(line));
 			match kind {
 				Card::Web => self.web_popover(&response, &layer),
-				_ if response.clicked() => self.quick_add(kind, &layer),
+				_ if response.clicked() => self.quick_add(kind, &layer, &own),
 				_ => {}
 			}
 		}
@@ -122,10 +124,10 @@ impl Panels {
 
 	/// Whether `card` can add anything now, the line under its name, and its
 	/// hover when that says more: the device it adds, or why there is none.
-	fn card_line(&self, card: Card) -> (bool, String, Option<String>) {
-		let first = |devices: &Option<&Result<Vec<Pick>, String>>| match devices {
+	fn card_line(&self, card: Card, own: &[String]) -> (bool, String, Option<String>) {
+		let line = |devices: &Option<&Result<Vec<Pick>, String>>| match devices {
 			None => (false, "Looking…".to_string(), None),
-			Some(Ok(devices)) => match devices.first() {
+			Some(Ok(devices)) => match first(devices, own) {
 				Some(device) => (true, device.name.clone(), None),
 				None => (false, "None found".to_string(), None),
 			},
@@ -134,8 +136,8 @@ impl Panels {
 		};
 		let listing = self.devices.listing.as_ref();
 		match card {
-			Card::Camera => first(&listing.map(|listing| &listing.cameras)),
-			Card::Screen => match first(&listing.map(|listing| &listing.displays)) {
+			Card::Camera => line(&listing.map(|listing| &listing.cameras)),
+			Card::Screen => match line(&listing.map(|listing| &listing.displays)) {
 				(true, _, _) => (true, "Display or app".to_string(), None),
 				not => not,
 			},
@@ -144,10 +146,12 @@ impl Panels {
 		}
 	}
 
-	/// Add what `card` adds as the first layer of `layer`.
-	fn quick_add(&mut self, card: Card, layer: &Layer) {
-		let device =
-			|devices: &Result<Vec<Pick>, String>| devices.as_ref().ok().and_then(|devices| devices.first()).cloned();
+	/// Add what `card` adds as the first layer of `layer`, never one of the
+	/// `own` cameras.
+	fn quick_add(&mut self, card: Card, layer: &Layer, own: &[String]) {
+		let device = |devices: &Result<Vec<Pick>, String>| {
+			devices.as_ref().ok().and_then(|devices| first(devices, own)).cloned()
+		};
 		let listing = self.devices.listing.as_ref();
 		let pick = match card {
 			Card::Camera => listing.and_then(|listing| device(&listing.cameras)),
@@ -227,15 +231,26 @@ impl Panels {
 		}
 	}
 
-	/// Land the media file the dialog picked on the picture, as a drop there.
-	fn follow_media_dialog(&mut self) {
+	/// Land the media file the dialog picked on the picture, as a drop there,
+	/// whatever the window shows by then.
+	pub(super) fn follow_media_dialog(&mut self, ctx: &egui::Context) {
 		let Some(dialog) = &mut self.quick.dialog else { return };
-		let Some(picked) = dialog.poll() else { return };
+		let Some(picked) = dialog.poll() else {
+			ctx.request_repaint_after(Duration::from_millis(100));
+			return;
+		};
 		if let Some(path) = picked.clone() {
 			self.dropping.arrive(Arrival::File(path), None);
 		}
 		self.quick.dialog = None;
 	}
+}
+
+/// The first of `devices` that is none of the `own` cameras.
+fn first<'a>(devices: &'a [Pick], own: &[String]) -> Option<&'a Pick> {
+	devices
+		.iter()
+		.find(|pick| !matches!(&pick.source, Source::Camera { id: Some(id) } if own.contains(id)))
 }
 
 /// The system's dialog for an image or video file.

@@ -97,8 +97,8 @@ qrcodegen = "1.8"
 # The system's own dialog for opening a show file or saving a new one: the
 # desktop portal on Linux, so it works in the Flatpak.
 rfd = "0.18"
-# Whether a recording's marker is still the file its holder locked, which std
-# cannot tell on Windows.
+# Whether a recording's marker is still the file its holder locked, and
+# whether two paths name one show file, which std cannot tell on Windows.
 same-file = "1.0.6"
 # The guests removed from scenes, kept beside the scene file.
 serde = { workspace = true }
