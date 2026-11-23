@@ -1101,6 +1101,9 @@ impl Panels {
 			let stream = self.controls.stream.lock().unwrap().clone();
 			self.stream_form = Some(Form::new(&stream));
 		}
+		// On at once, rather than saved with the form above.
+		ui.add_space(16.0);
+		self.camera(ui, None);
 	}
 }
 

@@ -56,10 +56,6 @@ Decided 2026-11-22 with the maintainer (/quest-plan):
 - **Shots & docs:** update `just shots` views (`studio`, `studio_locked`,
   `audio_popover`, and compact/portrait layouts) and update `README.md`.
 
-## Required
-
-- [Mods](/quest/m0/ux/mods.md) - gates Audio Scenes & Routes, Replay & Review, Studio Mode, and other power features
-
 ## Related
 
 - [Essential layer inspector](/quest/m0/ux/essential-inspector.md) - contextual right-hand inspector for selected layers

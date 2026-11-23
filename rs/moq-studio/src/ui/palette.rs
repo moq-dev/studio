@@ -141,8 +141,10 @@ impl Panels {
 		let state = self.engine.state.lock().unwrap();
 		let collection = state.collection();
 		let mut rows = Vec::new();
+		let mods = &self.controls.mods;
+		let on = |needs: Option<Mod>| needs.is_none_or(|needs| mods.on(needs));
 
-		for action in Action::listed(&state) {
+		for action in Action::listed(&state, &self.controls.mods) {
 			let name = match &action {
 				Action::Mute(name) if collection.audio.get(name).is_some_and(|audio| audio.muted) => {
 					format!("Unmute `{name}`")
@@ -230,12 +232,13 @@ impl Panels {
 		}
 		let picker =
 			|kind: &Kind| cfg!(target_os = "linux") || !matches!(kind, Kind::PickedDisplay | Kind::PickedWindow);
-		for kind in Kind::ALL.into_iter().filter(picker) {
+		let offered = |kind: &Kind| on(kind.needs());
+		for kind in Kind::ALL.into_iter().filter(picker).filter(offered) {
 			let name = format!("Add a source: {}", kind.label());
 			rows.push(Row::new(Command::Kind(kind), name, "Add", &["new", "layer", "by hand"]));
 		}
 
-		for page in Page::ALL {
+		for page in Page::ALL.into_iter().filter(|page| on(page.needs())) {
 			rows.push(Row::new(
 				Command::Page(page),
 				format!("Go to {}", page.name()),
@@ -243,15 +246,25 @@ impl Panels {
 				&["page"],
 			));
 		}
-		for setting in Setting::ALL {
+		for setting in Setting::ALL.into_iter().filter(|setting| on(setting.needs())) {
 			let mut words = vec!["settings", "preferences"];
 			words.extend(setting.words());
 			let row = Row::new(Command::Setting(setting, None), setting.name(), "Settings", &words);
 			rows.push(row);
-			for (name, words) in setting.rows() {
-				let group = format!("Settings, {}", setting.name());
-				rows.push(Row::new(Command::Setting(setting, Some(name)), *name, group, words));
+			let group = format!("Settings, {}", setting.name());
+			for (name, words, _) in setting.rows().iter().filter(|(_, _, needs)| on(*needs)) {
+				rows.push(Row::new(Command::Setting(setting, Some(name)), *name, &group, words));
 			}
+		}
+		// Each mod, off or on, so one can be found to switch on.
+		for each in Mod::ALL {
+			let group = format!("Settings, {}", Setting::Mods.name());
+			rows.push(Row::new(
+				Command::Setting(Setting::Mods, Some(each.name())),
+				each.name(),
+				group,
+				each.words(),
+			));
 		}
 
 		let history = state.history();
@@ -266,28 +279,32 @@ impl Panels {
 			row.refused = entry.is_none().then(|| format!("nothing to {}", verb.to_lowercase()));
 			rows.push(row);
 		}
-		let multiview = match self.multiview.open() {
-			true => "Close the multiview",
-			false => "Open the multiview",
-		};
-		rows.push(Row::new(
-			Command::Multiview,
-			multiview,
-			"Windows",
-			&["monitor", "tiles", "sources"],
-		));
+		if mods.on(Mod::Multiview) {
+			let multiview = match self.multiview.open() {
+				true => "Close the multiview",
+				false => "Open the multiview",
+			};
+			rows.push(Row::new(
+				Command::Multiview,
+				multiview,
+				"Windows",
+				&["monitor", "tiles", "sources"],
+			));
+		}
 		rows.push(Row::new(
 			Command::Health,
 			"Stream health in detail",
 			"Windows",
 			&["encoder", "viewers", "problems"],
 		));
-		rows.push(Row::new(
-			Command::Graph,
-			"Open the scene graph",
-			"Windows",
-			&["wires", "nodes", "map"],
-		));
+		if mods.on(Mod::Graph) {
+			rows.push(Row::new(
+				Command::Graph,
+				"Open the scene graph",
+				"Windows",
+				&["wires", "nodes", "map"],
+			));
+		}
 		rows
 	}
 

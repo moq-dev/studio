@@ -109,8 +109,8 @@ frame's period at most, leaving the rest for sources and the compositor), and
 as **Mic** in the sound. Its recordings go to your Videos folder. Change the
 canvas in Settings, Show, and where recordings go in Settings, Recording.
 
-While the scene has no layers, the picture shows the quick start: one click
-on **Camera** (naming the camera it adds), **Screen**, **Media** (an image or
+While the scene has no layers, the picture shows the quick start (on LIVE,
+only off air): one click on **Camera** (naming the camera it adds), **Screen**, **Media** (an image or
 video file), or **Web / Text** (a web address, or a text to edit) adds the
 scene's first layer, and the picture becomes the scene. Anything dropped or
 pasted on the picture lands there too (see
@@ -122,8 +122,10 @@ smaller canvas if it cannot keep up (see [Going live](#going-live)).
 ## Your shows
 
 Every later launch reopens the last show you had open. If it is gone, the
-studio creates a new one, and if it cannot be opened, the studio creates a new
-one and says why. The show's name in the title bar opens its menu, which
+studio reopens the most recent one still there, or else the last one saved in
+the app's storage, and creates a new show only when there is none. If the show
+cannot be opened, the studio creates a new one and says why. The show's name
+in the title bar opens its menu, which
 lists the other shows you have opened, the latest first, with when each was
 last live under the pointer, and:
 
@@ -168,11 +170,12 @@ macOS the system's buttons and edges stay. It holds, from the left:
 - The show's name. Its menu has the scene file's path, [your
   shows](#your-shows) with New show, Open show file, Rename, and Export a
   copy, **Reload the scene file**, **Copy the selected layer**, **Paste**, and
-  **Open the multiview** (see [Multiview](#multiview)).
+  **Open the multiview** while its mod is on (see [Multiview](#multiview)).
 - Undo and redo, each naming under the pointer the edit it would step, and
   the history (the clock), which lists every edit, newest first: pick one to
   undo or redo back to just after it.
-- The pages: **LIVE**, **BUILD**, **MIX**, and **REVIEW**.
+- The pages: **LIVE** and **BUILD**, and **MIX** and **REVIEW** while their
+  [mods](#mods) are on.
 - The health dot, the stream's worst grade at a glance. Click it for the
   worst problem first, then each destination, who is watching, and the
   encoder, and **Details** for the [Health](#health) window. Off air it reads
@@ -208,15 +211,16 @@ The **strip** holds:
   with its own copies** gives each of its layers a copy of its source to edit
   apart (a scene or the program drawn in it stays one picture). A pad ringed
   in red says what just failed on it under the pointer. The last pad, **+**,
-  adds an empty scene without taking it, and the switch after it turns
-  [Studio mode](#off-air-and-studio-mode) on and off.
+  adds an empty scene without taking it, and with its mod on, the switch
+  after it turns [Studio mode](#off-air-and-studio-mode) on and off.
 - The **panic key**, amber and named for the safe scene: it mutes every
   microphone and every guest (their camera's sound and their screen's), hides
   every always-on-top layer, whatever it shows, in one edit undo takes back,
   and cuts at once to the scene marked safe, if one is. Other remote feeds and
   media stay on. Mark one from its pad's menu, BUILD's inspector with no layer
-  selected, or the scene graph. The scissors beside it save a replay clip (see
-  [Replay](#replay)), and the flag drops a marker (see [Markers](#markers)).
+  selected, or the scene graph. With Replay & review on, the scissors beside
+  it save a replay clip (see [Replay](#replay)), and the flag drops a marker
+  (see [Markers](#markers)).
 - A row for each sound the stream carries, with its meter and mute, and the
   **STREAM** meter of the audio scene on program, with **Listen** (the
   headphones) to hear it (see [Audio scenes](#audio-scenes)).
@@ -337,7 +341,7 @@ lists the scene's own layers alone: the always-on-top ones are drawn on
 program, so editing them, or keeping a layer always on top, waits for **Back
 to live**.
 
-**Studio mode**, off by default, is for an operator running a show: with its
+**Studio mode**, a mod off by default (see [Mods](#mods)), is for an operator running a show: with its
 switch at the end of the scene strip on, a pad or a scene's hotkey cues its
 scene instead of taking it. A NEXT card docks on the program, on LIVE and on
 BUILD, with the cued scene as it will go on air, its keyframes and overlays
@@ -379,7 +383,7 @@ desk` finds **Mute `desk`**.
 
 ### Multiview
 
-**Open the multiview**, in the show's menu, opens a window for another
+Switch on **Multiview** in Settings, [Mods](#mods), first. **Open the multiview**, in the show's menu, then opens a window for another
 monitor with every scene and the sources you pick live in one grid, as large
 as the window allows: the scene on air framed in blue and tagged ON AIR, the
 one cued (or, off air, the one the stream opens on) framed in amber, and a
@@ -475,22 +479,58 @@ setting costs. Escape or a click outside closes it.
 
 | Pane | Use it to |
 | --- | --- |
-| Show | Pick the format, landscape or portrait, which swaps the canvas's sides; **Both at once**, which sends a portrait picture beside a landscape one (see [Both formats at once](#both-formats-at-once)); the canvas size as 720p, 1080p, 1440p, or 4K, with the upload each wants, for both pictures while Both at once is on, or **Custom** for exact numbers; the frame rate as 30, 60, or **Custom**; and, under **Scene sizes**, each scene's own size (see [Published scenes](#published-scenes)). Saved in the scene file, and undone like any edit. |
-| Stream | Set the relay, its token, the failover relay, the broadcast's name, and on demand (see [Stream settings](#stream-settings)). |
-| Recording | Change or open the recordings folder, and pick the picture and the audio scene a recording holds, and whether each source records a file of its own too (see [Recording](#recording)). |
-| Hotkeys | Bind keys, by what they are for: going live, ending the stream, the panic key, and recording; Studio mode, TAKE, and AUTO; each scene; each sound's mute; and replay, clips, and markers (see [Hotkeys](#hotkeys)). |
-| Guests | Set the room guests join, its key, the join page, how long a link lasts, and whether guests appear on their own (see [Guests](#guests)). |
-| Remote | Pair a phone as a remote by its QR code, see which are connected, and remove one (see [Phone remote](#phone-remote)). |
-| Advanced | Publish scenes as broadcasts of their own and sources independently, turn the virtual camera of the program or of each published scene on, and open the [scene graph](#scene-graph). |
+| Show | Pick the canvas size as 720p, 1080p, 1440p, or 4K, with the upload each wants, or **Custom** for exact numbers, and the frame rate as 30, 60, or **Custom**. With **Both formats** on, pick the format, landscape or portrait, which swaps the canvas's sides, and **Both at once**, which sends a portrait picture beside a landscape one (see [Both formats at once](#both-formats-at-once)), the canvas size then covering both pictures. With **Published scenes** on, give a scene its own size under **Scene sizes** (see [Published scenes](#published-scenes)). Saved in the scene file, and undone like any edit. |
+| Stream | Set the relay, its token, the failover relay, the broadcast's name, and on demand (see [Stream settings](#stream-settings)), and turn the program's [virtual camera](#virtual-camera) on. |
+| Recording | Change or open the recordings folder, and pick the picture a recording holds, and its audio scene with **Audio scenes & routes** on, and whether each source records a file of its own too (see [Recording](#recording)). |
+| Hotkeys | Bind keys, by what they are for: going live, ending the stream, the panic key, and recording; each scene; each sound's mute; and, with their mods on, Studio mode, TAKE, and AUTO, and replay, clips, and markers (see [Hotkeys](#hotkeys)). |
+| Guests | Set the room guests join, its key, the join page, how long a link lasts, and, with **Smart layout** on, whether guests appear on their own (see [Guests](#guests)). |
+| Remote | With **Phone remote** on, pair a phone as a remote by its QR code, see which are connected, and remove one (see [Phone remote](#phone-remote)). |
+| Mods | Switch on the features most streamers never use (see [Mods](#mods)). |
 
 On air, a new canvas size or frame rate, or a published scene's new size,
 asks before it applies, since the video pauses while the new encoders open.
 The encoders themselves, the sessions open, and each one's work are in the
 [Health](#health) window.
 
+### Mods
+
+Settings, Mods, has a switch for each feature most streamers never use, each
+off until you switch it on. While one is off, no page, menu, hotkey list,
+palette, or Settings pane shows it, and a key bound to one of its actions is
+left to other programs. Switching it on shows its UI at once:
+
+| Mod | Adds |
+| --- | --- |
+| Audio scenes & routes | Audio scenes and their sends, on the MIX page (see [Audio scenes](#audio-scenes)), and the audio scene a recording or a published scene carries. Off, the show has one audio scene, the stream's, which every sound feeds and the recording holds. |
+| Replay & review | The REVIEW page, with the recordings, replays, and clips, the dock's **Save clip** and **Drop a marker**, their keys, and the replay source (see [Replay](#replay) and [Markers](#markers)). On, the sources on program keep encoding their recent past, which a replay of one plays; off, a source encodes only while something reads it, and the recordings are in the folder Settings, Recording opens. |
+| Studio mode | Studio mode's switch, which cues a scene for TAKE and AUTO (see [Off air and Studio mode](#off-air-and-studio-mode)), and their keys. |
+| Smart layout | Slots and roles (see [Slots and roles](#slots-and-roles)), **Keep out of the way** (see [Keeping out of the way](#keeping-out-of-the-way)), and guests appearing on their own, which waits for it to be on. |
+| Both formats | A portrait show, and going out in both formats at once (see [Both formats at once](#both-formats-at-once)). |
+| Multiview | **Open the multiview**, in the show's menu and the palette (see [Multiview](#multiview)). |
+| Phone remote | Settings, Remote (see [Phone remote](#phone-remote)). Off, phones paired stay paired, but their presses do nothing. |
+| Published scenes | Publishing a scene or a source on its own, a scene's own size, and each published scene's virtual camera, listed under the switch (see [Published scenes](#published-scenes)). |
+| Scene graph | **Open**, beside the switch, and in the palette (see [Scene graph](#scene-graph)). |
+
+Switching one off turns its feature off: the show then sends what it would
+without it. An edit it makes to the show is one undo takes back: audio scenes
+fold into the stream's, which keeps what it plays and takes every other sound,
+even one sent nowhere, muted, so the stream sounds the same; layers in slots or keeping out of the
+way stay where they are drawn, and one in a tile closed now stays hidden; a portrait show turns to landscape, asking
+first on air as a new canvas does, and a show going out in both stops
+sending the portrait picture; and scenes and sources stop being published,
+and scenes of their own size take the program's. Studio mode turns off, and
+the multiview and the scene graph close.
+
+Your mods are kept on this computer, beside your hotkeys, not in the show.
+A show that uses one, such as one with audio scenes, a sound the stream
+leaves out (other than a guest waiting under Add), or slots, switches it on
+as it opens, and so does an undo or reload that brings the feature back, so
+a feature never changes what goes out while its controls are hidden.
+
 ### Scene graph
 
-Settings, Advanced, opens the scene graph in a window of its own: the collection as nodes, each source
+With **Scene graph** on in Settings, Mods, its **Open** there, or the
+palette, opens the scene graph in a window of its own: the collection as nodes, each source
 with a picture or sound, each scene and the always-on-top layers, and each
 audio scene.
 A wire runs from each source to every scene or layer placing it, and from
@@ -510,15 +550,15 @@ history, as from anywhere else.
 
 ### Published scenes
 
-Every scene has a size, the program's unless **Scene sizes**, in Settings,
-Show, gives it its own, such as 1080x1920 for a portrait scene beside a
+Switch on **Published scenes** in Settings, Mods, first. Every scene has a
+size, the program's unless **Scene sizes**, in Settings, Show, gives it its own, such as 1080x1920 for a portrait scene beside a
 1920x1080 program. Every scene is drawn at the program's frame rate. Only a
 scene of the program's size goes on program: its pad refuses another, saying
 why, and an edit resizing the scene on air is refused.
 
 Switch on **Publish** for a scene, in BUILD's inspector with no layer selected,
 in the scene graph, or with the **+** of **Publish a scene as its own
-broadcast** in Settings, Advanced, to put it live as a broadcast
+broadcast** under Published scenes in Settings, Mods, to put it live as a broadcast
 of its own beneath the program's, at `<broadcast>/<scene name>`, at its own
 size, with renditions and encoders of its own (see [Output](#output)), while
 the program is on air. A published scene is never switched: it shows what its layers
@@ -715,7 +755,7 @@ far behind each broadcast plays.
 
 ### Slots and roles
 
-A scene can lay out some of its layers by **slots** rather than by hand: one
+Switch on **Smart layout** in Settings, [Mods](#mods), first. A scene can then lay out some of its layers by **slots** rather than by hand: one
 **main** slot, the largest, and **tiles** beside it, in the order of their
 layers. The scene's **arrangement** places them, each slot 16:9,
 inside a margin, each picture covering its slot, cropped evenly to fit:
@@ -747,7 +787,7 @@ The scene inspector's **Slots** section picks the arrangement, lists the
 slots with the role or source in each and what fills each role, and adds a
 **Main slot** or **Camera slot**, making the role if the show has none. Add, under
 **Not in any scene**, puts a guest into the scene's next tile when it has
-slots.
+slots, and any source it adds there is heard on the stream.
 
 **Appear on their own**, in Settings, Guests, has a guest whose camera comes
 online take the next tile of the scene on program, and be heard on program,
@@ -765,7 +805,7 @@ a new link. Since an appearance is your edit, it drops what you could redo.
 Off, every guest waits under Add, as before.
 ### Keeping out of the way
 
-A scene's layer with **Keep out of the way** on, in the inspector's Place
+Switch on **Smart layout** in Settings, [Mods](#mods), first. A scene's layer with **Keep out of the way** on, in the inspector's Place
 section, moves itself off what matters in the picture under it, such as a
 facecam off a game's minimap or a slide's text. A few times a second the
 studio draws the layers under it, scaled far down, and reduces them on the
@@ -807,8 +847,8 @@ where its rect rests.
 ### Both formats at once
 
 A landscape show can go out in portrait too, for phones, beside the
-landscape picture for desks and TVs: switch on **Both at once** in Settings,
-Show. Each scene of the show's size then has two arrangements of the same
+landscape picture for desks and TVs: switch on **Both formats** in Settings,
+[Mods](#mods), then **Both at once** in Settings, Show. Each scene of the show's size then has two arrangements of the same
 layers, and the studio draws, encodes, and sends both pictures. A scene of its
 own size, such as a published portrait scene, stays one picture, in its own
 shape, the same in both down to the scenes it shows, so it cannot go on
@@ -862,7 +902,7 @@ be named `portrait` meanwhile.
 
 ### Audio scenes
 
-Audio from every source is mixed whether or not its scene is live, and cuts
+Switch on **Audio scenes & routes** in Settings, [Mods](#mods), first. Audio from every source is mixed whether or not its scene is live, and cuts
 never change it. A collection has one or more **audio scenes**, each the sum
 of the sounds it holds and of the audio scenes it holds: for example a "Mics"
 audio scene holding every microphone, which both a "Stream" audio scene (Mics,
@@ -1204,7 +1244,7 @@ taken out.
 
 ## Phone remote
 
-A phone paired as a remote drives the show from wherever it reaches the
+Switch on **Phone remote** in Settings, [Mods](#mods), first. A phone paired as a remote drives the show from wherever it reaches the
 relay, with nothing installed: its page shows the scene pads with their
 tally (ON AIR, FIRST, or NEXT, as the studio's own pads), TAKE and AUTO in
 Studio mode, each sound's mute, and the live clock, and the whole page is
@@ -1669,7 +1709,7 @@ and software otherwise.
 
 A broadcast source, such as a guest's camera, or a source with a track of its
 own can be **Published independently**, a switch in the inspector's Source
-section, off by default and kept in the scene file's `[published.<name>]`
+section while **Published scenes** is on in Settings, [Mods](#mods), off by default and kept in the scene file's `[published.<name>]`
 table. Viewers then fetch it as a broadcast of its own and place it over the
 program themselves, as the [composition](#composition) says:
 
@@ -1700,8 +1740,8 @@ encodes for as long as it is published, holding an encode session as one on
 program does.
 
 Once it is published, two more controls say how viewers may treat it, which
-the composition carries. They sit under the switch, and in Settings, Advanced
-under each published source, which is where a sound alone, with no layer to
+the composition carries. They sit under the switch, and in Settings, Mods,
+under Published scenes, under each published source, which is where a sound alone, with no layer to
 inspect, sets them:
 
 - **Viewers may switch it off**, off by default, lets each viewer turn it
@@ -1999,7 +2039,7 @@ through its Settings portal.
 
 ## Replay
 
-Add a `replay` source and place it like any other, such as full screen in a
+Switch on **Replay & review** in Settings, [Mods](#mods), first. Add a `replay` source and place it like any other, such as full screen in a
 scene of its own. On REVIEW, pick what to replay, the program or a source, by
 its card, and a speed of 100%, 50%, or 25%. The strip shows the last 30
 seconds of what is picked, a picture each time its track starts a group,
@@ -2046,7 +2086,7 @@ while it plays, like a camera.
 
 ## Markers
 
-Drop a marker on a moment as the show runs, on air or off, with the flag
+With **Replay & review** on in Settings, [Mods](#mods), drop a marker on a moment as the show runs, on air or off, with the flag
 beside the panic key or a key bound to **Drop a marker** (see
 [Hotkeys](#hotkeys)). REVIEW lists this session's markers, the newest first,
 each numbered in the order dropped, with how long ago it was. Type a name in
@@ -2172,10 +2212,11 @@ Each catalog asks viewers to report beneath its broadcast, under
 
 ## Virtual camera
 
-The **Virtual camera** toggle in Settings, Advanced, shows the program as a
+The **Virtual camera** toggle in Settings, Stream, shows the program as a
 camera that video-call and conferencing apps can pick, at the canvas size and
 frame rate, with each [published source](#published-independently) drawn
-over it as viewers see it. Each published scene has a toggle of its own beneath it,
+over it as viewers see it. Each published scene has a toggle of its own in
+Settings, Mods, under Published scenes,
 showing that scene at its own size as a camera of its own, so an app
 can pick the program or any published scene. A camera stays on until you
 turn it off or quit; it is not saved in the scene file. A scene's camera

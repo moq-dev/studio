@@ -269,6 +269,9 @@ pub struct Hotkeys {
 	/// The key bound to each action, which the thread firing them reads as
 	/// each key fires.
 	bound: Arc<Mutex<Bindings>>,
+	/// Those of [`bound`](Self::bound) whose mod is on, which the window's
+	/// keyboard takes when only it hears them.
+	live: Arc<Mutex<Bindings>>,
 	backend: Backend,
 	/// The keys last handed to the backend.
 	heard: Vec<Binding>,
@@ -279,6 +282,8 @@ pub struct Hotkeys {
 	suspended: Arc<AtomicBool>,
 	keyboard: Keyboard,
 	fire: mpsc::Sender<Binding>,
+	/// Which mods are on, whose actions' keys are heard only then.
+	controls: Arc<Controls>,
 }
 
 /// Where bound keys are heard.
@@ -340,8 +345,9 @@ impl Hotkeys {
 		let (fire, pressed) = mpsc::channel::<Binding>();
 		let bound: Arc<Mutex<Bindings>> = Arc::default();
 		let suspended = Arc::new(AtomicBool::new(false));
-		let (held_off, reading) = (suspended.clone(), bound.clone());
+		let (held_off, reading, firing) = (suspended.clone(), bound.clone(), controls.clone());
 		std::thread::spawn(move || {
+			let controls = firing;
 			for key in pressed {
 				// A key the desktop holds on Wayland still fires while the panel
 				// waits for one, and the panel never sees it.
@@ -358,7 +364,9 @@ impl Hotkeys {
 					.iter()
 					.find(|(_, bound)| bound.same(&key))
 					.map(|(action, _)| action.clone());
-				let Some(action) = action else {
+				// A key of a mod switched off since it was heard does nothing.
+				let Some(action) = action.filter(|action| action.needs().is_none_or(|needs| controls.mods.on(needs)))
+				else {
 					continue;
 				};
 				match &action {
@@ -377,12 +385,14 @@ impl Hotkeys {
 		let backend = Backend::new(&window, runtime, fire.clone());
 		let mut hotkeys = Self {
 			bound,
+			live: Arc::default(),
 			backend,
 			heard: Vec::new(),
 			refused: Vec::new(),
 			suspended,
 			keyboard: window.keyboard,
 			fire,
+			controls,
 		};
 		hotkeys.set(bindings);
 		hotkeys
@@ -452,10 +462,15 @@ impl Hotkeys {
 	/// in use where the platform matches keys through one. Called before each
 	/// frame too, so the keys follow a layout change.
 	pub fn hear(&mut self) {
-		let bindings = self.bindings();
+		// A key bound to an action of a mod switched off is left to other
+		// programs until it is back on.
+		let mods = &self.controls.mods;
+		let mut live = self.bindings();
+		live.retain(|action, _| action.needs().is_none_or(|needs| mods.on(needs)));
+		*self.live.lock().unwrap() = live.clone();
 		let heard: Vec<Binding> = match self.suspended.load(Ordering::Relaxed) {
 			true => Vec::new(),
-			false => bindings.values().cloned().collect(),
+			false => live.values().cloned().collect(),
 		};
 		// A rename moves no key, so the platform is left alone.
 		let moved =
@@ -476,7 +491,7 @@ impl Hotkeys {
 			// Held off, the desktop would be asked to bind them all again
 			// after each key the panel takes.
 			#[cfg(target_os = "linux")]
-			Backend::Portal(portal) => portal.set(bindings),
+			Backend::Portal(portal) => portal.set(live),
 			Backend::Focused(_) => {}
 		}
 		self.heard = heard;
@@ -516,7 +531,7 @@ impl Hotkeys {
 		let firing = matches!(self.reach(), Reach::Focused(_));
 		self.keyboard.take(match firing {
 			true => Taking::Firing {
-				bound: self.bound.clone(),
+				bound: self.live.clone(),
 				fire: self.fire.clone(),
 				typing,
 			},

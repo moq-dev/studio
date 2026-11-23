@@ -38,9 +38,10 @@ enum Card {
 }
 
 impl Panels {
-	/// Over `picture`, while the scene it shows has no layers, the quick
-	/// start: four cards, each adding the scene's first layer, and a word that
-	/// anything dropped or pasted on the picture lands there too.
+	/// Over `picture`, while the scene it shows has no layers, and on LIVE
+	/// only off air, the quick start: four cards, each adding the scene's
+	/// first layer, and a word that anything dropped or pasted on the picture
+	/// lands there too.
 	pub(super) fn quick_start(&mut self, ui: &mut Ui, picture: Rect) {
 		let engine = self.engine.clone();
 		let (layer, own) = {
@@ -48,8 +49,11 @@ impl Panels {
 			let Ok(layer) = self.scene(&state) else { return };
 			let collection = state.collection();
 			let empty = |layer: &Layer| collection.items(layer).is_none_or(<[Item]>::is_empty);
-			// LIVE shows the program, not a scene open off air.
-			let shown = self.page != Page::Live || self.off_air(&state).is_none();
+			// LIVE shows the program, not a scene open off air, and never offers
+			// to change the program on air or on its way there, where one click
+			// would put a device straight on the stream.
+			let live = self.engine.on_air() != crate::engine::OnAir::Off || self.controls.going();
+			let shown = self.page != Page::Live || (!live && self.off_air(&state).is_none());
 			if !shown || !empty(&layer) || !empty(&Layer::top()) {
 				return;
 			}

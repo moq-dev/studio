@@ -28,6 +28,7 @@ mod kit;
 mod ladder;
 mod markers;
 mod mix;
+mod mods;
 mod past;
 mod pointer;
 mod probe;
@@ -746,8 +747,9 @@ fn run(scenes: Option<PathBuf>, opener: show::Opener) -> anyhow::Result<()> {
 			kit::install(&cc.egui_ctx);
 			let fx = fx::Fx::new(&render, &cc.egui_ctx, &opener.runtime);
 			let recent = recent::Recent::load(cc.storage);
-			// The last show is reopened while it is there, and a new one made if
-			// it cannot be; a show named on the command line is the only one.
+			// The newest listed show still there is reopened, else the last one
+			// saved in app data, and a new one made if there is none or it cannot
+			// be opened; a show named on the command line is the only one.
 			let shows = show::dir();
 			let last = recent
 				.last()

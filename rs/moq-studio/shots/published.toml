@@ -1,6 +1,7 @@
 # The show `just shots` renders a published source on: the host's picture,
 # published independently, which viewers may switch off and which degrades
-# before the program for them.
+# before the program for them; and a scene of a size of its own, which the
+# program refuses.
 version = 1
 
 [canvas]
@@ -30,4 +31,13 @@ items = [
     { source = "backdrop", rect = { x = 0, y = 0, width = 1920, height = 1080 } },
     { source = "host", rect = { x = 1200, y = 600, width = 640, height = 360 } },
     { source = "bar", rect = { x = 80, y = 860, width = 900, height = 120 } },
+]
+
+# A scene the program refuses, at a size of its own, whose pad says why.
+[[scenes]]
+name = "Vertical"
+size = { width = 1080, height = 1920 }
+items = [
+    { source = "backdrop", rect = { x = 0, y = 0, width = 1080, height = 1920 } },
+    { source = "host", rect = { x = 0, y = 656, width = 1080, height = 608 } },
 ]
