@@ -2755,7 +2755,9 @@ mod tests {
 			restart: true,
 		};
 		let mut collection = Collection::new();
-		let image = Source::Image { path: "logo.png".into() };
+		let image = Source::Image {
+			path: "logo.png".into(),
+		};
 		collection.sources.insert("logo".into(), image);
 		collection.sources.insert("text".into(), overlay("<p>Hello</p>"));
 
@@ -2767,7 +2769,8 @@ mod tests {
 		assert_eq!(copy.sources["logo"], rooted);
 
 		let mut copy = collection.clone();
-		copy.sources.insert("face".into(), overlay(r#"<img src="face.jpg" alt="">"#));
+		copy.sources
+			.insert("face".into(), overlay(r#"<img src="face.jpg" alt="">"#));
 		let before = copy.clone();
 		let err = copy.root(dir.path()).unwrap_err();
 		assert!(err.to_string().contains("`face`"), "{err}");

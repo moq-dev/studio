@@ -68,7 +68,9 @@ impl Opener {
 				&& let Some(videos) = videos()
 			{
 				let file = stream::path(&path);
-				let there = file.try_exists().with_context(|| format!("reading {}", file.display()))?;
+				let there = file
+					.try_exists()
+					.with_context(|| format!("reading {}", file.display()))?;
 				let saved = stream::Saved {
 					recordings: Some(videos),
 					..stream.saved().clone()
@@ -236,10 +238,7 @@ pub fn rename(path: &Path, name: &str, recordings: &Path) -> anyhow::Result<Path
 	if to == path {
 		return Ok(to);
 	}
-	let there = |file: &Path| {
-		file.try_exists()
-			.with_context(|| format!("reading {}", file.display()))
-	};
+	let there = |file: &Path| file.try_exists().with_context(|| format!("reading {}", file.display()));
 	// A name only cased apart is the show's own on a case-insensitive system.
 	let met = |from: &Path, to: &Path| -> anyhow::Result<bool> {
 		Ok(there(to)? && !same_file::is_same_file(from, to).unwrap_or(false))
@@ -283,7 +282,9 @@ fn named_after(dir: &Path, old: &str, new: &str) -> anyhow::Result<Vec<(PathBuf,
 	for entry in entries {
 		let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
 		// The recorder names its files in UTF-8, after the show's name.
-		let Ok(file) = entry.file_name().into_string() else { continue };
+		let Ok(file) = entry.file_name().into_string() else {
+			continue;
+		};
 		let recording = file.strip_suffix(crate::record::MARKER).unwrap_or(&file);
 		if crate::shelf::parse(old, recording).is_some() {
 			moves.push((entry.path(), dir.join(format!("{new}{}", &file[old.len()..]))));
@@ -406,12 +407,25 @@ mod tests {
 			format!("My Show {stamp} mic (2).mp4.unfinished"),
 			"My Show-clip-3.mp4".to_string(),
 		];
-		let theirs = [format!("My Show 2 {stamp}.mp4"), "My Show 2-clip-1.mp4".into(), "My Show.mp4".into()];
+		let theirs = [
+			format!("My Show 2 {stamp}.mp4"),
+			"My Show 2-clip-1.mp4".into(),
+			"My Show.mp4".into(),
+		];
 		for file in ours.iter().chain(&theirs) {
 			std::fs::write(videos.join(file), file).unwrap();
 		}
 
-		for refused in ["", "  ", ".hidden", "a/b", "a\\b", "Taken", "Talk.history", "Talk.STREAM"] {
+		for refused in [
+			"",
+			"  ",
+			".hidden",
+			"a/b",
+			"a\\b",
+			"Taken",
+			"Talk.history",
+			"Talk.STREAM",
+		] {
 			assert!(rename(&path, refused, &videos).is_err(), "{refused:?} was taken");
 		}
 		assert!(path.exists(), "a refused rename moves nothing");

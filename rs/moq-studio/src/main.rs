@@ -368,9 +368,7 @@ impl Window {
 				true,
 			),
 		};
-		let name = path
-			.as_deref()
-			.map_or_else(|_| "a new show".to_string(), show::name);
+		let name = path.as_deref().map_or_else(|_| "a new show".to_string(), show::name);
 		let opener = self.opener.clone();
 		let task = match path {
 			Ok(path) => task::Task::spawn(
