@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context;
-use moq_scene::{Canvas, Collection, History, Source};
+use moq_scene::{Canvas, Collection, Source};
 
 use crate::autosave::{self, Autosave};
 use crate::engine::{self, Engine, Launch};
@@ -19,14 +19,60 @@ const NAME: &str = "My Show";
 /// What no file name holds on some system.
 const RESERVED: [char; 9] = ['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
 
-/// Held while a rename moves a show's files, so quitting waits for them to
-/// land together; true once the studio is quitting, when no rename starts.
+/// Held while this studio claims a show's name or moves its files, so
+/// quitting waits for them to land together; true once the studio is
+/// quitting, when no claim starts.
 static MOVING: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
 
-/// Wait for a rename moving a show's files, and start no other, so the
-/// process never ends with a show split across two names.
+/// Wait for a claim under way, and start no other, so the process never
+/// ends with a show split across two names or half made.
 pub fn settle() {
 	*MOVING.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+}
+
+/// The file in a folder of shows that every studio locks while it claims a
+/// name there or moves a show's files, from its checks until its files land
+/// or are put back.
+const LOCK: &str = ".moq-studio.lock";
+
+/// A folder of shows, held by this studio alone: against every other
+/// studio, through the folder's lock file, and against this one quitting.
+struct Claim {
+	_quitting: std::sync::MutexGuard<'static, bool>,
+	_lock: std::fs::File,
+}
+
+/// Hold `dir`, waiting for any other studio holding it, which does only
+/// while it names, makes, or renames a show there.
+fn claim(dir: &Path) -> anyhow::Result<Claim> {
+	let dir = match dir.as_os_str().is_empty() {
+		true => Path::new("."),
+		false => dir,
+	};
+	let path = dir.join(LOCK);
+	let lock = std::fs::OpenOptions::new()
+		.create(true)
+		.truncate(false)
+		.write(true)
+		.open(&path)
+		.with_context(|| format!("opening {}", path.display()))?;
+	// Waited for before this studio's own, so quitting never waits on another.
+	lock.lock().with_context(|| format!("locking {}", path.display()))?;
+	let quitting = MOVING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+	anyhow::ensure!(!*quitting, "the studio is quitting");
+	Ok(Claim {
+		_quitting: quitting,
+		_lock: lock,
+	})
+}
+
+/// Where a new show is made.
+pub enum New {
+	/// The scene file named on the command line, unless it is there.
+	At(PathBuf),
+	/// The next free name in a folder, as [`new_path`] picks it with the
+	/// folders its recordings may go to.
+	In { dir: PathBuf, recordings: Vec<PathBuf> },
 }
 
 /// What the microphone a new show hears is called.
@@ -46,78 +92,109 @@ pub struct Opener {
 }
 
 impl Opener {
-	/// Open the show at `path` and start its engine, creating the show when
-	/// `create` and there is no scene file there yet. A new show starts on the
-	/// canvas this machine encodes smoothly, hearing the system's microphone
-	/// if it has one, and is saved at once. Nothing goes live, and its guests'
-	/// room opens with the window, which follows the show's relays.
-	pub async fn open(&self, path: PathBuf, create: bool) -> anyhow::Result<(Arc<Engine>, Stream)> {
-		let mut stream = Stream::load(
+	/// Make a show as [`New`] says, unless the file it names is there, and
+	/// say where it is. It starts on the canvas this machine encodes
+	/// smoothly, hearing the system's microphone if it has one.
+	pub async fn create(&self, new: New) -> anyhow::Result<PathBuf> {
+		if let New::At(path) = &new
+			&& exists(path)?
+		{
+			return Ok(path.clone());
+		}
+		let (canvas, mic) = tokio::join!(probe::first_canvas(self.gpu.clone()), microphone());
+		make(new, &first(canvas, mic)?)
+	}
+
+	/// Open the show at `path` and start its engine. Nothing goes live, and
+	/// its guests' room opens with the window, which follows the show's
+	/// relays.
+	pub async fn open(&self, path: PathBuf) -> anyhow::Result<(Arc<Engine>, Stream)> {
+		let stream = Stream::load(
 			&path,
 			self.flags.clone(),
 			self.client.clone(),
 			self.quic.clone(),
 			self.credentials.clone(),
 		)?;
-		let (autosave, mut loaded) = Autosave::open(path.clone())?;
-		let new = !autosave.exists();
-		// The stream settings a new show had before this wrote its recordings
-		// folder, `None` for no file, to put back if it cannot be made.
-		let mut wrote = None;
-		anyhow::ensure!(create || !new, "{} is no longer there", autosave.path().display());
-		if new {
-			let (canvas, mic) = tokio::join!(probe::first_canvas(self.gpu.clone()), microphone());
-			// Nothing to undo, whatever history was left beside a removed file.
-			loaded = autosave::Loaded {
-				collection: first(canvas, mic)?,
-				history: History::new(),
-				dropped: 0,
-			};
-			// Kept out of the app's storage, where nobody would find them.
-			if in_storage(autosave.path())
-				&& stream.saved().recordings.is_none()
-				&& let Some(videos) = videos()
-			{
-				let before = exists(stream.path())?.then(|| stream.saved().clone());
-				let saved = stream::Saved {
-					recordings: Some(videos),
-					..stream.saved().clone()
-				};
-				stream.save(saved, &[])?;
-				wrote = Some(before);
-			}
-		}
+		let (autosave, loaded) = Autosave::open(path.clone())?;
+		anyhow::ensure!(autosave.exists(), "{} is no longer there", autosave.path().display());
 		let launch = Launch {
 			gpu: self.gpu.clone(),
 			recordings: stream.recordings(autosave.path()),
 			sessions: Default::default(),
 		};
-		let started = async {
-			let engine = Engine::start(launch, autosave, loaded).await?;
-			// Now, so the show's name is taken and a failure says so here.
-			if new && let Err(err) = engine.save() {
-				engine.recorder.close();
-				engine.stop();
-				tokio::join!(engine.close(), engine.recorder.done());
-				return Err(err.context("cannot create the show"));
-			}
-			Ok(engine)
-		};
-		match started.await {
-			Ok(engine) => Ok((engine, stream)),
-			Err(err) => {
-				let undone = match wrote {
-					None => Ok(()),
-					Some(Some(before)) => stream.save(before, &[]),
-					Some(None) => std::fs::remove_file(stream.path()).map_err(Into::into),
-				};
-				if let Err(err) = undone {
-					tracing::warn!(error = format!("{err:#}"), "cannot put back a show's stream settings");
-				}
-				Err(err)
-			}
+		let engine = Engine::start(launch, autosave, loaded).await?;
+		Ok((engine, stream))
+	}
+}
+
+/// Make the show [`New`] names holding `collection`, holding its folder from
+/// picking its name until its files are written, so no other studio's show
+/// takes the name meanwhile. Its stream settings go first, sending its
+/// recordings to the Videos folder when it is in the app's storage, then its
+/// scene file, whose being there makes it a show. Where it is.
+fn make(new: New, collection: &Collection) -> anyhow::Result<PathBuf> {
+	let dir = match &new {
+		New::At(path) => path.parent().unwrap_or(Path::new("")).to_path_buf(),
+		New::In { dir, .. } => {
+			std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+			dir.clone()
+		}
+	};
+	let _claim = claim(&dir)?;
+	let path = match new {
+		// Made by another studio since it was looked for.
+		New::At(path) if exists(&path)? => return Ok(path),
+		New::At(path) => path,
+		New::In { dir, recordings } => new_path(&dir, &recordings)?,
+	};
+	let settings = stream::path(&path);
+	let before = match std::fs::read_to_string(&settings) {
+		Ok(text) => Some(text),
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+		Err(err) => return Err(err).with_context(|| format!("reading {}", settings.display())),
+	};
+	let mut wrote = false;
+	// Kept out of the app's storage, where nobody would find them.
+	if in_storage(&path)
+		&& let Some(videos) = videos()
+	{
+		let saved = saved(&settings)?;
+		if saved.recordings.is_none() {
+			let saved = stream::Saved {
+				recordings: Some(videos),
+				..saved
+			};
+			let text = toml::to_string(&saved).context("cannot write the stream settings")?;
+			autosave::write_file(&settings, &text).with_context(|| format!("writing {}", settings.display()))?;
+			wrote = true;
 		}
 	}
+	let made = (|| {
+		// A history beside no scene file is a removed show's.
+		let history = autosave::history_path(&path);
+		match std::fs::remove_file(&history) {
+			Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+				return Err(anyhow::Error::from(err).context(format!("removing {}", history.display())));
+			}
+			_ => {}
+		}
+		let text = collection.to_toml()?;
+		autosave::write_file(&path, &text).with_context(|| format!("writing {}", path.display()))
+	})();
+	if let Err(err) = made {
+		if wrote {
+			let undone = match &before {
+				Some(text) => autosave::write_file(&settings, text),
+				None => std::fs::remove_file(&settings),
+			};
+			if let Err(err) = undone {
+				tracing::warn!(error = format!("{err:#}"), "cannot put back a show's stream settings");
+			}
+		}
+		return Err(err.context("cannot create the show"));
+	}
+	Ok(path)
 }
 
 /// A new show's collection: one empty scene on `canvas`, hearing the
@@ -258,10 +335,14 @@ pub fn rename(path: &Path, name: &str, recordings: &Path) -> anyhow::Result<Path
 	if to == path {
 		return Ok(to);
 	}
+	let dir = path.parent().unwrap_or(Path::new(""));
+	// Held from the checks until the files land or are put back, so no
+	// other studio claims either name meanwhile.
+	let _claim = claim(dir)?;
+	anyhow::ensure!(exists(path)?, "{} is no longer there", path.display());
 	let old = self::name(path);
 	let mut saved = saved(&stream::path(path))?;
 	let ours = saved.earlier.iter().any(|earlier| earlier == name);
-	let dir = path.parent().unwrap_or(Path::new(""));
 	for (from, to) in files(path).into_iter().zip(files(&to)) {
 		// A name only cased apart is the show's own on a case-insensitive
 		// system; any other name for the same file, such as a hard link, is not.
@@ -285,35 +366,13 @@ pub fn rename(path: &Path, name: &str, recordings: &Path) -> anyhow::Result<Path
 	}
 	// Taken while the file is there to resolve.
 	let key = engine::grant_key(path).with_context(|| format!("reading {}", path.display()))?;
-	let quitting = MOVING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-	anyhow::ensure!(!*quitting, "the studio is quitting");
 
-	// The name, held against another studio taking it since the checks: one
-	// renaming or creating a show there makes its scene file only where none
-	// is, so the move below replaces only this placeholder. The show's other
-	// files go wherever its scene file is. A name only cased apart is already
-	// the show's own file on a case-insensitive system.
-	let recased = name.to_lowercase() == old.to_lowercase() && same_file::is_same_file(path, &to).unwrap_or(false);
-	if !recased {
-		std::fs::OpenOptions::new()
-			.write(true)
-			.create_new(true)
-			.open(&to)
-			.map_err(|err| match err.kind() {
-				std::io::ErrorKind::AlreadyExists => anyhow::anyhow!("another show is called {name}"),
-				_ => anyhow::Error::from(err).context(format!("creating {}", to.display())),
-			})?;
-	}
 	let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
 	let put_back = |moved: Vec<(PathBuf, PathBuf)>| {
-		let placed = moved.iter().any(|(_, moved)| *moved == to);
 		for (from, to) in moved.into_iter().rev() {
 			if let Err(err) = std::fs::rename(&to, &from) {
 				tracing::error!(%err, from = %to.display(), to = %from.display(), "cannot put a show's file back");
 			}
-		}
-		if !recased && !placed {
-			let _ = std::fs::remove_file(&to);
 		}
 	};
 	for (from, to) in files(path).into_iter().zip(files(&to)) {
@@ -325,11 +384,6 @@ pub fn rename(path: &Path, name: &str, recordings: &Path) -> anyhow::Result<Path
 		});
 		match result {
 			Ok(true) => moved.push((from, to)),
-			// Its placeholder would be left as an empty show.
-			Ok(false) if from == path => {
-				put_back(moved);
-				anyhow::bail!("{} is no longer there", path.display());
-			}
 			Ok(false) => {}
 			Err(err) => {
 				put_back(moved);
@@ -632,6 +686,49 @@ mod tests {
 			"Talk recorded in the saved folder"
 		);
 		assert!(path.exists());
+	}
+
+	/// A claim holds its folder against every other studio until it ends,
+	/// through a lock file there that each studio opens on its own.
+	#[test]
+	fn a_claim_holds_its_folder() {
+		let dir = tempfile::tempdir().unwrap();
+		let other = || std::fs::File::open(dir.path().join(LOCK)).unwrap();
+		let held = claim(dir.path()).unwrap();
+		assert!(matches!(other().try_lock(), Err(std::fs::TryLockError::WouldBlock)));
+		drop(held);
+		other().try_lock().expect("free once the claim ends");
+	}
+
+	/// A new show takes the next free name with its collection, in place of a
+	/// removed show's history; one named on the command line that is there
+	/// is left as it is.
+	#[test]
+	fn makes_a_new_show() {
+		let dir = tempfile::tempdir().unwrap();
+		let collection = first(Canvas::default(), false).unwrap();
+		let into = || New::In {
+			dir: dir.path().to_path_buf(),
+			recordings: Vec::new(),
+		};
+		let path = make(into(), &collection).unwrap();
+		assert_eq!(path, dir.path().join("My Show.toml"));
+		let read = |path: &Path| Collection::from_toml(&std::fs::read_to_string(path).unwrap()).unwrap();
+		assert_eq!(read(&path), collection);
+		assert_eq!(make(into(), &collection).unwrap(), dir.path().join("My Show 2.toml"));
+
+		let named = dir.path().join("Talk.toml");
+		std::fs::write(autosave::history_path(&named), b"\xff not a history").unwrap();
+		assert_eq!(make(New::At(named.clone()), &collection).unwrap(), named);
+		assert!(
+			!autosave::history_path(&named).exists(),
+			"the removed show's history goes"
+		);
+		Autosave::open(named.clone()).expect("the new show opens");
+
+		std::fs::write(&named, "kept").unwrap();
+		assert_eq!(make(New::At(named.clone()), &collection).unwrap(), named);
+		assert_eq!(std::fs::read_to_string(&named).unwrap(), "kept");
 	}
 
 	/// A recording that reads as the new name and as the show's own, as a

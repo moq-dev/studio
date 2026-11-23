@@ -158,6 +158,10 @@ renamed show that cannot open keeps its new name, and a new show opens in its
 place, saying why. The list is yours, kept with the app's settings rather than
 beside any show.
 
+Two studios can share a folder of shows: each locks `.moq-studio.lock` there
+while it names, makes, or renames a show, so neither takes a name the other is
+using or moves a file onto one of the other's.
+
 ## The window
 
 The studio opens to its **LIVE** page: the program as large as the window

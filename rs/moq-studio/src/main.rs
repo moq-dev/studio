@@ -460,20 +460,20 @@ impl Window {
 		let spawned = task::Task::spawn(&self.opener.runtime, move || async move {
 			let mut moved = None;
 			let opened = async {
-				let (path, create) = match target {
-					Target::Open(path) => (path, false),
-					Target::Create(path) => (path, true),
+				let path = match target {
+					Target::Open(path) => path,
+					Target::Create(path) => opener.create(show::New::At(path)).await?,
 					Target::New => {
-						let shows = shows.context("this system has no app storage to keep a show in")?;
-						(show::new_path(&shows, &recordings)?, true)
+						let dir = shows.context("this system has no app storage to keep a show in")?;
+						opener.create(show::New::In { dir, recordings }).await?
 					}
 					Target::Rename { from, name, recordings } => {
 						let to = show::rename(&from, &name, &recordings).context("cannot rename the show")?;
 						moved = Some(to.clone());
-						(to, false)
+						to
 					}
 				};
-				opener.open(path, create).await
+				opener.open(path).await
 			}
 			.await;
 			(moved, opened)
