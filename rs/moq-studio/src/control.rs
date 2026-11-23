@@ -68,7 +68,8 @@ pub enum Request {
 	Hover { target: Target },
 	/// Press on `from`, move to `to`, and release there.
 	Drag { from: Target, to: Target },
-	/// Turn the wheel over `target` by a distance in points.
+	/// Scroll what is under `target` by a distance in points: positive `dy`
+	/// brings what is below into view.
 	Scroll { target: Target, dx: f32, dy: f32 },
 	/// Type text into the widget with the keyboard focus.
 	Type { text: String },
@@ -769,12 +770,22 @@ fn pointer(at: &[egui::Pos2], request: &Request) -> VecDeque<Frame> {
 				frames.push_back(press(*button, false));
 			}
 		}
-		Request::Scroll { dx, dy, .. } => frames.push_back(Frame::of([egui::Event::MouseWheel {
-			unit: egui::MouseWheelUnit::Point,
-			delta: egui::vec2(*dx, *dy),
-			phase: egui::TouchPhase::Move,
-			modifiers: egui::Modifiers::NONE,
-		}])),
+		Request::Scroll { dx, dy, .. } => {
+			// A trackpad's gesture, which egui applies at once, where it eases
+			// a wheel's notch in over frames the reply would not wait for.
+			// egui's delta moves the content, so it is the scroll's opposite.
+			let wheel = |phase, delta| egui::Event::MouseWheel {
+				unit: egui::MouseWheelUnit::Point,
+				delta,
+				phase,
+				modifiers: egui::Modifiers::NONE,
+			};
+			frames.push_back(Frame::of([
+				wheel(egui::TouchPhase::Start, egui::Vec2::ZERO),
+				wheel(egui::TouchPhase::Move, -egui::vec2(*dx, *dy)),
+			]));
+			frames.push_back(Frame::of([wheel(egui::TouchPhase::End, egui::Vec2::ZERO)]));
+		}
 		_ => {}
 	}
 	frames

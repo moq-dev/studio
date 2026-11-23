@@ -224,6 +224,17 @@ async fn an_agent_builds_a_show() {
 	studio.ctl(&["wait", "--shown", "Scene sizes"]);
 	studio.audit("the settings");
 
+	// Hotkeys runs past the dialog's foot, so a scroll moves it up.
+	studio.ctl(&["click", "Hotkeys"]);
+	let top = |studio: &Studio| {
+		find(&studio.snapshot()["tree"], "Bind Go live").expect("a Go live hotkey")["rect"][1]
+			.as_f64()
+			.unwrap()
+	};
+	let before = top(&studio);
+	studio.ctl(&["scroll", "Bind Go live", "--dy", "40"]);
+	assert_eq!(top(&studio), before - 40.0, "scrolled by the points asked");
+
 	// A target that names nothing fails, and says so.
 	let missing = studio.run(&["click", "No such button"]);
 	assert!(!missing.status.success());

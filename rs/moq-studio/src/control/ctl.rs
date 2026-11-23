@@ -84,8 +84,8 @@ struct Drag {
 	to: String,
 }
 
-/// Turn the wheel over a target, by points: positive `dy` scrolls content
-/// down into view.
+/// Scroll what is under a target, by points: positive `dy` brings what is
+/// below into view.
 #[derive(usage_rs::Args)]
 struct Scroll {
 	target: String,

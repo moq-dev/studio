@@ -2232,7 +2232,8 @@ answer:
 - `screenshot <file.png>` saves what the window shows.
 - `click`, `right-click`, `double-click`, and `hover` act on a target, and
   `drag <from> <to>` presses on one and lets go on another.
-- `scroll <target> --dy <points>` turns the wheel over it.
+- `scroll <target> --dy <points>` scrolls what is under it, down for a
+  positive `dy`, and `--dx` sideways.
 - `type <text>` types into the focused field, and `key <combo>` presses a
   key, such as `Enter`, `Escape`, or `ctrl+z`.
 - `wait` blocks until `--shown <target>` is in the window, `--gone <target>`
