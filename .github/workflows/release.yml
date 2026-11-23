@@ -22,6 +22,9 @@ jobs:
     uses: ./.github/workflows/macos.yml
     with:
       sign: true
+    # The Sign job reads the release environment's secrets, which a called
+    # workflow sees only when its caller passes secrets; otherwise each is "".
+    secrets: inherit
 
   publish:
     name: Publish
