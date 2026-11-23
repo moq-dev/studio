@@ -12,7 +12,8 @@ The remote is on `main` once
 [moq-dev/studio#212](https://github.com/moq-dev/studio/pull/212) merges, and
 the join page deploy serves it at `https://join.studio.moq.dev/remote.html`.
 With a room set up in Settings, Guests (see the README's Guests and Phone
-remote sections), pair a phone in Settings, Remote, and scan its QR code.
+remote sections), switch on **Phone remote** in Settings, Mods, pair a phone
+in Settings, Remote, and scan its QR code.
 What to try, beside the [LIVE mock-up](/quest/m0/ux/mock/shell-live.webp):
 
 - **Reach:** the phone on cellular rather than the studio's network, then

@@ -490,8 +490,8 @@ views! {
 	/// key and why it cannot run now, before the pages, settings, and what
 	/// can be added.
 	palette: Still, studio(View::Palette(""));
-	/// The palette finding what `take` names: the scenes and TAKE, which says
-	/// nothing is cued.
+	/// The palette finding what `take` names: the scenes, as TAKE is Studio
+	/// mode's, off.
 	palette_found: Still, studio(View::Palette("take"));
 	/// The palette finding a setting by its name.
 	palette_setting: Still, studio(View::Palette("frame"));
@@ -1104,7 +1104,8 @@ fn the_palette_finds_and_runs_anything() {
 /// and moves to the room it saves at once, off air, dropping a phone's link
 /// into the room it left. The recordings folder
 /// moves only once no recording is under way. The scene
-/// graph's Open closes Settings for the graph. It draws no view.
+/// graph's Open, once switched on in Mods, closes Settings for the graph.
+/// It draws no view.
 #[test]
 #[ignore = "draws on a GPU; run with `just shots`"]
 fn settings_change_the_show_and_move_the_guests() {

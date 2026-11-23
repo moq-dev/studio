@@ -13,7 +13,8 @@ The Settings window is on `main` (`cargo run -p moq-studio --features capture`),
 opened from the title bar's gear. What to try, on a show going live to a relay:
 
 - **Placement:** whether each setting is where a streamer would look for it,
-  across Show, Stream, Recording, Hotkeys, Guests, and Advanced.
+  across Show, Stream, Recording, Hotkeys, Guests, and Mods, and Remote once
+  Phone remote is switched on in Mods.
 - **Words:** each pane's lead line, each setting's help line, and the cost a
   line names (the canvas size's upload, an encoder per published scene).
 - **On air:** a new canvas size or frame rate while live asks "Restart the
