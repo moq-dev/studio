@@ -625,6 +625,11 @@ impl Controls {
 		admitted.then(|| Probing(self.probes.clone()))
 	}
 
+	/// Whether an encoder check is running, a stale one's included.
+	pub fn probes_running(&self) -> bool {
+		self.probes.borrow().running > 0
+	}
+
 	/// Admit no more encoder checks until this go-live ends, and wait out
 	/// those running, bounded at [`PROBED`], past which the program's
 	/// encoders open anyway and a refused one says why.

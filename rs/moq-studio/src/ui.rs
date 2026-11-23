@@ -336,6 +336,7 @@ impl Studio {
 			confirm_end: false,
 			ready: None,
 			tokens: 0,
+			dialing: None,
 			stream_form: None,
 			guests_form: None,
 			typing: false,
@@ -798,6 +799,9 @@ struct Panels {
 	/// How many saves set a relay's token, which a check made before is
 	/// stale after.
 	tokens: u64,
+	/// Since when the preferred relay has been on its first dial, which the
+	/// check waits out a while.
+	dialing: Option<kio::clock::Instant>,
 	/// The Destinations pane's form, holding edits until they save.
 	stream_form: Option<live::Form>,
 	/// The Guests pane's form, holding edits until they save.

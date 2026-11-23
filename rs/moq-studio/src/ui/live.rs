@@ -380,16 +380,25 @@ impl Panels {
 			self.follow_going();
 			return;
 		}
-		// One encoder check at a time: a stale one still timing finishes
-		// first, as its thread would run on beside the next anyway.
-		let timing = self
-			.ready
-			.as_ref()
-			.is_some_and(|ready| matches!(ready.encoder, Task::Running(_)));
-		// Not during a relay's first dial, whose session counts toward what a
-		// check is of: one checked before would go stale as it connects. A
-		// dial that failed checks at once, and again once it connects.
-		let dialing = self.engine.dialing();
+		// One encoder check at a time: a stale one still timing, even one
+		// dropped, finishes first, as its thread runs on beside the next.
+		let timing = self.controls.probes_running();
+		// Not during the preferred relay's first dial, whose session counts
+		// toward what a check is of: one checked before would go stale as it
+		// connects. A dial that failed checks at once, and again once it
+		// connects; one that hangs, after a measurement's length.
+		let now = kio::clock::now();
+		let dialing = match (self.engine.dialing(), self.dialing) {
+			(false, _) => {
+				self.dialing = None;
+				false
+			}
+			(true, None) => {
+				self.dialing = Some(now);
+				true
+			}
+			(true, Some(since)) => now.saturating_duration_since(since) < uplink::WINDOW,
+		};
 		if self.ready.as_ref().is_none_or(|ready| ready.of != of) && !timing && !dialing {
 			// Not admitted while a go-live opens the program's encoders.
 			self.ready = self

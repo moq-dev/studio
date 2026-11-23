@@ -657,14 +657,15 @@ impl Engine {
 			.collect()
 	}
 
-	/// Whether a relay [watched](Self::watch) is still on its first dial,
-	/// neither connected nor failed yet.
+	/// Whether the preferred relay [watched](Self::watch), the one going live
+	/// is measured to, is still on its first dial, neither connected nor
+	/// failed yet.
 	pub fn dialing(&self) -> bool {
 		use moq_tokio::connection::Phase;
 		let watching = self.watching.lock().unwrap();
 		watching
-			.iter()
-			.any(|watch| matches!(watch.link.monitor.state().phase, Phase::Connecting { failure: None }))
+			.first()
+			.is_some_and(|watch| matches!(watch.link.monitor.state().phase, Phase::Connecting { failure: None }))
 	}
 
 	/// How many sessions the relays [watched](Self::watch) have connected,
