@@ -134,7 +134,7 @@ impl GuestForm {
 	}
 
 	/// Whether the form holds anything to save over `saved`.
-	fn edited(&self, saved: &Saved) -> bool {
+	pub(super) fn edited(&self, saved: &Saved) -> bool {
 		self.saved(saved).is_ok_and(|form| form != *saved) || self.saved(saved).is_err()
 	}
 
@@ -152,10 +152,10 @@ impl GuestForm {
 		Some(next)
 	}
 
-	/// Whether the form, after a save over `before`, holds no edit of its
-	/// own: none over `before`, or only the one just saved.
-	pub(super) fn settled(&self, before: &Saved) -> bool {
-		!self.edited(before) || self.saved(before).ok().is_some_and(|now| Some(now) == self.tried)
+	/// Whether the form, after its save over `before`, still holds just
+	/// what it sent.
+	pub(super) fn sent(&self, before: &Saved) -> bool {
+		self.saved(before).ok().is_some_and(|now| Some(now) == self.tried)
 	}
 
 	/// Let the next change save, once a save of another finished.
@@ -1134,6 +1134,7 @@ impl Panels {
 		self.saving = Some(super::live::Saving {
 			from: Setting::Recording,
 			retokened: false,
+			form: false,
 			task: match spawned {
 				Ok(_) => Task::Running(recv),
 				Err(err) => Task::Done(Err(format!("cannot save: {err}"))),

@@ -657,14 +657,22 @@ impl Engine {
 			.collect()
 	}
 
-	/// How many times the relays [watched](Self::watch) connected again, each
-	/// session after a relay's first, as a new network path makes them do.
-	pub fn reconnects(&self) -> u64 {
+	/// Whether a relay [watched](Self::watch) is still on its first dial,
+	/// neither connected nor failed yet.
+	pub fn dialing(&self) -> bool {
+		use moq_tokio::connection::Phase;
 		let watching = self.watching.lock().unwrap();
 		watching
 			.iter()
-			.map(|watch| watch.link.monitor.state().connects.saturating_sub(1))
-			.sum()
+			.any(|watch| matches!(watch.link.monitor.state().phase, Phase::Connecting { failure: None }))
+	}
+
+	/// How many sessions the relays [watched](Self::watch) have connected,
+	/// which the first connect and each reconnect, such as on a new network
+	/// path, count up.
+	pub fn connects(&self) -> u64 {
+		let watching = self.watching.lock().unwrap();
+		watching.iter().map(|watch| watch.link.monitor.state().connects).sum()
 	}
 
 	/// Close each watching session, so its relay hears the close.

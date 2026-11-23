@@ -39,9 +39,9 @@ struct Checked {
 	broadcast: String,
 	/// How many saves set a relay's token.
 	tokens: u64,
-	/// How many times the relays watched connected again, as a new network
-	/// path makes them.
-	reconnects: u64,
+	/// How many sessions the relays watched connected: the first, and each
+	/// reconnect, as on a new network path.
+	connects: u64,
 }
 
 /// How a check came out.
@@ -347,7 +347,7 @@ impl Panels {
 			relays,
 			broadcast,
 			tokens: self.tokens,
-			reconnects: self.engine.reconnects(),
+			connects: self.engine.connects(),
 		})
 	}
 
@@ -380,12 +380,26 @@ impl Panels {
 			self.follow_going();
 			return;
 		}
-		if self.ready.as_ref().is_none_or(|ready| ready.of != of) {
+		// One encoder check at a time: a stale one still timing finishes
+		// first, as its thread would run on beside the next anyway.
+		let timing = self
+			.ready
+			.as_ref()
+			.is_some_and(|ready| matches!(ready.encoder, Task::Running(_)));
+		// Not during a relay's first dial, whose session counts toward what a
+		// check is of: one checked before would go stale as it connects. A
+		// dial that failed checks at once, and again once it connects.
+		let dialing = self.engine.dialing();
+		if self.ready.as_ref().is_none_or(|ready| ready.of != of) && !timing && !dialing {
 			// Not admitted while a go-live opens the program's encoders.
 			self.ready = self
 				.controls
 				.probing()
 				.map(|probing| Ready::new(self.engine.gpu().clone(), &self.runtime, of, probing));
+			// A refusal from before is of what this checks again.
+			if self.ready.is_some() && self.going.as_ref().is_some_and(|going| going.armed) {
+				*self.controls.refused.lock().unwrap() = None;
+			}
 		}
 		if let Some(ready) = &mut self.ready {
 			ready.advance(&self.controls, &self.runtime);
@@ -400,7 +414,9 @@ impl Panels {
 	pub(super) fn press_go_live(&mut self) {
 		*self.controls.refused.lock().unwrap() = None;
 		let outcome = self.fresh().map(Ready::outcome);
-		if outcome == Some(Outcome::Passed) {
+		// Never to the relay before an edit to it saves.
+		let unsaved = self.controls.unsaved.lock().unwrap().is_some();
+		if outcome == Some(Outcome::Passed) && !unsaved {
 			match self.controls.go_live() {
 				Ok(_) => {
 					self.going = None;
@@ -426,7 +442,8 @@ impl Panels {
 			self.going = None;
 			return;
 		}
-		if !going.armed || self.saving.is_some() || self.controls.going() {
+		let unsaved = self.controls.unsaved.lock().unwrap().is_some();
+		if !going.armed || unsaved || self.saving.is_some() || self.controls.going() {
 			return;
 		}
 		let outcome = match self.check_of() {
@@ -574,6 +591,10 @@ impl Panels {
 					Color32::WHITE,
 				);
 				painter.galley(pos2(after, rect.center().y - time.size().y / 2.0), time, Color32::WHITE);
+				// Asked for from the palette, which ends nothing without it.
+				if std::mem::take(&mut self.confirm_end) {
+					egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&response));
+				}
 				let mut end = false;
 				kit::popover(&response).width(280.0).show(|ui| {
 					ui.label(
@@ -632,6 +653,7 @@ impl Panels {
 		let outcome = fresh.map(Ready::outcome);
 		let encoded = fresh.and_then(Ready::encoded);
 		let refused = self.controls.refused.lock().unwrap().clone();
+		let pending = self.controls.unsaved.lock().unwrap().clone();
 		let saving = self.saving.is_some();
 		// Why the relay typed in here could not be saved.
 		let unsaved = match &self.saved {
@@ -764,6 +786,16 @@ impl Panels {
 					}
 				}
 				ui.add_space(8.0);
+				if let Some(pending) = pending.as_ref().filter(|_| going.armed) {
+					ui.horizontal(|ui| {
+						ui.spinner();
+						ui.add(
+							egui::Label::new(egui::RichText::new(format!("Waiting: {pending}.")).color(kit::DIM))
+								.wrap(),
+						);
+					});
+					ui.add_space(6.0);
+				}
 				if let Some(refused) = &refused {
 					ui.horizontal(|ui| {
 						ui.add(Icon::Warning.image(16.0, kit::ERR));
@@ -1015,7 +1047,12 @@ impl Panels {
 		let Some(result) = saving.task.poll().cloned() else {
 			return;
 		};
-		let Saving { from, retokened, .. } = self.saving.take().expect("polled above");
+		let Saving {
+			from,
+			retokened,
+			form: by_form,
+			..
+		} = self.saving.take().expect("polled above");
 		let saved = match result {
 			Ok(saved) => saved,
 			Err(err) => {
@@ -1048,17 +1085,21 @@ impl Panels {
 		if before.recordings(scene) != saved.recordings(scene) {
 			self.review.shelve(&self.engine, &self.runtime);
 		}
-		// A form holding nothing but what was just saved, or nothing new over
-		// the file before it, takes the file as saved now; one edited since
-		// keeps its edits, which save next.
+		// The form whose save this was takes the file as saved once it holds
+		// just what it sent; edited since, even back to what it held before,
+		// it keeps its edit, which saves next. Another form holding no edit
+		// takes the file too; one holding an edit tries it again, since what
+		// refused it, such as a relay guests join through, may have changed.
 		if let Some(form) = &mut self.stream_form {
-			match form.settled(&before) {
+			let own = by_form && from == Setting::Destinations;
+			match (own && form.sent(&before)) || (!own && !form.edited(before.saved())) {
 				true => self.stream_form = Some(Form::new(&saved)),
 				false => form.tried = None,
 			}
 		}
 		if let Some(form) = &mut self.guests_form {
-			match form.settled(before.saved()) {
+			let own = by_form && from == Setting::Guests;
+			match (own && form.sent(before.saved())) || (!own && !form.edited(before.saved())) {
 				true => self.guests_form = Some(super::settings::GuestForm::new(saved.saved())),
 				false => form.retry(),
 			}
@@ -1071,10 +1112,21 @@ impl Panels {
 	/// half-typed address, and once Settings closes. An edit that cannot be
 	/// saved says why in its pane, and is not tried again until it changes.
 	pub(super) fn autosave_settings(&mut self, ctx: &egui::Context) {
+		let stream = self.controls.stream.lock().unwrap().clone();
+		// A go-live, from a hotkey too, waits for where the stream goes.
+		let unsaved = match (&self.saving, &self.stream_form) {
+			(Some(saving), _) if saving.from == Setting::Destinations => {
+				Some("a change to Settings, Destinations is still saving".to_string())
+			}
+			(_, Some(form)) if form.edited(stream.saved()) => {
+				Some("Settings, Destinations has a change not saved yet; finish or undo it there".to_string())
+			}
+			_ => None,
+		};
+		*self.controls.unsaved.lock().unwrap() = unsaved;
 		if self.typing || self.saving.is_some() || self.picker.is_some() {
 			return;
 		}
-		let stream = self.controls.stream.lock().unwrap().clone();
 		if let Some(form) = &mut self.stream_form
 			&& let Some((saved, tokens)) = form.next(&stream)
 		{
@@ -1086,6 +1138,7 @@ impl Panels {
 			self.saved = None;
 			let mut saving = Saving::start(Setting::Destinations, stream, saved, tokens, ctx);
 			saving.retokened = retokened;
+			saving.form = true;
 			self.saving = Some(saving);
 			return;
 		}
@@ -1093,7 +1146,9 @@ impl Panels {
 			&& let Some(saved) = form.next(stream.saved())
 		{
 			self.saved = None;
-			self.saving = Some(Saving::start(Setting::Guests, stream, saved, Vec::new(), ctx));
+			let mut saving = Saving::start(Setting::Guests, stream, saved, Vec::new(), ctx);
+			saving.form = true;
+			self.saving = Some(saving);
 		}
 	}
 
@@ -1416,6 +1471,8 @@ pub(super) struct Saving {
 	pub(super) from: Setting,
 	/// Whether it sets a relay's token, which the relays are followed anew for.
 	pub(super) retokened: bool,
+	/// Whether it saves its pane's form, which takes the file once saved.
+	pub(super) form: bool,
 	pub(super) task: Task<Result<Stream, String>>,
 }
 
@@ -1455,6 +1512,7 @@ impl Saving {
 		Self {
 			from,
 			retokened: false,
+			form: false,
 			task,
 		}
 	}
@@ -1540,12 +1598,9 @@ impl Form {
 		Some(next)
 	}
 
-	/// Whether the form, after a save over `before`, holds no edit of its
-	/// own: none over `before`, or only the one just saved.
-	fn settled(&self, before: &Stream) -> bool {
-		if !self.edited(before.saved()) {
-			return true;
-		}
+	/// Whether the form, after its save over `before`, still holds just
+	/// what it sent.
+	fn sent(&self, before: &Stream) -> bool {
 		let now = self
 			.saved(before.saved())
 			.ok()
@@ -1639,9 +1694,10 @@ mod tests {
 
 	/// An edit saves once, and one the save refused waits for the next edit
 	/// rather than being tried every frame. After a save, a form holding only
-	/// what it saved settles, even when the save moved the address's token
+	/// what it sent settles, even when the save moved the address's token
 	/// into the credential store, which would otherwise read as an edit and
-	/// save again forever; one edited since keeps its edit.
+	/// save again forever; one edited since keeps its edit, even one undone
+	/// back to what the file held before.
 	#[test]
 	fn an_edit_saves_once_and_settles() {
 		let dir = tempfile::tempdir().unwrap();
@@ -1675,12 +1731,15 @@ mod tests {
 			form.relay,
 			"the token moved out of the address"
 		);
-		assert!(form.settled(&before), "what was saved settles");
+		assert!(form.sent(&before), "what was saved settles");
 
 		let mut form = Form::new(&before);
-		form.relay = "https://relay.example/anon?jwt=secret".into();
+		form.on_demand = true;
 		form.next(&before).unwrap();
-		form.broadcast = "friday".into();
-		assert!(!form.settled(&before), "an edit made during the save is kept");
+		form.on_demand = false;
+		assert!(
+			!form.sent(&before),
+			"an edit made during the save is kept, back to what it was too"
+		);
 	}
 }

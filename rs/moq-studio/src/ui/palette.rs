@@ -437,6 +437,7 @@ impl Panels {
 		if matches!(
 			command,
 			Command::Act(Action::GoLive)
+				| Command::Act(Action::EndStream)
 				| Command::Page(_)
 				| Command::Layer(_)
 				| Command::Device(_)
@@ -450,6 +451,8 @@ impl Panels {
 			// The window's GO LIVE: on air once the check passes, or its
 			// popover, which asks for a relay the show lacks.
 			Command::Act(Action::GoLive) => self.press_go_live(),
+			// The clock's End stream popover, as a click on it opens it.
+			Command::Act(Action::EndStream) => self.confirm_end = true,
 			Command::Act(action) => self.controls.press(&action),
 			Command::Page(page) => self.page = page,
 			Command::Setting(setting, row) => {

@@ -337,6 +337,9 @@ pub struct Controls {
 	/// refused, which covers reading the tokens before the engine says
 	/// Starting, so a second press is refused at once.
 	going: AtomicBool,
+	/// Why Settings, Destinations holds an edit not saved yet, which a
+	/// go-live waits for rather than going to the relay before it.
+	pub unsaved: Mutex<Option<String>>,
 	/// Whether the show is closing, which refuses a go-live. Closing holds
 	/// [`Self::going`] too, so the two are claimed by one atomic swap: a
 	/// press that a go-live won is one closing refuses, and the reverse.
@@ -406,6 +409,7 @@ impl Controls {
 			stream: Mutex::new(stream),
 			refused: Mutex::default(),
 			going: AtomicBool::new(false),
+			unsaved: Mutex::default(),
 			closing: AtomicBool::new(false),
 			rewatch: AtomicBool::new(false),
 			following: Mutex::new(()),
@@ -561,6 +565,9 @@ impl Controls {
 			"the program is already on air, or on its way on or off"
 		);
 		anyhow::ensure!(!self.closing.load(Ordering::Acquire), "the show is closing");
+		if let Some(why) = self.unsaved.lock().unwrap().clone() {
+			anyhow::bail!(why);
+		}
 		anyhow::ensure!(!self.going.swap(true, Ordering::AcqRel), "already going live");
 		*self.refused.lock().unwrap() = None;
 		let controls = self.clone();

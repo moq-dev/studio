@@ -333,6 +333,7 @@ impl Studio {
 			side: Side::default(),
 			inspect: Inspect::default(),
 			going: None,
+			confirm_end: false,
 			ready: None,
 			tokens: 0,
 			stream_form: None,
@@ -789,6 +790,9 @@ struct Panels {
 	inspect: Inspect,
 	/// The Go live popover, while open.
 	going: Option<live::Going>,
+	/// Whether the clock's End stream popover opens on the next frame, as the
+	/// palette asks.
+	confirm_end: bool,
 	/// The check going live waits on, kept fresh in the background off air.
 	ready: Option<live::Ready>,
 	/// How many saves set a relay's token, which a check made before is

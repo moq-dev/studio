@@ -28,7 +28,7 @@ tip's breaks, as tried on #208:
   the protocol version and its one-`--connect-version` rule goes: failover
   relies on moq-net to resume across relays. The rule's `--failover` doc
   (`rs/moq-studio/src/main.rs`) and its two README lines (under the flags and
-  Stream settings' **Failover relay**) go with it. The health grade (`health.rs`,
+  Destinations' **Failover relay**) go with it. The health grade (`health.rs`,
   `engine/air.rs`, `setup.rs`, `fx.rs`) moves to the republished
   `hang::health`.
 
