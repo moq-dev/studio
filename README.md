@@ -513,7 +513,7 @@ Switching one off turns its feature off: the show then sends what it would
 without it. An edit it makes to the show is one undo takes back: audio scenes
 fold into the stream's, which keeps what it plays and takes every other sound,
 even one sent nowhere, muted, so the stream sounds the same; layers in slots or keeping out of the
-way stay where they are drawn; a portrait show turns to landscape, asking
+way stay where they are drawn, and one in a tile closed now stays hidden; a portrait show turns to landscape, asking
 first on air as a new canvas does, and a show going out in both stops
 sending the portrait picture; and scenes and sources stop being published,
 and scenes of their own size take the program's. Studio mode turns off, and
@@ -521,7 +521,7 @@ the multiview and the scene graph close.
 
 Your mods are kept on this computer, beside your hotkeys, not in the show.
 A show that uses one, such as one with audio scenes, a sound the stream
-leaves out, or slots, switches it on
+leaves out (other than a guest waiting under Add), or slots, switches it on
 as it opens, and so does an undo or reload that brings the feature back, so
 a feature never changes what goes out while its controls are hidden.
 
@@ -785,7 +785,7 @@ The scene inspector's **Slots** section picks the arrangement, lists the
 slots with the role or source in each and what fills each role, and adds a
 **Main slot** or **Camera slot**, making the role if the show has none. Add, under
 **Not in any scene**, puts a guest into the scene's next tile when it has
-slots.
+slots, and any source it adds there is heard on the stream.
 
 **Appear on their own**, in Settings, Guests, has a guest whose camera comes
 online take the next tile of the scene on program, and be heard on program,
