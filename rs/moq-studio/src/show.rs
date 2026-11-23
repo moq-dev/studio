@@ -92,17 +92,24 @@ pub struct Opener {
 }
 
 impl Opener {
-	/// Make a show as [`New`] says, unless the file it names is there, and
-	/// say where it is. It starts on the canvas this machine encodes
-	/// smoothly, hearing the system's microphone if it has one.
-	pub async fn create(&self, new: New) -> anyhow::Result<PathBuf> {
+	/// Make a show as [`New`] says, unless the file it names is there, then
+	/// open it as [`open`](Self::open) does. It starts on the canvas this
+	/// machine encodes smoothly, hearing the system's microphone if it has
+	/// one. A show made here that cannot open is taken back, so a machine
+	/// that cannot start one never collects them.
+	pub async fn open_new(&self, new: New) -> anyhow::Result<(Arc<Engine>, Stream)> {
 		if let New::At(path) = &new
 			&& exists(path)?
 		{
-			return Ok(path.clone());
+			return self.open(path.clone()).await;
 		}
 		let (canvas, mic) = tokio::join!(probe::first_canvas(self.gpu.clone()), microphone());
-		make(new, &first(canvas, mic)?)
+		let made = make(new, &first(canvas, mic)?)?;
+		let opened = self.open(made.path.clone()).await;
+		if opened.is_err() {
+			made.undo();
+		}
+		opened
 	}
 
 	/// Open the show at `path` and start its engine. Nothing goes live, and
@@ -128,12 +135,52 @@ impl Opener {
 	}
 }
 
+/// A show [`make`] made, and what it wrote, to take back if it cannot open.
+struct Made {
+	path: PathBuf,
+	/// Each file written, what it held before (`None` for no file), and what
+	/// it holds now, in the order written.
+	wrote: Vec<(PathBuf, Option<String>, String)>,
+}
+
+impl Made {
+	/// Put back each file it wrote that still holds what it wrote, under
+	/// the folder's claim; one changed since, such as by another studio that
+	/// opened the show, is kept. Logs what it cannot put back.
+	fn undo(self) {
+		let dir = self.path.parent().unwrap_or(Path::new(""));
+		let result = claim(dir).and_then(|_claim| {
+			for (file, before, wrote) in self.wrote.iter().rev() {
+				match std::fs::read_to_string(file) {
+					Ok(now) if now == *wrote => {}
+					Ok(_) => {
+						tracing::warn!(file = %file.display(), "keeping a new show's file changed since it was made");
+						continue;
+					}
+					Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+					Err(err) => return Err(err).with_context(|| format!("reading {}", file.display())),
+				}
+				match before {
+					Some(text) => autosave::write_file(file, text),
+					None => std::fs::remove_file(file),
+				}
+				.with_context(|| format!("putting back {}", file.display()))?;
+			}
+			Ok(())
+		});
+		if let Err(err) = result {
+			tracing::warn!(error = format!("{err:#}"), "cannot take back a show that did not open");
+		}
+	}
+}
+
 /// Make the show [`New`] names holding `collection`, holding its folder from
 /// picking its name until its files are written, so no other studio's show
 /// takes the name meanwhile. Its stream settings go first, sending its
 /// recordings to the Videos folder when it is in the app's storage, then its
-/// scene file, whose being there makes it a show. Where it is.
-fn make(new: New, collection: &Collection) -> anyhow::Result<PathBuf> {
+/// scene file, whose being there makes it a show. A show another studio made
+/// at that file meanwhile is left as it is, with nothing written.
+fn make(new: New, collection: &Collection) -> anyhow::Result<Made> {
 	let dir = match &new {
 		New::At(path) => path.parent().unwrap_or(Path::new("")).to_path_buf(),
 		New::In { dir, .. } => {
@@ -141,36 +188,44 @@ fn make(new: New, collection: &Collection) -> anyhow::Result<PathBuf> {
 			dir.clone()
 		}
 	};
-	let _claim = claim(&dir)?;
+	let claim = claim(&dir)?;
 	let path = match new {
-		// Made by another studio since it was looked for.
-		New::At(path) if exists(&path)? => return Ok(path),
+		New::At(path) if exists(&path)? => {
+			return Ok(Made {
+				path,
+				wrote: Vec::new(),
+			});
+		}
 		New::At(path) => path,
 		New::In { dir, recordings } => new_path(&dir, &recordings)?,
 	};
-	let settings = stream::path(&path);
-	let before = match std::fs::read_to_string(&settings) {
-		Ok(text) => Some(text),
-		Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-		Err(err) => return Err(err).with_context(|| format!("reading {}", settings.display())),
+	let mut made = Made {
+		path,
+		wrote: Vec::new(),
 	};
-	let mut wrote = false;
-	// Kept out of the app's storage, where nobody would find them.
-	if in_storage(&path)
-		&& let Some(videos) = videos()
-	{
-		let saved = saved(&settings)?;
-		if saved.recordings.is_none() {
-			let saved = stream::Saved {
-				recordings: Some(videos),
-				..saved
+	let path = made.path.clone();
+	let result = (|| {
+		let settings = stream::path(&path);
+		// Kept out of the app's storage, where nobody would find them.
+		if in_storage(&path)
+			&& let Some(videos) = videos()
+		{
+			let before = match std::fs::read_to_string(&settings) {
+				Ok(text) => Some(text),
+				Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+				Err(err) => return Err(err).with_context(|| format!("reading {}", settings.display())),
 			};
-			let text = toml::to_string(&saved).context("cannot write the stream settings")?;
-			autosave::write_file(&settings, &text).with_context(|| format!("writing {}", settings.display()))?;
-			wrote = true;
+			let saved = saved(&settings)?;
+			if saved.recordings.is_none() {
+				let saved = stream::Saved {
+					recordings: Some(videos),
+					..saved
+				};
+				let text = toml::to_string(&saved).context("cannot write the stream settings")?;
+				autosave::write_file(&settings, &text).with_context(|| format!("writing {}", settings.display()))?;
+				made.wrote.push((settings, before, text));
+			}
 		}
-	}
-	let made = (|| {
 		// A history beside no scene file is a removed show's.
 		let history = autosave::history_path(&path);
 		match std::fs::remove_file(&history) {
@@ -180,21 +235,17 @@ fn make(new: New, collection: &Collection) -> anyhow::Result<PathBuf> {
 			_ => {}
 		}
 		let text = collection.to_toml()?;
-		autosave::write_file(&path, &text).with_context(|| format!("writing {}", path.display()))
+		autosave::write_file(&path, &text).with_context(|| format!("writing {}", path.display()))?;
+		made.wrote.push((path.clone(), None, text));
+		Ok(())
 	})();
-	if let Err(err) = made {
-		if wrote {
-			let undone = match &before {
-				Some(text) => autosave::write_file(&settings, text),
-				None => std::fs::remove_file(&settings),
-			};
-			if let Err(err) = undone {
-				tracing::warn!(error = format!("{err:#}"), "cannot put back a show's stream settings");
-			}
-		}
+	if let Err(err) = result {
+		// Taken again by the undo.
+		drop(claim);
+		made.undo();
 		return Err(err.context("cannot create the show"));
 	}
-	Ok(path)
+	Ok(made)
 }
 
 /// A new show's collection: one empty scene on `canvas`, hearing the
@@ -702,7 +753,7 @@ mod tests {
 
 	/// A new show takes the next free name with its collection, in place of a
 	/// removed show's history; one named on the command line that is there
-	/// is left as it is.
+	/// is left as it is, with nothing to take back.
 	#[test]
 	fn makes_a_new_show() {
 		let dir = tempfile::tempdir().unwrap();
@@ -711,15 +762,18 @@ mod tests {
 			dir: dir.path().to_path_buf(),
 			recordings: Vec::new(),
 		};
-		let path = make(into(), &collection).unwrap();
-		assert_eq!(path, dir.path().join("My Show.toml"));
+		let made = make(into(), &collection).unwrap();
+		assert_eq!(made.path, dir.path().join("My Show.toml"));
 		let read = |path: &Path| Collection::from_toml(&std::fs::read_to_string(path).unwrap()).unwrap();
-		assert_eq!(read(&path), collection);
-		assert_eq!(make(into(), &collection).unwrap(), dir.path().join("My Show 2.toml"));
+		assert_eq!(read(&made.path), collection);
+		assert_eq!(
+			make(into(), &collection).unwrap().path,
+			dir.path().join("My Show 2.toml")
+		);
 
 		let named = dir.path().join("Talk.toml");
 		std::fs::write(autosave::history_path(&named), b"\xff not a history").unwrap();
-		assert_eq!(make(New::At(named.clone()), &collection).unwrap(), named);
+		assert_eq!(make(New::At(named.clone()), &collection).unwrap().path, named);
 		assert!(
 			!autosave::history_path(&named).exists(),
 			"the removed show's history goes"
@@ -727,8 +781,47 @@ mod tests {
 		Autosave::open(named.clone()).expect("the new show opens");
 
 		std::fs::write(&named, "kept").unwrap();
-		assert_eq!(make(New::At(named.clone()), &collection).unwrap(), named);
+		let again = make(New::At(named.clone()), &collection).unwrap();
+		assert!(again.wrote.is_empty());
+		again.undo();
 		assert_eq!(std::fs::read_to_string(&named).unwrap(), "kept");
+	}
+
+	/// A show made that did not open is taken back, its stream settings as
+	/// they were, unless a file changed since it was made, which is kept.
+	#[test]
+	fn takes_back_a_show_that_did_not_open() {
+		let dir = tempfile::tempdir().unwrap();
+		let collection = first(Canvas::default(), false).unwrap();
+		let path = dir.path().join("Talk.toml");
+		let settings = stream::path(&path);
+		std::fs::write(&settings, "on_demand = true").unwrap();
+		let made = make(New::At(path.clone()), &collection).unwrap();
+		// As a show in the app's storage writes its recordings folder.
+		std::fs::write(&settings, "recordings = \"videos\"").unwrap();
+		let made = Made {
+			wrote: [(
+				settings.clone(),
+				Some("on_demand = true".into()),
+				"recordings = \"videos\"".into(),
+			)]
+			.into_iter()
+			.chain(made.wrote)
+			.collect(),
+			..made
+		};
+		made.undo();
+		assert!(!path.exists(), "the scene file goes");
+		assert_eq!(std::fs::read_to_string(&settings).unwrap(), "on_demand = true");
+
+		let made = make(New::At(path.clone()), &collection).unwrap();
+		std::fs::write(&path, "edited").unwrap();
+		made.undo();
+		assert_eq!(
+			std::fs::read_to_string(&path).unwrap(),
+			"edited",
+			"an edit since is kept"
+		);
 	}
 
 	/// A recording that reads as the new name and as the show's own, as a
