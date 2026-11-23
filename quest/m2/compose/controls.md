@@ -35,8 +35,11 @@ consumers' `Options` take the subscription priority on moq's `main` since
 [moq-dev/moq#9282](https://github.com/moq-dev/moq/pull/9282); once the pin is
 past it, carry the priority on `Source::Layer`, and pass it to the
 layer's video and audio decode consumers (`follow_video` and `follow_audio` in
-`rs/moq-scene/src/source.rs`). Prove it with a layer test that reads the
-priority off the publisher's aggregate subscription.
+`rs/moq-scene/src/source.rs`). A composition that changes only a layer's
+priority keeps its feed (`Sources::sync` reuses one that `plays_alike`), so
+move the priority in place with each consumer's `set_priority`, as the feed
+already moves its offset. Prove it with a layer test that reads the priority
+off the publisher's aggregate subscription, before and after a change.
 
 ## Required
 

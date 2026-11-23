@@ -16,8 +16,11 @@ uses, encodes the Nero `chpl` box that ffmpeg, mpv, and VLC read.
 
 moq-mux's regular MP4 finish writes chapters, as `chpl` and a QuickTime
 chapter track, on moq's `main` since
-[moq-dev/moq#9284](https://github.com/moq-dev/moq/pull/9284). Advance it with `just upgrade-moq` in its own PR,
-fixing whatever the new API breaks here.
+[moq-dev/moq#9284](https://github.com/moq-dev/moq/pull/9284), so the
+required catch-up, which moves the pin to moq's `main`, already carries it.
+Check that the pin includes #9284 and that the chapters API builds here; only
+if the pin is still behind it, advance it with `just upgrade-moq` in its own
+PR, fixing whatever the new API breaks here.
 
 ## Required
 
