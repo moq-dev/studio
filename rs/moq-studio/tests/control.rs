@@ -156,9 +156,9 @@ fn unnamed_controls(node: &Value, grouped: bool, unnamed: &mut Vec<String>) {
 	}
 }
 
-/// The node `label` names, searching the whole tree.
+/// The node `label` names that shows somewhere, searching the whole tree.
 fn find<'a>(node: &'a Value, label: &str) -> Option<&'a Value> {
-	if node["label"] == label {
+	if node["label"] == label && node["rect"].is_array() {
 		return Some(node);
 	}
 	node["children"]
@@ -202,8 +202,27 @@ async fn an_agent_builds_a_show() {
 	studio.until("/studio/selection", "null");
 	studio.ctl(&["click", "Canvas"]);
 	studio.until("/studio/selection/source", "\"tone\"");
-	studio.ctl(&["wait", "--shown", "Slot"]);
+	studio.ctl(&["wait", "--shown", "Border"]);
 	studio.audit("the inspector");
+
+	// The Mix page is a mod's, off until switched on.
+	studio.ctl(&["click", "Settings"]);
+	studio.ctl(&["click", "Mods"]);
+	studio.ctl(&["click", "Audio scenes & routes"]);
+	studio.audit("the mods");
+	// The mods run past the dialog's foot, so a scroll moves them up.
+	let top = |studio: &Studio| {
+		find(&studio.snapshot()["tree"], "Audio scenes & routes").expect("the Audio mod")["rect"][1]
+			.as_f64()
+			.unwrap()
+	};
+	let before = top(&studio);
+	studio.ctl(&["scroll", "Audio scenes & routes", "--dy", "40"]);
+	assert_eq!(top(&studio), before - 40.0, "scrolled by the points asked");
+	// Escape closes Settings, and leaves the layer behind it selected.
+	studio.ctl(&["key", "Escape"]);
+	studio.ctl(&["wait", "--gone", "Audio scenes & routes"]);
+	studio.until("/studio/selection/source", "\"tone\"");
 
 	// Pull its fader down to near the bottom of its travel.
 	studio.ctl(&["click", "Mix"]);
@@ -226,7 +245,7 @@ async fn an_agent_builds_a_show() {
 	assert!(png.len() > 10_000, "a {} byte picture holds no window", png.len());
 
 	studio.ctl(&["click", "Settings"]);
-	studio.ctl(&["wait", "--shown", "Scene sizes"]);
+	studio.ctl(&["wait", "--shown", "Frame rate"]);
 	studio.audit("the settings");
 
 	// A key pressed binds a hotkey, as the desktop's would.
@@ -235,16 +254,6 @@ async fn an_agent_builds_a_show() {
 	studio.ctl(&["key", "F9"]);
 	studio.ctl(&["wait", "--shown", "Rebind Go live: F9"]);
 	studio.audit("the hotkeys");
-
-	// Hotkeys runs past the dialog's foot, so a scroll moves it up.
-	let top = |studio: &Studio| {
-		find(&studio.snapshot()["tree"], "Bind Panic").expect("a Panic hotkey")["rect"][1]
-			.as_f64()
-			.unwrap()
-	};
-	let before = top(&studio);
-	studio.ctl(&["scroll", "Bind Panic", "--dy", "40"]);
-	assert_eq!(top(&studio), before - 40.0, "scrolled by the points asked");
 
 	// A target that names nothing fails, and says so.
 	let missing = studio.run(&["click", "No such button"]);

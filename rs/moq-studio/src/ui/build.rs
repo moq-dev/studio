@@ -128,10 +128,13 @@ impl Panels {
 			.filter(|_| collection.dual(&Layer::scene(scene)))
 	}
 
-	/// The page's keys, unless a field or a page has the keyboard: A adds a
-	/// layer, and Escape leaves cropping, then the selection.
+	/// The page's keys, unless a field, a page, or a modal such as Settings
+	/// has the keyboard: A adds a layer, and Escape leaves cropping, then the
+	/// selection.
 	fn build_keys(&mut self, ui: &Ui) {
-		if ui.ctx().text_edit_focused() || self.interact.has_keyboard() || self.interacting {
+		let ctx = ui.ctx();
+		let modal = ctx.memory(|memory| memory.top_modal_layer()).is_some();
+		if modal || ctx.text_edit_focused() || self.interact.has_keyboard() || self.interacting {
 			return;
 		}
 		let (add, escape) = ui.input_mut(|input| {
