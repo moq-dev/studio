@@ -2,39 +2,56 @@
 
 ## Goal
 
-A new Settings pane, **Mods**, lists features most streamers never use, each
-off by default: Both formats, Studio mode, Multiview, Phone remote, Published
-scenes, and Scene graph. While a mod is off, no page, toolbar, menu, hotkey
-list, palette, or Settings pane shows it. Switching it on shows its UI at
-once, with no restart. All six are compiled into the binary. A mod is not a
-plugin: there is no plugin API, no cargo feature flags, and nothing to
-install.
+A new Settings pane, **Mods** ([mock-up](/quest/m0/ux/mock/overhaul-mods.webp)),
+lists features most streamers never use, each off by default:
+
+- **Audio Scenes & Routes:** multi-bus audio routing (the full `MIX` desk,
+  `S`/`H`/`R` send dots, and the `Routes` matrix). When off, every unmuted
+  sound feeds the stream and recording directly, controlled by inline sliders
+  and a per-source headphones monitor toggle.
+- **Replay & Review:** the `REVIEW` page, instant replay buffer, clip trimming,
+  and live stream markers (plus clip/marker buttons in the dock).
+- **Smart Layout:** scene `Slots` (Main/Camera tile arrangements) and layer
+  `Keep out of the way` automatic dodging.
+- **Both formats:** portrait and dual-format broadcasts (Format cards, Both at
+  once, format chips, portrait arrangements).
+- **Studio mode:** cue and take preview (`NEXT`, `TAKE`, `AUTO`, and their
+  hotkeys and palette entries).
+- **Multiview:** the multi-scene/source monitor window.
+- **Phone remote:** the Remote pane and phone controller page.
+- **Published scenes:** per-scene sizes, independent broadcast publishing,
+  viewer-toggleable layers, priority, and per-scene virtual camera toggles.
+- **Scene graph:** the scene graph inspection window.
+
+While a mod is off, no page, toolbar, menu, hotkey list, palette, or Settings
+pane shows it. Switching it on shows its UI at once, with no restart. All nine
+are compiled into the binary. A mod is not a plugin: there is no plugin API,
+no cargo feature flags, and nothing to install.
 
 Settings > Advanced is gone: Published scenes and Scene graph move to Mods,
 and the Virtual camera toggle moves to Settings > Stream.
 
 ## Plan
 
-Decided 2026-11-20 with the maintainer (/quest-plan). The goal is simplicity:
-the window a new streamer sees holds only what most streamers use.
+Decided 2026-11-20 and expanded 2026-11-22 with the maintainer (/quest-plan).
+The goal is simplicity: the window a new streamer sees holds only what most
+streamers use.
 
 - **Pane name:** ✅ Mods (rejected: Extras, Features). The maintainer's word,
   even though these are built-in features rather than add-ons.
-- **Which:** ✅ Both formats (portrait and dual format: the Format cards and
-  Both at once in Settings > Show, the format chips, and portrait
-  arrangements), Studio mode (the cue/take switch, NEXT, TAKE, AUTO, and their
-  hotkeys and palette entries), Multiview (the show-menu and palette entries
-  and the window), Phone remote (the Remote pane and the phone page), Published
-  scenes (scene sizes, publishing a scene or source as its own broadcast, the
-  inspector's Publish, and the per-scene virtual camera toggles), and Scene
-  graph (the window and its palette entry) (rejected: Keyframes and Keep out of
-  the way, which show only for a selected layer and cost nothing until used).
+- **Which (updated 2026-11-22):** ✅ Audio Scenes & Routes, Replay & Review,
+  Smart Layout (Slots + Keep out of the way), Both formats, Studio mode,
+  Multiview, Phone remote, Published scenes, and Scene graph (rejected:
+  leaving them on the default pages and in Advanced; keeping Audio Scenes on
+  by default in Mix; keeping Review as a permanent top-level tab off air;
+  keeping Slots and Keep out of the way in every user's inspector).
 - **Storage:** ✅ per user, in the app storage beside hotkeys and Studio mode
   (rejected: per show file, since Studio mode, Multiview, and Phone remote are
   about how the operator works, not about the show; refusing a show that uses
   a disabled mod). Opening a show that uses a disabled mod, such as one whose
-  scene file has portrait on or a published scene, switches that mod on, so a
-  mod's UI is never hidden while its feature affects the output.
+  scene file has custom audio scenes, portrait on, slots, or a published scene,
+  switches that mod on, so a mod's UI is never hidden while its feature affects
+  the output.
 - **Switching off:** ✅ switching off a mod turns its feature off (rejected:
   refusing until the feature is off; only hiding the UI). Show edits, such as
   Both formats dropping portrait-only layers or unpublishing a scene, go
@@ -44,7 +61,7 @@ the window a new streamer sees holds only what most streamers use.
   own (rejected: confirming every switch-off; no prompt even on air). An open
   Multiview or graph window just closes.
 - **Advanced:** ✅ the Virtual camera toggle moves to Settings > Stream and the
-  Advanced pane is deleted (rejected: Virtual camera as a seventh mod; keeping
+  Advanced pane is deleted (rejected: Virtual camera as a tenth mod; keeping
   Advanced for one row).
 - **Shape:** one definition per mod (its name and help line), consulted where
   each entry point is drawn. Keep it as small as a set of flags in app storage;
@@ -68,3 +85,4 @@ Also in this PR:
 ## Related
 
 - [Broadcaster UX](/quest/m0/ux/README.md) - the "In Settings" column this changes
+- [Unified Studio shell](/quest/m0/ux/unified-shell.md) - hides MIX and REVIEW tabs when their mods are off

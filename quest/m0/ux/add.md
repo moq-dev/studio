@@ -1,59 +1,68 @@
-# [L] Adding a source by picking a picture
+# [L] Adding a source in one click
 
 ## Goal
 
-BUILD's Add tab shows what can be added as pictures, in the frames of
-[`mock/add.html`](/quest/m0/ux/mock/add.html):
+Clicking `+ Add source` (or pressing `A`) opens a clean modal over the stage
+([mock-up](/quest/m0/ux/mock/overhaul-add.webp), with live-card details in
+[`mock/add.html`](/quest/m0/ux/mock/add.html)):
 
-- **Apps:** every window as a live thumbnail with its app's real icon, its
-  app's name, and its title, grouped by app.
-- **Screens and cameras:** a live picture of each, with an icon for the kind
-  of device (webcam, capture card, phone, display) and its name.
-- **Sound:** each microphone and the system's sound with a moving meter, so
-  the right one is found by talking.
-- **Everything else:** files, a web page, text, guests, and other scenes,
-  each a card.
+- **Devices & Screens:** cameras, displays, and app windows auto-populate the
+  moment the modal opens (no manual `Refresh` button) with live thumbnails,
+  real app icons, and hotplug updates. Where the OS owns the picker (Wayland),
+  an App Window / Display card opens the system picker directly.
+- **Media & Web:** clickable cards that open the native OS file picker for
+  images and videos (no hand-typed file paths and no passive non-clickable
+  hint rows), a single-field URL input for web pages, and a Color card.
+- **Audio:** microphones and system audio with live level meters so the right
+  input is obvious immediately.
+- **Guests:** guest room card and invite link without being clipped off the
+  bottom of a narrow sidebar.
 
-A search field filters all of it, and a Recent row holds what was added
-lately. A card is added by dragging it onto the picture, where it lands under
-the pointer, or by selecting it and pressing one Add button. The list
-refreshes itself when a device is plugged in or a window opens. No id is ever
-typed.
+Clicking any card adds it immediately with an auto-generated name and smart
+non-overlapping placement (for example, a camera added over an existing
+fullscreen screen lands cleanly as a corner PiP instead of covering the entire
+canvas). Dragging a card onto the canvas places it at the drop point.
 
-It replaces the Devices panel and the add-source form, where a window is
-chosen by typing its id.
+It deletes the legacy `Devices` refresh wall, the non-clickable `DROP OR PASTE
+ANYTHING` rows, and the 17-kind `Any source` raw form where names and file
+paths had to be typed by hand.
 
 ## Plan
 
-- The pictures and icons come from moq-video's capture listing, which today
-  gives only ids, names, and sizes (`Window { id, title, app, width, height }`
-  in `moq/rs/moq-video/src/capture/mod.rs`), with no icon, no thumbnail, no
-  change notice, and apps listed on macOS alone. That work is planned in moq
-  and reaches here through [its pin](/quest/m0/pin-capture-list.md).
-- Where the operating system owns the picker, as on Wayland, the Apps and
-  Screens sections are one button that opens the system's picker, and the
-  choice is remembered: see the `system` frame. Those buttons add the
-  `picked_display` and `picked_window` sources, whose grants the studio
-  already keeps per machine (`README.md`, Picked displays and windows).
-- Recommended, not decided: a click selects and a button adds, rather than a
-  click adding at once. A new layer is on air the moment it is added, and the
-  selected card's picture is the last check against airing the wrong window.
-- The inspector folds away while Add is open, since nothing is selected, so
-  the picture keeps its width.
-- The `apps` frame draws a "With its sound" switch. An app's own sound is not
-  captured today, so the switch is left out until moq can.
-- A card for something that cannot be added says why in its place (a kind
-  this build lacks, a permission not granted) with the step that fixes it,
-  rather than being absent.
-- A dropped card lands where it is dropped, sized to its own shape, and is
-  sent to the audio scene on program if it has sound, as an added source is
-  today.
-- The first-run screen reuses these cards.
+Updated 2026-11-22 with the maintainer (/quest-plan):
 
-Human check: real cameras, capture cards, and microphones, the operating
-system's permission prompts, and whether a window is found faster than by
-its title.
+- **Interaction model:** ✅ single click on any card adds the source
+  immediately with an auto-generated name and smart placement, closing the
+  modal with the new layer selected (rejected: two-click select then press an
+  Add button; requiring a manual name before adding). Undo (`Ctrl+Z`) or
+  `Delete` removes an accidental pick in one keypress.
+- **Auto-refresh:** ✅ devices, screens, windows, and audio inputs enumerate
+  automatically when the modal opens and refresh on hotplug (rejected: making
+  the user click `Refresh` on an empty list).
+- **Placement:** ✅ smart default placement: the first visual source fills/fits
+  the canvas; a camera or overlay added on top of an existing full-canvas
+  layer lands as a sensible corner PiP or centered aspect-fit box instead of
+  hiding everything underneath (rejected: always `Rect::fill(&canvas)`).
+- **Files & web:** ✅ Image and Media cards open `rfd::AsyncFileDialog`
+  natively, and Web takes a single pasted URL (rejected: hand-typing paths or
+  picking from a 17-item flat dropdown). Drag-and-drop and clipboard paste on
+  the canvas continue to work directly.
+- **Live thumbnails & icons:** come from moq-video's capture listing via
+  [its pin](/quest/m0/pin-capture-list.md). Where the OS owns the picker
+  (Wayland), the card invokes `picked_display` / `picked_window` directly and
+  remembers the grant.
+- **Errors in place:** a card that cannot be used (missing build feature or
+  OS permission) explains why and offers the action to fix it instead of
+  failing silently.
+
+Human check: real cameras, capture cards, and microphones, OS permission
+prompts, and verifying 1-click placement feels right over a live screen.
 
 ## Required
 
 - [moq-video's capture listing is pinned](/quest/m0/pin-capture-list.md) - icons, live pictures, and change notices for windows and devices
+
+## Related
+
+- [Unified Studio shell](/quest/m0/ux/unified-shell.md) - the `+ Add source` trigger and unified workspace
+- [First run](/quest/m0/ux/first-run.md) - empty-canvas quick-start cards that launch straight into this flow
