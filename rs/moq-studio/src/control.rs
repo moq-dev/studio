@@ -1692,7 +1692,13 @@ mod tests {
 		let (reply, _answer) = oneshot::channel();
 		send.try_send((key(), reply)).unwrap();
 		state.next(&ctx);
-		assert!(matches!(state.op, Some(Op { work: Work::Input { .. }, .. })));
+		assert!(matches!(
+			state.op,
+			Some(Op {
+				work: Work::Input { .. },
+				..
+			})
+		));
 	}
 
 	/// A press where another widget lies over the target fails, naming it,
