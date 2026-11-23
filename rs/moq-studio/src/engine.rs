@@ -6508,7 +6508,7 @@ mod tests {
 					crate::stream::Credentials::memory(),
 				)
 				.unwrap();
-				stream.save(saved).unwrap();
+				stream.save(saved, &[]).unwrap();
 				crate::show::follow(&engine, &stream)
 			})
 		};
@@ -6567,7 +6567,7 @@ mod tests {
 			..Default::default()
 		};
 		let saving = tokio::task::spawn_blocking(move || {
-			stream.save(relay(9)).unwrap();
+			stream.save(relay(9), &[]).unwrap();
 			stream
 		});
 		let mut stream = saving.await.unwrap();
@@ -6579,7 +6579,7 @@ mod tests {
 		let first = controls.follow_relays().expect("the follow starts");
 		let saving = controls.clone();
 		let saved = tokio::task::spawn_blocking(move || {
-			stream.save(relay(10)).unwrap();
+			stream.save(relay(10), &[]).unwrap();
 			saving.set_stream(stream, true);
 			first.join().expect("the first follow ran");
 		});

@@ -1081,6 +1081,16 @@ impl Panels {
 				// A token it could not put back is in use, so a check made
 				// with the one before is stale.
 				self.tokens += u64::from(retokened);
+				// A token sent for an address edited since never goes to the
+				// new one; the form as sent is not tried again until it changes.
+				let stream = self.controls.stream.lock().unwrap().clone();
+				if by_form
+					&& from == Setting::Destinations
+					&& let Some(form) = &mut self.stream_form
+					&& !form.sent(&stream)
+				{
+					form.settle_tokens(false);
+				}
 				self.saved = Some((from, err));
 				return;
 			}
@@ -1119,7 +1129,7 @@ impl Panels {
 			let own = by_form && from == Setting::Destinations;
 			match (own && form.sent(&before)) || (!own && !form.edited(before.saved())) {
 				true => self.stream_form = Some(Form::new(&saved)),
-				false if own => form.settle_tokens(),
+				false if own => form.settle_tokens(true),
 				false => form.tried = None,
 			}
 		}
@@ -1554,26 +1564,7 @@ impl Saving {
 				if from == Setting::Guests {
 					stream.check_guests(&saved)?;
 				}
-				// The tokens kept before, put back if the save fails, so it
-				// fails whole rather than dialing with a token never saved.
-				let mut kept = Vec::new();
-				let saved = (|| -> anyhow::Result<()> {
-					for (url, token) in &tokens {
-						kept.push((url, stream.credentials().get(url)?));
-						stream.credentials().set(url, token.as_deref())?;
-					}
-					stream.save(saved)
-				})();
-				if let Err(err) = saved {
-					for (url, token) in kept.iter().rev() {
-						if let Err(restore) = stream.credentials().set(url, token.as_deref()) {
-							return Err(err.context(format!(
-								"and the token kept before for {url} could not be put back: {restore:#}"
-							)));
-						}
-					}
-					return Err(err);
-				}
+				stream.save(saved, &tokens)?;
 				Ok(stream)
 			})();
 			let _ = send.send(result.map_err(|err| format!("{err:#}")));
@@ -1606,12 +1597,12 @@ pub(super) struct Form {
 	/// The last save it started, which is not tried again until the form
 	/// changes, so one refused waits for the next edit.
 	tried: Option<(Saved, Vec<Token>)>,
-	/// Each relay's token field and forget box as that save sent them.
-	sent_tokens: [(String, bool); 2],
+	/// Each relay's address, token field, and forget box as that save sent
+	/// them.
+	sent_tokens: [(String, String, bool); 2],
 }
 
-/// A token to keep for a relay, or `None` to forget its saved one.
-pub(super) type Token = (url::Url, Option<String>);
+pub(super) use crate::stream::Token;
 
 impl Form {
 	/// The form holding what `stream` saved, not what the flags set.
@@ -1674,29 +1665,42 @@ impl Form {
 		}
 		self.tried = Some(next.clone());
 		self.sent_tokens = [
-			(self.relay_token.clone(), self.forget_relay_token),
-			(self.failover_token.clone(), self.forget_failover_token),
+			(self.relay.clone(), self.relay_token.clone(), self.forget_relay_token),
+			(
+				self.failover.clone(),
+				self.failover_token.clone(),
+				self.forget_failover_token,
+			),
 		];
 		Some(next)
 	}
 
-	/// Let go of the tokens its save kept, since they went with the
-	/// relays it sent, not the ones edited since, and let the rest save.
-	fn settle_tokens(&mut self) {
+	/// Let go of the tokens its save sent, once it `landed`, or once their
+	/// relay's address was edited during a save that failed, since they went
+	/// with the address sent, never one edited in since; and let the rest
+	/// save.
+	fn settle_tokens(&mut self, landed: bool) {
 		self.tried = None;
 		let sent = std::mem::take(&mut self.sent_tokens);
-		for ((field, forget), sent) in [
-			(&mut self.relay_token, &mut self.forget_relay_token),
-			(&mut self.failover_token, &mut self.forget_failover_token),
+		for ((address, field, forget), (sent_address, sent, sent_forget)) in [
+			(&self.relay, &mut self.relay_token, &mut self.forget_relay_token),
+			(
+				&self.failover,
+				&mut self.failover_token,
+				&mut self.forget_failover_token,
+			),
 		]
 		.into_iter()
 		.zip(sent)
 		{
+			if !landed && *address == sent_address {
+				continue;
+			}
 			// Each only while still as sent; one edited since saves next.
-			if *field == sent.0 {
+			if *field == sent {
 				field.clear();
 			}
-			if *forget && sent.1 {
+			if *forget && sent_forget {
 				*forget = false;
 			}
 		}
@@ -1826,10 +1830,7 @@ mod tests {
 		let (saved, tokens) = form.next(&stream).expect("the edit saves");
 		assert!(form.next(&stream).is_none(), "and is not tried again as it is");
 		let before = stream.clone();
-		stream.save(saved).unwrap();
-		for (url, token) in &tokens {
-			stream.credentials().set(url, token.as_deref()).unwrap();
-		}
+		stream.save(saved, &tokens).unwrap();
 		assert_ne!(
 			stream.relay().unwrap().as_str(),
 			form.relay,
@@ -1870,7 +1871,7 @@ mod tests {
 		// The same token typed for the failover while it saved is a new edit.
 		form.failover = "https://c.example/".into();
 		form.failover_token = "secret".into();
-		form.settle_tokens();
+		form.settle_tokens(true);
 		assert!(form.relay_token.is_empty(), "the token went with the relay sent");
 		assert_eq!(form.failover_token, "secret", "and the failover's is kept");
 
@@ -1881,7 +1882,7 @@ mod tests {
 		ticked.next(&stream).expect("the edit saves");
 		ticked.relay = "https://b.example/".into();
 		ticked.forget_relay_token = true;
-		ticked.settle_tokens();
+		ticked.settle_tokens(true);
 		assert!(ticked.relay_token.is_empty(), "the token went with the relay sent");
 		let (_, tokens) = ticked.next(&stream).expect("the new address saves");
 		assert_eq!(
@@ -1889,6 +1890,19 @@ mod tests {
 			[("https://b.example/".parse().unwrap(), None)],
 			"forgetting B's"
 		);
+
+		// Nor after a save that failed, once its address was edited, while
+		// the other relay's token, its address untouched, waits as typed.
+		let mut failed = Form::new(&stream);
+		failed.relay = "https://a.example/".into();
+		failed.relay_token = "secret".into();
+		failed.failover = "https://c.example/".into();
+		failed.failover_token = "other".into();
+		failed.next(&stream).expect("the edit saves");
+		failed.relay = "https://b.example/".into();
+		failed.settle_tokens(false);
+		assert!(failed.relay_token.is_empty(), "A's token never goes to B");
+		assert_eq!(failed.failover_token, "other", "C's stays to save again");
 		let (saved, tokens) = form.next(&stream).expect("the new addresses save");
 		assert_eq!(saved.relay.unwrap().as_str(), "https://b.example/");
 		assert_eq!(

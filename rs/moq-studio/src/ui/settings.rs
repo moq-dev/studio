@@ -1141,7 +1141,7 @@ impl Panels {
 		let spawned = std::thread::Builder::new().name("save".into()).spawn(move || {
 			let result = (|| -> anyhow::Result<crate::stream::Stream> {
 				let moving = engine.recorder.moving(&saved.folder(engine.autosave.path()))?;
-				stream.save(saved)?;
+				stream.save(saved, &[])?;
 				moving.finish();
 				Ok(stream)
 			})();
