@@ -140,7 +140,8 @@ last live under the pointer, and:
 - **Rename show…** renames the show's scene file, its history, and its
   stream settings, and opens it again. Its recordings and clips keep their
   names, and REVIEW still lists them: the stream settings note the show's
-  earlier names (`earlier`), which no new or renamed show takes.
+  earlier names (`earlier`), which no other show takes, though the show can
+  take one back.
 - **Export show copy…** saves the scenes as a scene file of its own, to share
   or keep under version control. In another folder, each file a source reads
   is named from the root, so the copy reads the same files; an overlay that
@@ -150,10 +151,12 @@ last live under the pointer, and:
 Each but the export ends the open show as quitting does (saving it, finishing
 a recording, and letting go of its relays, sources, and keys) before opening
 the next, so they are dimmed while the stream is on air or going on or off:
-end the stream first. A show that cannot be saved, because its scene file
-changed outside the studio, stays open and says so, and one that cannot open
-brings back the show you left, saying why. The list is yours, kept with the
-app's settings rather than beside any show.
+end the stream first, or while a copy is being written. A show that cannot be
+saved, because its scene file changed outside the studio, stays open and says
+so, and one that cannot open brings back the show you left, saying why. A
+renamed show that cannot open keeps its new name, and a new show opens in its
+place, saying why. The list is yours, kept with the app's settings rather than
+beside any show.
 
 ## The window
 

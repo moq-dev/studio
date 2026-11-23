@@ -179,7 +179,7 @@ pub fn new_path(dir: &Path, recordings: &[PathBuf]) -> anyhow::Result<PathBuf> {
 		let path = dir.join(format!("{name}.toml"));
 		let mut recorded = false;
 		for recordings in recordings {
-			recorded |= self::recorded(recordings, &name)?;
+			recorded |= self::recorded(recordings, &name, &[])?;
 		}
 		if !taken(&path)? && !claimed.contains(&name) && !recorded {
 			return Ok(path);
@@ -275,9 +275,10 @@ pub fn rename(path: &Path, name: &str, recordings: &Path) -> anyhow::Result<Path
 	);
 	// This run's folder, and the one the show saves, which a `--recordings`
 	// flag only overrides for this run.
+	let own: Vec<String> = saved.earlier.iter().cloned().chain([old.clone()]).collect();
 	for folder in [recordings.to_path_buf(), saved.folder(path)] {
 		anyhow::ensure!(
-			ours || !recorded(&folder, name)?,
+			ours || !recorded(&folder, name, &own)?,
 			"{} holds recordings of another show called {name}",
 			folder.display()
 		);
@@ -287,12 +288,32 @@ pub fn rename(path: &Path, name: &str, recordings: &Path) -> anyhow::Result<Path
 	let quitting = MOVING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 	anyhow::ensure!(!*quitting, "the studio is quitting");
 
+	// The name, held against another studio taking it since the checks: one
+	// renaming or creating a show there makes its scene file only where none
+	// is, so the move below replaces only this placeholder. The show's other
+	// files go wherever its scene file is. A name only cased apart is already
+	// the show's own file on a case-insensitive system.
+	let recased = name.to_lowercase() == old.to_lowercase() && same_file::is_same_file(path, &to).unwrap_or(false);
+	if !recased {
+		std::fs::OpenOptions::new()
+			.write(true)
+			.create_new(true)
+			.open(&to)
+			.map_err(|err| match err.kind() {
+				std::io::ErrorKind::AlreadyExists => anyhow::anyhow!("another show is called {name}"),
+				_ => anyhow::Error::from(err).context(format!("creating {}", to.display())),
+			})?;
+	}
 	let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
 	let put_back = |moved: Vec<(PathBuf, PathBuf)>| {
+		let placed = moved.iter().any(|(_, moved)| *moved == to);
 		for (from, to) in moved.into_iter().rev() {
 			if let Err(err) = std::fs::rename(&to, &from) {
 				tracing::error!(%err, from = %to.display(), to = %from.display(), "cannot put a show's file back");
 			}
+		}
+		if !recased && !placed {
+			let _ = std::fs::remove_file(&to);
 		}
 	};
 	for (from, to) in files(path).into_iter().zip(files(&to)) {
@@ -304,6 +325,11 @@ pub fn rename(path: &Path, name: &str, recordings: &Path) -> anyhow::Result<Path
 		});
 		match result {
 			Ok(true) => moved.push((from, to)),
+			// Its placeholder would be left as an empty show.
+			Ok(false) if from == path => {
+				put_back(moved);
+				anyhow::bail!("{} is no longer there", path.display());
+			}
 			Ok(false) => {}
 			Err(err) => {
 				put_back(moved);
@@ -380,7 +406,7 @@ fn claimed(dir: &Path, except: Option<&Path>) -> anyhow::Result<std::collections
 }
 
 /// Whether `dir` holds a recording or clip of a show called `show`.
-fn recorded(dir: &Path, show: &str) -> anyhow::Result<bool> {
+fn recorded(dir: &Path, show: &str, own: &[String]) -> anyhow::Result<bool> {
 	let entries = match std::fs::read_dir(dir) {
 		Ok(entries) => entries,
 		// Nothing recorded yet.
@@ -393,7 +419,10 @@ fn recorded(dir: &Path, show: &str) -> anyhow::Result<bool> {
 		let file = file.to_string_lossy();
 		// A marker a crash left names a recording, which a launch repairs.
 		let recording = file.strip_suffix(crate::record::MARKER).unwrap_or(&file);
-		if crate::shelf::parse(show, recording).is_some() {
+		// One that reads as any of `own`'s names too is theirs, as a name
+		// holding a stamp makes it.
+		let theirs = |name: &String| crate::shelf::parse(name, recording).is_some();
+		if crate::shelf::parse(show, recording).is_some() && !own.iter().any(theirs) {
 			return Ok(true);
 		}
 	}
@@ -407,8 +436,12 @@ fn recorded(dir: &Path, show: &str) -> anyhow::Result<bool> {
 /// settings stay with the show.
 pub fn export(collection: &Collection, path: &Path, to: &Path) -> anyhow::Result<()> {
 	let to_absolute = std::path::absolute(to)?;
+	// Where the write lands through any links, which may not exist yet.
+	let landing = std::path::absolute(autosave::resolve(to)?)?;
 	for file in files(path) {
-		let own = to_absolute == std::path::absolute(&file)?
+		let file_absolute = std::path::absolute(&file)?;
+		let own = to_absolute == file_absolute
+			|| landing == file_absolute
 			// Through a link or a name cased apart, too.
 			|| same_file::is_same_file(to, &file).unwrap_or(false);
 		anyhow::ensure!(!own, "that is one of the show's own files");
@@ -601,6 +634,26 @@ mod tests {
 		assert!(path.exists());
 	}
 
+	/// A recording that reads as the new name and as the show's own, as a
+	/// name holding a stamp makes it, is the show's, while one that reads
+	/// only as the new name still refuses it.
+	#[test]
+	fn a_rename_keeps_the_shows_own_recordings() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("Talk 2026-11-03T12-00-00Z.toml");
+		std::fs::write(&path, "scene").unwrap();
+		let videos = dir.path().join("videos");
+		std::fs::create_dir(&videos).unwrap();
+		let own = videos.join("Talk 2026-11-03T12-00-00Z 2026-11-04T12-00-00Z.mp4");
+		std::fs::write(&own, "").unwrap();
+		let theirs = videos.join("Talk 2026-11-05T12-00-00Z.mp4");
+		std::fs::write(&theirs, "").unwrap();
+		assert!(rename(&path, "Talk", &videos).is_err(), "Talk recorded on its own");
+		std::fs::remove_file(&theirs).unwrap();
+		let to = rename(&path, "Talk", &videos).unwrap();
+		assert_eq!(to, dir.path().join("Talk.toml"));
+	}
+
 	/// A show that never had a history, stream settings, or recordings
 	/// renames too, gaining stream settings that note its old name.
 	#[test]
@@ -668,13 +721,10 @@ mod tests {
 				}),
 			)
 			.unwrap();
+		// Absolute on every platform, as a path without a drive is not on Windows.
+		let third = dir.path().join("elsewhere/third.png");
 		draft
-			.set_source(
-				"lower third",
-				Some(Source::Image {
-					path: "/elsewhere/third.png".into(),
-				}),
-			)
+			.set_source("lower third", Some(Source::Image { path: third.clone() }))
 			.unwrap();
 		collection.apply(&draft.finish().unwrap()).unwrap();
 
@@ -686,7 +736,7 @@ mod tests {
 			other => panic!("{other:?}"),
 		};
 		assert_eq!(path("logo"), dir.path().join("shows/logo.png"));
-		assert_eq!(path("lower third"), PathBuf::from("/elsewhere/third.png"));
+		assert_eq!(path("lower third"), third);
 
 		// Beside the show, its paths hold as they are.
 		let beside = dir.path().join("shows/copy.toml");
@@ -714,6 +764,16 @@ mod tests {
 			std::os::unix::fs::symlink(&show, &link).unwrap();
 			assert!(export(&collection, &link, &show).is_err(), "the show through a link");
 			assert_eq!(std::fs::read_to_string(&show).unwrap(), "scene");
+
+			// A link to a stream settings file not made yet would make it.
+			let settings = stream::path(&show);
+			let dangling = dir.path().join("dangling.toml");
+			std::os::unix::fs::symlink(&settings, &dangling).unwrap();
+			assert!(
+				export(&collection, &show, &dangling).is_err(),
+				"the settings through a link"
+			);
+			assert!(!settings.exists());
 		}
 	}
 }

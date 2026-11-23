@@ -313,7 +313,9 @@ struct Opening {
 enum App {
 	/// A show opening, before its engine starts.
 	Opening(Box<Opening>),
-	/// An engine whose studio is built once the window can draw it.
+	/// An engine whose studio is built at the window's next draw, as a test
+	/// hands the window one; a show that opens builds its studio at once.
+	#[cfg(test)]
 	Starting(Arc<engine::Engine>, Box<stream::Stream>),
 	Studio(Box<ui::Studio>),
 	/// No show could be opened, and the window is closing.
@@ -404,7 +406,9 @@ impl Window {
 	fn describe(&self) -> serde_json::Value {
 		match &self.app {
 			App::Opening(opening) => serde_json::json!({ "app": "opening", "show": opening.name }),
-			App::Starting(..) | App::Moving => serde_json::json!({ "app": "starting" }),
+			#[cfg(test)]
+			App::Starting(..) => serde_json::json!({ "app": "starting" }),
+			App::Moving => serde_json::json!({ "app": "starting" }),
 			App::Studio(studio) => serde_json::json!({ "app": "studio", "studio": studio.describe() }),
 			App::Closing => serde_json::json!({ "app": "closing" }),
 		}
@@ -421,7 +425,8 @@ impl Window {
 					None => self.app = App::Studio(studio),
 				}
 			}
-			App::Opening(opening) => self.opening(ui, opening),
+			App::Opening(opening) => self.opening(ui, frame, opening),
+			#[cfg(test)]
 			App::Starting(engine, stream) => self.start(ui, frame, engine, stream),
 			App::Closing => {
 				kit::wash(ui.painter(), ui.max_rect());
@@ -487,7 +492,7 @@ impl Window {
 
 	/// Wait for the show opening, then build its studio; if it cannot open,
 	/// open what it names instead and say why there, or end the window.
-	fn opening(&mut self, ui: &mut egui::Ui, mut opening: Box<Opening>) {
+	fn opening(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame, mut opening: Box<Opening>) {
 		ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
 		if opening.task.poll().is_none() {
 			draw_opening(ui, &opening.name);
@@ -503,7 +508,8 @@ impl Window {
 			self.recent.moved(from, to);
 		}
 		match opened {
-			Ok((engine, stream)) => self.app = App::Starting(engine, Box::new(stream)),
+			// Built now, so the engine is the one a quit ends from here on.
+			Ok((engine, stream)) => self.start(ui, frame, engine, Box::new(stream)),
 			Err(err) => {
 				let err = err.context(format!("cannot open {}", opening.name));
 				tracing::error!(error = format!("{err:#}"), "cannot open the show");
