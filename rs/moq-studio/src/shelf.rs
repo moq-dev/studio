@@ -167,6 +167,10 @@ fn list(dir: &Path, names: &[String], mut lengths: Lengths) -> (Listing, Lengths
 			return (listing, lengths);
 		}
 	};
+	// The longest name first, so a name that starts with a shorter one, such
+	// as `Talk 2026-11-03T12-00-00Z` after `Talk`, is not read as its stamp.
+	let mut names = names.to_vec();
+	names.sort_by_key(|name| std::cmp::Reverse(name.len()));
 	let mut seen = BTreeMap::new();
 	let mut recordings: BTreeMap<String, Gathered> = BTreeMap::new();
 	for entry in entries.flatten() {
@@ -499,6 +503,27 @@ mod tests {
 			.find(|card| card.path.ends_with(format!("earlier {before}.mp4")));
 		assert!(earlier.is_some(), "a file under an earlier name is the show's");
 		assert_eq!(listing.cards.len(), 4);
+	}
+
+	/// A show once named after itself and a stamp lists that name's
+	/// recordings under it, not under the shorter name with the stamp read as
+	/// a source.
+	#[test]
+	fn a_longer_earlier_name_wins() {
+		let dir = tempfile::tempdir().unwrap();
+		let (old, stamp) = ("Talk 2026-11-03T12-00-00Z", "2026-11-04T12-00-00Z");
+		std::fs::write(dir.path().join(format!("{old} {stamp}.mp4")), mp4(5, 0)).unwrap();
+		let names = ["Talk".to_string(), old.to_string()];
+		let (listing, _) = list(dir.path(), &names, BTreeMap::new());
+		let kinds: Vec<_> = listing.cards.iter().map(|card| &card.kind).collect();
+		assert_eq!(
+			kinds,
+			[&Kind::Recording {
+				stamp: stamp.into(),
+				sources: 0,
+				repaired: false
+			}]
+		);
 	}
 
 	/// A regular MP4's boxes, holding `seconds` in its movie header after

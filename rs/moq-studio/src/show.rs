@@ -254,7 +254,9 @@ pub fn rename(path: &Path, name: &str, recordings: &Path) -> anyhow::Result<Path
 		return Ok(to);
 	}
 	let old = self::name(path);
-	let mut saved = saved(&stream::path(path))?;
+	// Kept as written, to put back if the rename fails after moving them.
+	let original = read(&stream::path(path))?;
+	let mut saved = parse(&stream::path(path), original.as_deref())?;
 	let ours = saved.earlier.iter().any(|earlier| earlier == name);
 	let dir = path.parent().unwrap_or(Path::new(""));
 	for (from, to) in files(path).into_iter().zip(files(&to)) {
@@ -285,23 +287,38 @@ pub fn rename(path: &Path, name: &str, recordings: &Path) -> anyhow::Result<Path
 		}
 	};
 	for (from, to) in files(path).into_iter().zip(files(&to)) {
-		if !exists(&from)? {
-			continue;
+		let result = exists(&from).and_then(|there| match there {
+			true => std::fs::rename(&from, &to)
+				.map(|()| true)
+				.with_context(|| format!("renaming {}", from.display())),
+			false => Ok(false),
+		});
+		match result {
+			Ok(true) => moved.push((from, to)),
+			Ok(false) => {}
+			Err(err) => {
+				put_back(moved);
+				return Err(err);
+			}
 		}
-		if let Err(err) = std::fs::rename(&from, &to) {
-			put_back(moved);
-			return Err(err).with_context(|| format!("renaming {}", from.display()));
-		}
-		moved.push((from, to));
 	}
 	saved.earlier.retain(|earlier| earlier != name && *earlier != old);
 	saved.earlier.push(old);
 	let text = toml::to_string(&saved).context("cannot write the stream settings")?;
 	let settings = stream::path(&to);
 	if let Err(err) = autosave::write_file(&settings, &text) {
-		// Only a file this made is there to take back; the moves put back the rest.
-		if !moved.iter().any(|(_, to)| *to == settings) {
-			let _ = std::fs::remove_file(&settings);
+		// The write may have landed before failing, such as on syncing its
+		// directory: settings moved here get their old text back before they
+		// move back, and a file this made is taken back.
+		match (&original, moved.iter().any(|(_, to)| *to == settings)) {
+			(Some(original), true) => {
+				if let Err(err) = autosave::write_file(&settings, original) {
+					tracing::error!(%err, path = %settings.display(), "cannot put a show's stream settings back");
+				}
+			}
+			_ => {
+				let _ = std::fs::remove_file(&settings);
+			}
 		}
 		put_back(moved);
 		return Err(err).with_context(|| format!("writing {}", settings.display()));
@@ -322,10 +339,24 @@ fn exists(file: &Path) -> anyhow::Result<bool> {
 /// The stream settings in the file at `path`, or the defaults if it is not
 /// there.
 fn saved(path: &Path) -> anyhow::Result<stream::Saved> {
+	parse(path, read(path)?.as_deref())
+}
+
+/// The text of the file at `path`, or `None` if it is not there.
+fn read(path: &Path) -> anyhow::Result<Option<String>> {
 	match std::fs::read_to_string(path) {
-		Ok(text) => toml::from_str(&text).with_context(|| format!("reading {}", path.display())),
-		Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(stream::Saved::default()),
+		Ok(text) => Ok(Some(text)),
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
 		Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
+	}
+}
+
+/// The stream settings `text` read from `path`, or the defaults if there was
+/// no file.
+fn parse(path: &Path, text: Option<&str>) -> anyhow::Result<stream::Saved> {
+	match text {
+		Some(text) => toml::from_str(text).with_context(|| format!("reading {}", path.display())),
+		None => Ok(stream::Saved::default()),
 	}
 }
 
@@ -552,6 +583,29 @@ mod tests {
 		assert_eq!(std::fs::read_to_string(&to).unwrap(), "scene");
 		assert!(!autosave::history_path(&to).exists());
 		assert_eq!(saved(&stream::path(&to)).unwrap().earlier, ["show"]);
+	}
+
+	/// A rename that cannot tell whether a file is there, such as a history
+	/// linked into a folder it may not read, puts back what it moved.
+	#[cfg(unix)]
+	#[test]
+	fn a_rename_that_cannot_read_a_file_moves_nothing() {
+		use std::os::unix::fs::PermissionsExt;
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("show.toml");
+		std::fs::write(&path, "scene").unwrap();
+		let locked = dir.path().join("locked");
+		std::fs::create_dir(&locked).unwrap();
+		std::os::unix::fs::symlink(locked.join("history"), autosave::history_path(&path)).unwrap();
+		std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+		// Root reads it anyway, which leaves nothing to test.
+		let readable = std::fs::read_dir(&locked).is_ok();
+		let result = (!readable).then(|| rename(&path, "Talk", &dir.path().join("never made")));
+		std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+		let Some(result) = result else { return };
+		assert!(result.is_err());
+		assert_eq!(std::fs::read_to_string(&path).unwrap(), "scene");
+		assert!(!dir.path().join("Talk.toml").exists());
 	}
 
 	/// An exported copy reads the show's files from wherever it is kept, and

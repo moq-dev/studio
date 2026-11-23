@@ -101,7 +101,7 @@ fn smooth(encodings: &[Encoding]) -> bool {
 /// Fails when any cannot open its encoder, as a hardware encoder at its
 /// session cap cannot, since going live would not send it either.
 pub(crate) async fn probe(gpu: engine::Gpu, canvases: &[Canvas]) -> Result<Vec<Encoding>, String> {
-	let picture = Picture::new(&gpu, canvases);
+	let picture = Picture::new(&gpu, canvases)?;
 	probe_together(&gpu, &picture, canvases)
 		.await
 		.map_err(|err| format!("{err:#}"))
@@ -335,9 +335,17 @@ fn time(
 struct Picture(wgpu::Texture);
 
 impl Picture {
-	fn new(gpu: &engine::Gpu, canvases: &[Canvas]) -> Self {
+	/// Fails when the panning room takes it past what the GPU can hold, as a
+	/// canvas at the GPU's own limit would, rather than let the GPU panic.
+	fn new(gpu: &engine::Gpu, canvases: &[Canvas]) -> Result<Self, String> {
 		let width = canvases.iter().map(|canvas| canvas.width).max().unwrap_or_default() + PAN * BURST;
 		let height = canvases.iter().map(|canvas| canvas.height).max().unwrap_or_default();
+		let limit = gpu.device.limits().max_texture_dimension_2d;
+		if width > limit || height > limit {
+			return Err(format!(
+				"the GPU holds pictures up to {limit} px a side, too small to time a {width}x{height} burst"
+			));
+		}
 		let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
 			label: Some("encoder picture"),
 			size: extent(width, height),
@@ -363,7 +371,7 @@ impl Picture {
 			},
 			extent(width, height),
 		);
-		Self(texture)
+		Ok(Self(texture))
 	}
 
 	/// Draw frame `index` of a burst into `target`: the picture, panned [`PAN`]

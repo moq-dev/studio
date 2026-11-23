@@ -16,9 +16,11 @@ the [mock-up](/quest/m0/ux/mock/overhaul-first.webp):
 - **Cold launch:** move the app's storage aside (`~/.local/share/moq-studio`
   on Linux, `~/Library/Application Support/moq-studio` on macOS), launch with
   no arguments on a machine with a real camera and microphone, and count the
-  clicks to a live camera and screen: two, on the quick start's Camera and
-  Screen cards. Note how long the window shows "Opening My Show…" and whether
-  the canvas came out at 60 fps on a hardware encoder.
+  clicks to a live camera and screen. The quick start's Camera card adds the
+  camera in one, and the quick start then gives way to the scene, so the
+  screen comes from **Add** (A on BUILD), under the displays; the first-run
+  quest hoped for two clicks in all. Note how long the window shows "Opening
+  My Show…" and whether the canvas came out at 60 fps on a hardware encoder.
 - **Permissions:** the camera and microphone prompts macOS raises on that
   launch, and the desktop's screen picker on Wayland from the Screen card.
 - **The microphone:** whether **Mic** in the sound moves with your voice

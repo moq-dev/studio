@@ -374,6 +374,8 @@ impl Window {
 		};
 		let opener = self.opener.clone();
 		let shows = self.shows.clone();
+		// Where a new show records: the flag's folder, if set, else Videos.
+		let recordings = self.opener.flags.recordings.clone().or_else(show::videos);
 		// Naming a new show, or renaming one, reads its folders too.
 		let spawned = task::Task::spawn(&self.opener.runtime, move || async move {
 			let (path, create) = match target {
@@ -381,7 +383,7 @@ impl Window {
 				Target::Create(path) => (path, true),
 				Target::New => {
 					let shows = shows.context("this system has no app storage to keep a show in")?;
-					(show::new_path(&shows, show::videos().as_deref())?, true)
+					(show::new_path(&shows, recordings.as_deref())?, true)
 				}
 				Target::Rename { from, name, recordings } => {
 					let to = show::rename(&from, &name, &recordings).context("cannot rename the show")?;
