@@ -876,11 +876,16 @@ fn go_live_from_no_relay_and_end_on_confirm() {
 		.type_text(relay.url.as_str());
 	harness.run_steps(2);
 	harness.get_by_label("Go live now").click();
-	harness.run_steps(2);
-	assert!(
-		harness.query_by_label("Going live once checked").is_some(),
-		"it waits on the check"
-	);
+	// The save runs on a thread of its own; once it lands, the popover waits
+	// on the check.
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, async {
+			while harness.query_by_label("Going live once checked").is_none() {
+				harness.step();
+				kio::clock::sleep(Duration::from_millis(20)).await;
+			}
+		}))
+		.expect("it waits on the check");
 	// The check measures the connection for seconds before it passes.
 	runtime
 		.block_on(kio::clock::timeout(SETTLE, async {
@@ -915,6 +920,8 @@ fn go_live_from_no_relay_and_end_on_confirm() {
 			}
 		}))
 		.expect("the stream ends");
+	drop(harness);
+	quit(&engine, &runtime);
 }
 
 /// A marker dropped by the flag beside the panic key, on air, shows on

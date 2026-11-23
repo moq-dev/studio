@@ -388,15 +388,15 @@ impl Panels {
 		// One encoder check at a time: a stale one still timing, even one
 		// dropped, finishes first, as its thread runs on beside the next.
 		let timing = self.controls.probes_running();
-		// Not during the preferred relay's first dial, nor a follow that
-		// would start one, such as just after a save, since its session counts
-		// toward what a check is of: one checked before would go stale as it
-		// connects. A dial that failed checks at once, and again once it
-		// connects; one that hangs, or a follow that cannot finish, such as on
-		// a token the credential store will not read, after a measurement's
+		// Not during the preferred relay's first dial, nor a save or follow
+		// that would start one, since what it saves and the session it dials
+		// count toward what a check is of: one checked before would go stale.
+		// A dial that failed checks at once, and again once it connects; one
+		// that hangs, or a save or follow that cannot finish, such as on a
+		// token the credential store will not read, after a measurement's
 		// length.
 		let now = kio::clock::now();
-		let dialing = self.controls.refollowing() || self.engine.dialing();
+		let dialing = self.saving.is_some() || self.controls.refollowing() || self.engine.dialing();
 		let dialing = match (dialing, self.dialing) {
 			(false, _) => {
 				self.dialing = None;
@@ -413,13 +413,14 @@ impl Panels {
 			self.ready = self
 				.controls
 				.probing()
-				.map(|probing| Ready::new(self.engine.gpu().clone(), &self.runtime, of, probing));
+				.map(|probing| Ready::new(self.engine.gpu().clone(), &self.runtime, of.clone(), probing));
 			// A refusal from before is of what this checks again.
 			if self.ready.is_some() && self.going.as_ref().is_some_and(|going| going.armed) {
 				*self.controls.refused.lock().unwrap() = None;
 			}
 		}
-		if let Some(ready) = &mut self.ready {
+		// A stale one waits, so it never measures what it is not of.
+		if let Some(ready) = self.ready.as_mut().filter(|ready| ready.of == of) {
 			ready.advance(&self.controls, &self.runtime);
 		}
 		self.follow_going();
@@ -718,14 +719,18 @@ impl Panels {
 				});
 				ui.add_space(6.0);
 				if !set {
+					// What was submitted stays as it was until it saves or fails.
+					let waiting = saving || going.armed;
 					ui.label(egui::RichText::new("Relay address").font(kit::ui(12.5)).color(kit::DIM));
-					ui.add(
+					ui.add_enabled(
+						!waiting,
 						egui::TextEdit::singleline(&mut going.address)
 							.id_salt("go live address")
 							.hint_text("https://relay.example/anon")
 							.desired_width(f32::INFINITY),
 					);
-					ui.add(
+					ui.add_enabled(
+						!waiting,
 						egui::TextEdit::singleline(&mut going.token)
 							.id_salt("go live token")
 							.password(true)
@@ -736,7 +741,6 @@ impl Panels {
 						ui.add(egui::Label::new(egui::RichText::new(why).font(kit::ui(12.0)).color(kit::ERR)).wrap());
 					}
 					ui.add_space(4.0);
-					let waiting = saving || going.armed;
 					let enabled = !waiting && !going.address.trim().is_empty();
 					now = wide_button(ui, "Go live now", enabled, waiting).clicked();
 					ui.add_space(2.0);
@@ -1074,6 +1078,9 @@ impl Panels {
 		let saved = match result {
 			Ok(saved) => saved,
 			Err(err) => {
+				// A token it could not put back is in use, so a check made
+				// with the one before is stale.
+				self.tokens += u64::from(retokened);
 				self.saved = Some((from, err));
 				return;
 			}
@@ -1112,6 +1119,7 @@ impl Panels {
 			let own = by_form && from == Setting::Destinations;
 			match (own && form.sent(&before)) || (!own && !form.edited(before.saved())) {
 				true => self.stream_form = Some(Form::new(&saved)),
+				false if own => form.settle_tokens(),
 				false => form.tried = None,
 			}
 		}
@@ -1131,17 +1139,7 @@ impl Panels {
 	/// saved says why in its pane, and is not tried again until it changes.
 	pub(super) fn autosave_settings(&mut self, ctx: &egui::Context) {
 		let stream = self.controls.stream.lock().unwrap().clone();
-		// A go-live, from a hotkey too, waits for where the stream goes.
-		let unsaved = match (&self.saving, &self.stream_form) {
-			(Some(saving), _) if saving.from == Setting::Destinations => {
-				Some("a change to Settings, Destinations is still saving".to_string())
-			}
-			(_, Some(form)) if form.edited(stream.saved()) => {
-				Some("Settings, Destinations has a change not saved yet; finish or undo it there".to_string())
-			}
-			_ => None,
-		};
-		*self.controls.unsaved.lock().unwrap() = unsaved;
+		self.publish_unsaved(&stream);
 		if self.typing || self.saving.is_some() || self.picker.is_some() {
 			return;
 		}
@@ -1168,6 +1166,22 @@ impl Panels {
 			saving.form = true;
 			self.saving = Some(saving);
 		}
+	}
+
+	/// Tell a go-live, from a hotkey too, whether a Destinations edit or
+	/// save is still to land, which it waits for. Called as the pane is
+	/// edited too, so a key pressed before the next frame sees the edit.
+	fn publish_unsaved(&self, stream: &Stream) {
+		let unsaved = match (&self.saving, &self.stream_form) {
+			(Some(saving), _) if saving.from == Setting::Destinations => {
+				Some("a change to Settings, Destinations is still saving".to_string())
+			}
+			(_, Some(form)) if form.edited(stream.saved()) => {
+				Some("Settings, Destinations has a change not saved yet; finish or undo it there".to_string())
+			}
+			_ => None,
+		};
+		*self.controls.unsaved.lock().unwrap() = unsaved;
 	}
 
 	/// Settings, Destinations: the relay and its token and the broadcast's
@@ -1330,6 +1344,7 @@ impl Panels {
 			);
 		}
 		self.typing |= typing;
+		self.publish_unsaved(&stream);
 		ui.add_space(6.0);
 		self.saved_note(ui, Setting::Destinations);
 		// On at once, as every setting here is.
@@ -1375,7 +1390,13 @@ fn measure(controls: &Controls, runtime: &tokio::runtime::Handle, ceiling: Rate)
 		let relays = {
 			// Each client binds its socket on the runtime.
 			let _runtime = handle.enter();
-			stream.relays(Switched::default())
+			// Only the one measured, so a failover's token the credential
+			// store will not read fails going live, not this.
+			let preferred = stream.relay().is_some();
+			stream.relays(Switched {
+				relay: preferred,
+				failover: !preferred,
+			})
 		};
 		let path = stream.broadcast().to_string();
 		async move {
@@ -1533,10 +1554,26 @@ impl Saving {
 				if from == Setting::Guests {
 					stream.check_guests(&saved)?;
 				}
-				for (url, token) in &tokens {
-					stream.credentials().set(url, token.as_deref())?;
+				// The tokens kept before, put back if the save fails, so it
+				// fails whole rather than dialing with a token never saved.
+				let mut kept = Vec::new();
+				let saved = (|| -> anyhow::Result<()> {
+					for (url, token) in &tokens {
+						kept.push((url, stream.credentials().get(url)?));
+						stream.credentials().set(url, token.as_deref())?;
+					}
+					stream.save(saved)
+				})();
+				if let Err(err) = saved {
+					for (url, token) in kept.iter().rev() {
+						if let Err(restore) = stream.credentials().set(url, token.as_deref()) {
+							return Err(err.context(format!(
+								"and the token kept before for {url} could not be put back: {restore:#}"
+							)));
+						}
+					}
+					return Err(err);
 				}
-				stream.save(saved)?;
 				Ok(stream)
 			})();
 			let _ = send.send(result.map_err(|err| format!("{err:#}")));
@@ -1634,6 +1671,23 @@ impl Form {
 		}
 		self.tried = Some(next.clone());
 		Some(next)
+	}
+
+	/// Let go of the tokens its save kept, since they went with the
+	/// relays it sent, not the ones edited since, and let the rest save.
+	fn settle_tokens(&mut self) {
+		let Some((_, kept)) = self.tried.take() else { return };
+		for (field, forget) in [
+			(&mut self.relay_token, &mut self.forget_relay_token),
+			(&mut self.failover_token, &mut self.forget_failover_token),
+		] {
+			let token = field.trim();
+			match token.is_empty() {
+				true if *forget && kept.iter().any(|(_, kept)| kept.is_none()) => *forget = false,
+				false if kept.iter().any(|(_, kept)| kept.as_deref() == Some(token)) => field.clear(),
+				_ => {}
+			}
+		}
 	}
 
 	/// Whether the form, after its save over `before`, still holds just
@@ -1779,5 +1833,32 @@ mod tests {
 			!form.sent(&before),
 			"an edit made during the save is kept, back to what it was too"
 		);
+	}
+
+	/// A token typed for one relay never goes to the address edited in while
+	/// it saved, however the save and the edit race.
+	#[test]
+	fn a_token_stays_with_the_relay_it_was_sent_for() {
+		let dir = tempfile::tempdir().unwrap();
+		let stream = Stream::load(
+			&dir.path().join("show.toml"),
+			Default::default(),
+			Default::default(),
+			Default::default(),
+			crate::stream::Credentials::memory(),
+		)
+		.unwrap();
+		let mut form = Form::new(&stream);
+		form.relay = "https://a.example/".into();
+		form.relay_token = "secret".into();
+		let (_, tokens) = form.next(&stream).expect("the edit saves");
+		assert_eq!(tokens, [("https://a.example/".parse().unwrap(), Some("secret".into()))]);
+
+		form.relay = "https://b.example/".into();
+		form.settle_tokens();
+		assert!(form.relay_token.is_empty(), "the token went with the relay sent");
+		let (saved, tokens) = form.next(&stream).expect("the new address saves");
+		assert_eq!(saved.relay.unwrap().as_str(), "https://b.example/");
+		assert!(tokens.is_empty(), "with no token: {tokens:?}");
 	}
 }

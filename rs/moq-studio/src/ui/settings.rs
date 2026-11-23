@@ -122,7 +122,11 @@ impl GuestForm {
 					.map_err(|err| format!("The join page is not a URL: {err}."))?,
 			),
 		};
-		let expiry = (self.expiry != crate::guests::DEFAULT_EXPIRY).then_some(self.expiry);
+		// A lifetime the file sets, even to the default, stays set until changed.
+		let expiry = match saved.guest_expiry {
+			Some(set) if set == self.expiry => Some(set),
+			_ => (self.expiry != crate::guests::DEFAULT_EXPIRY).then_some(self.expiry),
+		};
 		Ok(Saved {
 			room: text(&self.room),
 			room_key: text(&self.key).map(PathBuf::from),
@@ -1097,6 +1101,19 @@ impl Panels {
 		}
 		self.typing |= typing;
 		self.saved_note(ui, Setting::Guests);
+		// A save refused, such as for a room key not there yet, is not tried
+		// again on its own until the form changes; this tries it as it is.
+		let refused = self.saving.is_none()
+			&& self
+				.guests_form
+				.as_ref()
+				.is_some_and(|form| form.tried.is_some() && form.edited(&saved));
+		if refused
+			&& ui.button("Try saving again").clicked()
+			&& let Some(form) = &mut self.guests_form
+		{
+			form.retry();
+		}
 		if pick_key {
 			let from = stream
 				.saved()
@@ -1881,6 +1898,21 @@ fn upload(canvas: Canvas, both: bool) -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A lifetime the file sets to the default is no edit, so opening the
+	/// pane never rewrites the file, while picking another still saves.
+	#[test]
+	fn a_set_default_lifetime_is_not_an_edit() {
+		let saved = Saved {
+			guest_expiry: Some(crate::guests::DEFAULT_EXPIRY),
+			..Default::default()
+		};
+		let mut form = GuestForm::new(&saved);
+		assert!(form.next(&saved).is_none(), "nothing to save");
+		form.expiry = crate::guests::DEFAULT_EXPIRY * 2;
+		let next = form.next(&saved).expect("a new lifetime saves");
+		assert_eq!(next.guest_expiry, Some(crate::guests::DEFAULT_EXPIRY * 2));
+	}
 
 	fn canvas(width: u32, height: u32, framerate: u32) -> Canvas {
 		Canvas {

@@ -374,7 +374,8 @@ it. It lists:
   unmuting each sound, and replay and clips. One that cannot run now, such as
   **End stream** off air or TAKE with nothing cued, is left out of the list
   as it opens; typed for, it comes last, dimmed, saying why. **Go live** does
-  what GO LIVE does; the rest act at once, as their keys do.
+  what GO LIVE does and **End stream** asks first, as clicking the clock
+  does; the rest act at once, as their keys do.
 - Selecting each layer of the scene BUILD edits, by its source's name.
 - Adding a camera, screen, window, or input: the first time, **Find cameras,
   screens, windows, and inputs to add** lists them, then each is a row of its
@@ -450,7 +451,8 @@ Each time on air is a broadcast of its own. On air, the live control is the
 clock; click it, then **End stream** to end the stream, handing the relays its
 tail first, as quitting does, or **Keep live** to stay on air. The **Go live**
 and **End stream** hotkeys act at once, going live without waiting on the
-check.
+check, though never to a destination edit that has not saved yet: the Go live
+hotkey refuses, saying why, until it does.
 
 Off air, the program has no past to replay, and a replay of it says so.
 
@@ -468,9 +470,9 @@ meant to be shared:
   - **Encode only while someone watches** (on demand), which encodes the
     canvas size only while someone watches (see [Output](#output)).
 
-Every change saves on its own, with no Save button: a toggle at once, and a
-field once you leave it (another field, a click elsewhere, or closing
-Settings), so a relay is never dialed at a half-typed address. A change that
+Every change saves on its own, with no Save button: a toggle at once, and
+text once no field of the pane is being typed in (a click elsewhere, or
+closing Settings), so a relay is never dialed at a half-typed address. A change that
 cannot be saved, such as an address that is not a URL, says why under the
 pane and waits for your next edit. Settings, Guests saves the same way.
 
