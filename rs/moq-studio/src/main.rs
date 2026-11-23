@@ -304,7 +304,6 @@ impl eframe::App for Window {
 	}
 
 	fn save(&mut self, storage: &mut dyn eframe::Storage) {
-		self.fx.save(storage);
 		if let App::Studio(studio) = &mut self.app {
 			studio.save(storage);
 		}
@@ -646,7 +645,7 @@ fn run(app: App, opener: show::Opener) -> anyhow::Result<()> {
 				.clone()
 				.context("the window is not drawn with wgpu")?;
 			kit::install(&cc.egui_ctx);
-			let fx = fx::Fx::new(&render, cc.storage, &cc.egui_ctx, &opener.runtime);
+			let fx = fx::Fx::new(&render, &cc.egui_ctx, &opener.runtime);
 			let recent = library::Recent::load(cc.storage);
 			Ok(Box::new(Window {
 				app,

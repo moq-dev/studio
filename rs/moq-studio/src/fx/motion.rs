@@ -1,5 +1,5 @@
-//! Whether the system asks apps to reduce motion, which the Effects setting
-//! follows until one is picked.
+//! Whether the system asks apps to reduce motion, which the window's effects
+//! follow.
 
 /// The system's reduced-motion preference, followed while the window is open.
 pub struct System {

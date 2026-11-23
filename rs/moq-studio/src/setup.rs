@@ -727,7 +727,7 @@ impl Setup {
 
 		let mut start = None;
 		egui::CentralPanel::default().show(ui, |ui| {
-			let backdrop = fx.on().then(|| Mark::new(ui.painter()));
+			let backdrop = Mark::new(ui.painter());
 			egui::ScrollArea::vertical().show(ui, |ui| {
 				ui.heading("Set up kixel.live Studio");
 				ui.label(
@@ -739,9 +739,7 @@ impl Setup {
 				ui.separator();
 				start = self.proposal(ui);
 			});
-			if let Some(backdrop) = backdrop {
-				fx.backdrop(&backdrop.around(ui.clip_rect()));
-			}
+			fx.backdrop(&backdrop.around(ui.clip_rect()));
 		});
 		if let Some(empty) = start {
 			self.start(empty);

@@ -790,14 +790,12 @@ impl Panels {
 		let (name, dot) = health_word(&self.engine);
 		let name = name.as_str();
 		let report = self.engine.health.lock().unwrap();
-		let mark = fx.on().then(|| crate::fx::Mark::new(ui.painter()));
+		let mark = crate::fx::Mark::new(ui.painter());
 		let text = if compact { "" } else { name };
 		let pill = ui.add(kit::Pill::new(text).dot(dot).clickable());
 
 		let pill = kit::tip(pill, &format!("Health: {name}"), None);
-		if let Some(mark) = mark {
-			fx.health(&mark.around(pill.rect).inset(2.0));
-		}
+		fx.health(&mark.around(pill.rect).inset(2.0));
 		let mut details = false;
 		let mut settings = false;
 		kit::popover(&pill).show(|ui| {
