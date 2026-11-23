@@ -9,8 +9,8 @@ using the command palette ([mock-up](/quest/m0/ux/mock/overhaul-popovers.webp)):
   - Encoder and destination health run silently in the background; the health
     pill stays quiet when everything is OK and warns only when degraded.
   - Once at least one destination is configured, clicking `GO LIVE` starts
-    streaming immediately without blocking on a multi-second benchmark modal
-    every time.
+    streaming immediately when the background check has a fresh passing
+    result, without blocking on a multi-second benchmark modal every time.
   - When no destination is configured yet, clicking `GO LIVE` opens a single
     inline popover right under the button with Destination URL + optional
     key/token + `Go Live Now` (2 interactions instead of an 8-step detour
@@ -40,6 +40,14 @@ Decided 2026-11-22 with the maintainer (/quest-plan):
   Settings detour when unconfigured). If a background check detects an encoder
   overload or unreachable relay, the popover opens with the one-line fix
   (for example `Send 720p30 instead`).
+- **Go Live without a fresh result:** ✅ when the background check is pending,
+  stale, or never ran, the click runs the check right then, shows its progress
+  in the Go Live popover, and goes live as soon as it passes; a failure shows
+  the same one-line fix as a background failure (rejected: going live anyway,
+  which can stream to an unreachable relay; refusing until a background pass
+  arrives). A result goes stale when the network path, the destination, or the
+  encoder settings change after it ran, not after a fixed age. Recommended by
+  the coordinator on PR review, not yet confirmed by the maintainer.
 - **End Stream:** ✅ click `LIVE <clock>` -> explicit `End stream` confirm
   popover (rejected: hidden 1.2s press-and-hold with no click fallback).
 - **Settings persistence:** ✅ immediate auto-save across all Settings panes
