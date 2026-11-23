@@ -481,7 +481,7 @@ setting costs. Escape or a click outside closes it.
 | Hotkeys | Bind keys, by what they are for: going live, ending the stream, the panic key, and recording; Studio mode, TAKE, and AUTO; each scene; each sound's mute; and replay, clips, and markers (see [Hotkeys](#hotkeys)). |
 | Guests | Set the room guests join, its key, the join page, how long a link lasts, and whether guests appear on their own (see [Guests](#guests)). |
 | Remote | Pair a phone as a remote by its QR code, see which are connected, and remove one (see [Phone remote](#phone-remote)). |
-| Advanced | Publish scenes as broadcasts of their own and sources independently, turn the virtual camera of the program or of each published scene on, pick how the window's [effects](#effects) move, and open the [scene graph](#scene-graph). |
+| Advanced | Publish scenes as broadcasts of their own and sources independently, turn the virtual camera of the program or of each published scene on, and open the [scene graph](#scene-graph). |
 
 On air, a new canvas size or frame rate, or a published scene's new size,
 asks before it applies, since the video pauses while the new encoders open.
@@ -1970,7 +1970,7 @@ with, such as a function key, a keypad key, or one with modifiers:
   bound. Without the portal, or if the dialog is declined, bound keys work only
   while the studio has focus, and the tab says so.
 
-The bindings, the snap and grid settings, the [effects](#effects) setting, the
+The bindings, the snap and grid settings, the
 [multiview](#multiview)'s place and picks, and the output **Listen** plays on
 are kept per user in the app's settings, `~/Library/Application
 Support/moq-studio` on macOS, `$XDG_DATA_HOME/moq-studio` (or
@@ -1994,10 +1994,9 @@ published scene, or a recording:
 - The health dot pulses amber while the worst problem is degraded, and
   flickers red with electricity while it is unhealthy.
 
-**Effects**, in Settings, Advanced, sets how they move: **Full**, **Reduced**, which holds each
-on one still pose, or **Off**. Until you pick one it follows the system's
-reduced-motion setting: Reduce motion on macOS, animation effects on Windows,
-and on Linux the desktop's, through its Settings portal.
+While the system asks apps to reduce motion, each holds one still pose: Reduce
+motion on macOS, animation effects on Windows, and on Linux the desktop's,
+through its Settings portal.
 
 ## Replay
 

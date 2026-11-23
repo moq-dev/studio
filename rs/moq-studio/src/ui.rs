@@ -186,7 +186,6 @@ impl Setting {
 				("Publish a scene as its own broadcast", &[]),
 				("Publish a source independently", &[]),
 				("Virtual camera", &["webcam", "video call"]),
-				("Effects", &["animation", "glow", "motion"]),
 				("Scene graph", &["wires", "nodes", "map"]),
 			],
 		}
