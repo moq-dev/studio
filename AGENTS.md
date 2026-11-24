@@ -4,8 +4,9 @@ kixel.live Studio: native GPU streaming studio compositing scenes (`rs/moq-scene
 
 - Measure performance by frame time, GPU copies, and encoder load. Measure UI frame time under a real compositor (`WLR_BACKENDS=headless sway`), never Xvfb (which caps present at 12-25 fps on NVIDIA hosts).
 - Keep `moq-scene` UI-free (no egui types) so headless compositors and wasm can reuse it.
+- Defaults skip anything needing a system library (`capture`, `pipewire`, `vaapi`, `openh264`); `just check` covers them explicitly.
 - Keep the window simple: any PR adding visible UI explains why most streamers need it; niche features live behind `Settings > Mods`, off by default and hidden everywhere until enabled.
-- `just shots` renders named window views (`rs/moq-studio/src/shots.rs`); update/add views for UI changes and attach WebP comparisons (`cwebp -q 80`) in the PR body.
+- `just shots` renders named window views (`rs/moq-studio/src/shots.rs`); update/add views for UI changes and show them beside the mock-up frames in the PR body by converting to WebP (`cwebp -q 80`), committing them in their own commit, linking by that commit's SHA, and deleting them in the next commit.
 
 # Upstream (`moq/`)
 
@@ -16,5 +17,5 @@ kixel.live Studio: native GPU streaming studio compositing scenes (`rs/moq-scene
 
 PRs target `main`. Run `just ci` before pushing (outside the dev shell, `nix develop --command just ...`). Update `README.md` in the same PR when changing user-facing flags, panels, scene files, or outputs.
 
-Quests: before any work, run `quest context` and follow it, unless this session already holds its rules.
+Quests: before any work, run `quest context` and follow it, unless this session already holds its rules. Outside the dev shell, run it as `nix develop --command quest ...`.
 The `quest` binary comes from the kixel-ai/quest flake input; change skills upstream and bump the input.
