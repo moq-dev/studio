@@ -1,42 +1,20 @@
-kixel.live Studio is a native, cross-platform streaming studio that composites scenes on the GPU and goes live over MoQ (Media over QUIC).
-`rs/moq-scene` is the UI-free scene graph and wgpu compositor; `rs/moq-studio` is the egui app. Both build on the moq crates in the `moq` submodule.
-
-`moq/` is moq-dev/moq at a pinned commit. Its own `AGENTS.md` files apply to the moq crates you read there, but never edit them here; see Upstream below.
+kixel.live Studio: native GPU streaming studio compositing scenes (`rs/moq-scene`, UI-free wgpu compositor) and egui app (`rs/moq-studio`) over MoQ (`moq/` submodule).
 
 # Required
 
-- Measure performance by frame time, GPU copies, and encoder load, and the UI's frame time under a real compositor, such as headless sway (`WLR_BACKENDS=headless sway`), not Xvfb, whose present caps it at 12–25 fps on the NVIDIA test hosts.
+- Measure performance by frame time, GPU copies, and encoder load. Measure UI frame time under a real compositor (`WLR_BACKENDS=headless sway`), never Xvfb (which caps present at 12-25 fps on NVIDIA hosts).
+- Keep `moq-scene` UI-free (no egui types) so headless compositors and wasm can reuse it.
+- Keep the window simple: any PR adding visible UI explains why most streamers need it; niche features live behind `Settings > Mods`, off by default and hidden everywhere until enabled.
+- `just shots` renders named window views (`rs/moq-studio/src/shots.rs`); update/add views for UI changes and attach WebP comparisons (`cwebp -q 80`) in the PR body.
 
-# Upstream
+# Upstream (`moq/`)
 
-Media, transport, and protocol work belongs in moq-dev/moq, not here: capture, codecs, rendering import and export (moq-video), audio capture, mixing, and filters (moq-audio), the catalog (hang), and the transport (moq-net, moq-tokio).
-A studio feature that needs a moq change lands that change in moq first, with a moq-side test proving it, then bumps the `moq` gitlink here.
-Use moq-net's API without inspecting the negotiated protocol version: a behavior that differs by version is moq-net's to hide, so change its API in moq instead.
-Never point the submodule at a commit off moq's `main`: CI's `sh/check-moq-main.sh` fails a PR that moves the pin there, and `just upgrade-moq` refuses one.
-
-# Rust
-
-- Every moq crate is a path dependency into `moq/`, declared once in the root `Cargo.toml`. `sh/check-moq-pin.sh` fails `just check` if a moq git dependency appears or the checkout drifts from the gitlink.
-- Follow moq's Rust conventions (`moq/rs/AGENTS.md`).
-- Read the clock through `kio::clock` (`clippy.toml` bans direct reads), so tests can pause it.
-- `moq-scene` stays UI-free: no egui types, so a headless compositor and the wasm build can reuse it.
-- Defaults skip anything needing a system library (`capture`, `pipewire`, `vaapi`, `openh264`); `just check` covers them explicitly.
+- Media, capture, codecs, audio, catalog, and transport work lands in `moq-dev/moq` first (with a moq-side test), then bumps the `moq` gitlink via `just upgrade-moq`. Never edit `moq/` here or point the submodule off moq's `main` (`sh/check-moq-main.sh`).
+- Every moq crate is a path dep into `moq/` in root `Cargo.toml` (`sh/check-moq-pin.sh`). Follow `moq/rs/AGENTS.md` (especially `kio::clock`, banned direct clock reads in `clippy.toml`, and never branching on negotiated protocol version).
 
 # Development
 
-PRs target `main`.
-Run `just ci` before every push.
-Outside the dev shell, such as in Pullfrog's job, which puts the shell's tools on `PATH` but not its variables (`PKG_CONFIG_PATH`, `NIX_LDFLAGS`, ...), run `just` as `nix develop --command just ...`.
-
-`README.md` is the user guide. A change to what a user does (flags, panels, the scene file, outputs) updates it in the same PR.
-
-Keep the window simple.
-A PR that adds visible UI says in its body why most streamers need it.
-A feature most won't use is a mod in Settings > Mods, off by default and absent from every page, menu, hotkey list, and the palette until enabled.
-
-`just shots` renders named views of the window to PNG with no display, on Linux (the table in `rs/moq-studio/src/shots.rs`).
-A PR that changes what the window shows adds a view for each page or state it builds, and shows the views it changes in its body, beside the mock-up frames they implement.
-To host them, convert the views to lossy WebP (`cwebp -q 80`), commit them in a commit of their own, link them by that commit's SHA, and delete them in the next commit.
+PRs target `main`. Run `just ci` before pushing (outside the dev shell, `nix develop --command just ...`). Update `README.md` in the same PR when changing user-facing flags, panels, scene files, or outputs.
 
 Quests: before any work, run `quest context` and follow it, unless this session already holds its rules.
-The `quest` binary comes from the moq-dev/quest flake input, so outside the dev shell run it as `nix develop --command quest ...`. It serves the quest skills; change them upstream and bump the input.
+The `quest` binary comes from the kixel-ai/quest flake input; change skills upstream and bump the input.
