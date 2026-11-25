@@ -4,7 +4,7 @@
 //! no layer selected, the scene's settings that a mod on adds, if any.
 
 use super::build::{LayerAction, linked_note, shapes, shown_in};
-use super::layers::{kind, section, status_of};
+use super::layers::{kind, section, status_of, unplaced};
 use super::*;
 
 /// How wide a border's slider reaches, in canvas pixels.
@@ -20,6 +20,9 @@ const MORE: &str = "More (Position, Crop, Blend, Filters)";
 enum Asked {
 	/// Replace the layer, labelled, as part of a gesture.
 	Item(Item, String, Option<u64>),
+	/// Show another source in the layer, and hear that source if it is new
+	/// to the stream.
+	Swap(Item, bool),
 	/// Set the look of the layer or its source.
 	Look(Selection, Look, String, Option<u64>),
 	/// What its toolbar or menu could ask too.
@@ -127,15 +130,18 @@ impl Panels {
 
 		section(ui, "Source");
 		if let Some(swap) = source_ui(ui, collection, &name) {
-			let label = format!("Show `{swap}` in place of `{name}`");
-			asked = Some(Asked::Item(
-				Item {
-					source: swap,
-					..item.clone()
-				},
-				label,
-				None,
-			));
+			// Its sound joins the stream as when Add places it, unless an audio
+			// scene already hears it.
+			let heard = collection.audio_scenes.iter().any(|scene| scene.sounds.contains(&swap));
+			let hear =
+				!heard && unplaced(collection, &swap) && collection.sources.get(&swap).is_some_and(Source::has_audio);
+			// Picked by hand, so a guest's next arrival never takes it.
+			let swapped = Item {
+				source: swap.clone(),
+				auto: false,
+				..item.clone()
+			};
+			asked = Some(Asked::Swap(swapped, hear));
 		}
 		if let Some(source) = source {
 			let health = status_of(&state, &item.source, kio::clock::now());
@@ -366,6 +372,17 @@ impl Panels {
 			}
 			Asked::Look(selection, look, label, gesture) => {
 				edit(&mut state, label, gesture, |draft| selection.set_look(draft, look))
+			}
+			Asked::Swap(swapped, hear) => {
+				let label = format!("Show `{}` in place of `{name}`", swapped.source);
+				let source = swapped.source.clone();
+				edit(&mut state, label, None, |draft| {
+					draft.set_item(&picked.layer, picked.index, swapped)?;
+					if hear {
+						draft.hear(&source)?;
+					}
+					Ok(())
+				})
 			}
 			Asked::Act(action) => {
 				let (_, result) = self.act(&mut state, &picked, action);

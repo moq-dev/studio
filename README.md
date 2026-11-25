@@ -1769,8 +1769,8 @@ and software otherwise.
 ### Published independently
 
 A broadcast source, such as a guest's camera, or a source with a track of its
-own can be **Published independently**, a switch in the inspector's Source
-section while **Published scenes** is on in Settings, [Mods](#mods), off by default and kept in the scene file's `[published.<name>]`
+own can be **Published independently**, a switch in the inspector's More,
+under Its source, while **Published scenes** is on in Settings, [Mods](#mods), off by default and kept in the scene file's `[published.<name>]`
 table. Viewers then fetch it as a broadcast of its own and place it over the
 program themselves, as the [composition](#composition) says:
 
@@ -2199,7 +2199,7 @@ not show. Where only you can fix it, such as
 a permission macOS took away or a game that refuses capture, it says what to
 do and where. **It is meant to go dark** stops watching it, as
 `expect_dark` in its `[video]` table, and **Warn when it goes dark** in the
-inspector's Source section watches it again.
+inspector's More, under Its source, watches it again.
 
 A source published independently reaches viewers on its own track, which
 shows the dark at once.

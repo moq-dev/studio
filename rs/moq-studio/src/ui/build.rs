@@ -177,12 +177,17 @@ impl Panels {
 				false => self.select(None),
 			}
 		}
-		if (delete || backspace)
-			&& !self.locked
-			&& let Some(picked) = self.selection.clone()
-		{
+		if (delete || backspace) && !self.locked {
 			let engine = self.engine.clone();
 			let mut state = engine.state.lock().unwrap();
+			// A guest appearing since the picture drew may have moved the
+			// selection's index, which this lets go of.
+			self.follow_reloads(&state);
+			let Some(picked) = self.selection.clone() else { return };
+			// Removing it shifts the layers after it, which a drag or crop
+			// under way would then hold the wrong one of.
+			self.drag = None;
+			self.cropping = false;
 			let (spot, result) = match picked.item(state.collection()) {
 				None => (None, Ok(())),
 				Some(item) if item.locked => (
@@ -243,7 +248,11 @@ impl Panels {
 			(None, Some((canvas, id))) => (canvas, id, self.program_frame()),
 			(None, None) => (self.program_drawn, self.program.id, self.program_frame()),
 		};
-		let builder = egui::UiBuilder::new().max_rect(at.expand(10.0));
+		// Its own id, so the inspector opening beside it keeps the picture's
+		// menu and keyboard focus, which egui keys by id.
+		let builder = egui::UiBuilder::new()
+			.id(ui.id().with("canvas"))
+			.max_rect(at.expand(10.0));
 		if self.interacting {
 			let page = self.interacted(&state);
 			let escape = ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
@@ -1211,6 +1220,23 @@ pub(super) fn layer_menu(ui: &mut Ui, menu: &Menu) -> Option<LayerAction> {
 		.clicked()
 	{
 		action = Some(LayerAction::Lock(locked));
+	}
+	// The toolbar offers them on the picture, which a hidden layer is not on.
+	if !item.visible && item.slot.is_none() {
+		if ui
+			.button("Fit")
+			.on_hover_text("As large as fits on the canvas, keeping its shape")
+			.clicked()
+		{
+			action = Some(LayerAction::Fit);
+		}
+		if ui
+			.button("Fill")
+			.on_hover_text("Cover the canvas, keeping its shape and cropping the rest")
+			.clicked()
+		{
+			action = Some(LayerAction::Fill);
+		}
 	}
 	ui.separator();
 	let front = menu.count.saturating_sub(1);
