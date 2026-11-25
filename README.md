@@ -315,8 +315,9 @@ is placed in front of the edited scene, and selected.
 
 On the **picture**, click a layer to select it, drag it to move it, and drag
 its edges or corners to resize it (see [Placing layers](#placing-layers)). A
-locked layer stays put: clicks pass through it to what is under it. A small
-toolbar beside the selected layer offers what acts on the picture:
+locked layer stays put: clicks and double-clicks pass through it to what is
+under it. A small toolbar beside the selected layer offers what acts on the
+picture:
 **Crop**, or a double-click on the layer, after which dragging an edge trims
 the picture without scaling it and dragging inside moves the picture under
 the frame, with the whole picture outlined; **Fit**, as large as fits on the
