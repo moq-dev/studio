@@ -372,6 +372,22 @@ pub struct Controls {
 	pub mods: Mods,
 	/// How the last action a hotkey fired went, until the status bar takes it.
 	fired: Arc<Mutex<Option<Result<String, String>>>>,
+	/// The go-live check's results as a test hands them over, in place of
+	/// timing the encoder and measuring the connection.
+	#[cfg(test)]
+	pub(crate) fed: Mutex<Option<Fed>>,
+}
+
+/// A go-live check's results fed in by a test of the window's flow, which
+/// must not hinge on how loaded its host is: the encoder's timings at once,
+/// and what the connection carries once the test sends it.
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct Fed {
+	/// How each of the program's canvases encodes, in their order.
+	pub encodings: Vec<crate::probe::Encoding>,
+	/// What the connection carries, measuring until it is set.
+	pub carries: tokio::sync::watch::Receiver<Option<moq_net::bandwidth::Rate>>,
 }
 
 /// What a guests' room is joined by: the relay, and the guest settings.
@@ -421,6 +437,8 @@ impl Controls {
 			studio: AtomicBool::new(false),
 			mods: Mods::default(),
 			fired: Arc::default(),
+			#[cfg(test)]
+			fed: Mutex::default(),
 		};
 		controls.follow_mods();
 		controls
