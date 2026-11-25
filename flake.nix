@@ -68,11 +68,13 @@
 
           # Libraries the window opens at runtime rather than links: winit
           # dlopens X11, Wayland, and xkbcommon, and wgpu dlopens the Vulkan
-          # loader. Outside NixOS a Nix-built binary cannot find the host's.
+          # loader and libva. Outside NixOS a Nix-built binary cannot find the
+          # host's.
           runtimeLibs = lib.optionals isLinux (
             with pkgs;
             [
               vulkan-loader
+              libva
               libxkbcommon
               wayland
               libx11
@@ -158,6 +160,18 @@
             }
           );
 
+          # The VA-API drivers the shell offers libva on a non-NixOS AMD or Intel
+          # host, beside each other so libva picks the one for each render node:
+          # Mesa's radeonsi encodes on AMD, and Intel's iHD on Intel, which Mesa
+          # has no VA-API encoder for.
+          vaDrivers = pkgs.runCommand "studio-va-drivers" { } ''
+            mkdir $out
+            ln -s ${pkgs.mesa}/lib/dri/*_drv_video.so $out/
+            ${lib.optionalString (
+              system == "x86_64-linux"
+            ) "ln -s ${pkgs.intel-media-driver}/lib/dri/iHD_drv_video.so $out/"}
+          '';
+
           # Where the shell's libasound looks for PCM plugins. ALSA's default
           # device is a plugin on any desktop running a sound server, and the
           # shell's alsa-lib only searches its own store path, so without this
@@ -241,6 +255,35 @@
               # Nested shells prepend this shell's store paths again; keep each
               # directory's first entry so PATH stays under the kernel's limit.
               PATH=$(printf '%s' "$PATH" | awk -v RS=: '!seen[$0]++ { printf "%s%s", sep, $0; sep = ":" }')
+            ''
+            + lib.optionalString isLinux ''
+
+              # Off NixOS, the host's Mesa cannot load from a Nix binary: its
+              # libvulkan_radeon.so wants the host's libdrm and libLLVM, and
+              # Fedora's Mesa leaves out the H.264 and H.265 encoders anyway.
+              # An AMD or Intel GPU, read from the render nodes, gets the
+              # flake's Mesa for Vulkan and VA-API instead. NixOS has
+              # /run/opengl-driver, and an NVIDIA host its own driver, so both
+              # keep what they have, as does anything the caller already set.
+              if [ ! -e /run/opengl-driver ] && [ ! -d /sys/module/nvidia ]; then
+                icd=
+                for vendor in /sys/class/drm/renderD*/device/vendor; do
+                  case $(cat "$vendor" 2>/dev/null) in
+                    0x1002) icd="$icd ${pkgs.mesa}/share/vulkan/icd.d/radeon_icd.*.json" ;;
+                    0x8086) icd="$icd ${pkgs.mesa}/share/vulkan/icd.d/intel_icd.*.json ${pkgs.mesa}/share/vulkan/icd.d/intel_hasvk_icd.*.json" ;;
+                  esac
+                done
+                if [ -n "$icd" ]; then
+                  # shellcheck disable=SC2086 # one glob per ICD, joined below
+                  icd=$(printf '%s\n' $icd | sort -u | paste -sd:)
+                  export VK_DRIVER_FILES=''${VK_DRIVER_FILES-$icd}
+                  # The host's implicit layers name libraries the Nix loader
+                  # cannot open, and log a loader error for each.
+                  export VK_IMPLICIT_LAYER_PATH=''${VK_IMPLICIT_LAYER_PATH-${pkgs.mesa}/share/vulkan/implicit_layer.d}
+                  export LIBVA_DRIVERS_PATH=''${LIBVA_DRIVERS_PATH-${vaDrivers}}
+                fi
+                unset icd vendor
+              fi
             '';
 
             env = lib.optionalAttrs isLinux {
