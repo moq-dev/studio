@@ -50,7 +50,10 @@ v0.0.1 arm64 image, which `spctl` reads as Notarized Developer ID):
   says Yes for every `moq-studio Helper` process, plain ones included, since
   CEF 156 starts pages' renderers from the plain helper; then quit with Cmd-Q
   and check `~/Library/Logs/DiagnosticReports` gains no `moq-studio` report.
-  Only the quarantined, translocated launches are left: an agent cannot
+  Note each run's app path (`ps -o command= -p <pid>`): the image's should
+  be under `/private/var/folders/.../AppTranslocation/`, and the Finder copy's
+  under `/Applications`, since a Finder move ends translocation.
+  Only these quarantined launches are left: an agent cannot
   answer Gatekeeper's prompt. The release job runs nothing built
   until its signing credentials leave the runner; running the browser tests
   there was considered and would add a second hour-long build of the test
