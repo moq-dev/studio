@@ -1,60 +1,55 @@
-# [S] The windows PC hosts Windows agents
+# [M] The new Windows PC hosts Windows agents
 
 ## Goal
 
-An agent running natively on the maintainer's Windows PC (Tailscale name
-`windows`) builds `moq-studio --features capture` there and lists a camera
-and a microphone to capture, so Windows quests run on real hardware.
+A new Windows 11 Pro desktop, reachable over Tailscale as `windows`, runs
+agents natively through T3 Code. On it an agent builds
+`moq-studio --features capture`, runs the studio, lists a real camera and a
+microphone, and publishes through both the Intel (QSV) and NVIDIA (NVENC)
+Media Foundation encoders, so Windows quests run on real hardware.
 
 ## Plan
 
-Decided 2026-11-10 (maintainer): ✅ the `windows` PC is the Windows host
-(rejected: rebooting nixos2 into its Windows partition, the 2026-11-06 plan).
-Agents (Claude Code, Codex) already run on it natively through T3 Code, so no
-ssh hop is needed, and nixos2 stays a Linux host.
+Decided 2026-11-25 (maintainer, `/quest-plan`):
 
-The host, as found on 2026-11-10:
+- Host: ✅ a new desktop with an Intel Core Ultra 5 245K-class CPU (Arc
+  iGPU), an RTX 5060 Ti 16 GB, 32 GB, and Windows 11 Pro (rejected: an Azure
+  GPU VM, with no real camera or display and Windows Server unless licensed
+  for Windows 11; reinstalling the old i7-8700/RTX 2070 PC, 2017 hardware
+  that may crash again; Windows on nixos as its OS or as a VFIO guest, which
+  puts CI at risk and covers NVIDIA only). The maintainer buys it through
+  [kixelated/corp's Windows PC quest](https://github.com/kixelated/corp/blob/main/quest/m0/windows-pc.md).
+- Why two vendors: on Windows `moq-video` encodes through each vendor's
+  Media Foundation encoder, which differ in the rate control they accept
+  (moq's [Capped VBR on MediaFoundation](https://github.com/moq-dev/moq/blob/main/quest/m1/video-rate/windows.md)).
+  This box covers Intel's and NVIDIA's, capture on one adapter with encode on
+  the other, and AV1 NVENC, which no other host has. AMD's Windows encoder
+  stays untested: ephemeral Azure VMs for it were dropped.
+- Camera: ✅ a spare UVC webcam the maintainer owns. Microphone: a USB one if
+  at hand, otherwise VB-Audio Virtual Cable, whose `CABLE Output` is a WASAPI
+  capture endpoint like a USB microphone's, so playing a tone into
+  `CABLE Input` drives the same capture path with a known signal.
+- Display: the old PC's monitor, or an HDMI dummy plug if headless, so
+  Windows keeps a display to capture.
+- Earlier, kept: ✅ this quest owns every build error on the host (rejected:
+  handing errors CI also shows to a CI build quest).
 
-- Hostname `WINDOWS`, Tailscale `windows` (100.73.17.32), Windows 11 Home
-  10.0.26200, i7-8700, 16 GB RAM, NVIDIA RTX 2070 (driver 32.0.15.9186), one
-  2560x1440 display.
-- Toolchain: rustup with `stable-x86_64-pc-windows-msvc` as default, plus
-  1.98.1, which rustup installed from `rust-toolchain.toml` on first use;
-  Visual Studio Build Tools 2022 17.14 with the VC x86/x64 tools; CMake 4.3;
-  Git 2.43; just 1.52; `quest` 0.2.0 built from source (no Nix). No nasm or
-  clang, which nothing has yet shown the build needs.
-- Capture devices: no camera. Audio inputs are virtual only: Steam Streaming
-  Microphone and VB-Audio Virtual Cable (`CABLE Output` records what is
-  played to `CABLE Input`).
-- SSH (2026-11-12): an OpenSSH server runs (ED25519 host key) but rejects the
-  Linux host's key (publickey denied), so other hosts cannot reach it by ssh;
-  agents run on it directly instead.
+Guidance, from the old host (i7-8700, 16 GB, Windows 11 Home, dead since
+2026-11-15): rustup with `stable-x86_64-pc-windows-msvc` and the pinned
+toolchain from `rust-toolchain.toml`, Visual Studio Build Tools with the VC
+x86/x64 tools, CMake, Git, `just`, and `quest` built from source. There is no
+Nix dev shell, so `just check` steps that call Nix tools cannot run. The old
+host's OpenSSH server rejected the Linux hosts' keys; this one accepts them,
+so other hosts reach it by ssh. Rename the dead `windows` node in Tailscale
+and give the new one that name, so existing references keep working. Add the
+host to dotfiles' `HOSTS.md` in a dotfiles PR.
 
-No real microphone is needed: VB-Audio's `CABLE Output` is a WASAPI capture
-endpoint like a USB microphone's, so playing a tone into `CABLE Input` drives
-the same capture path [Studio on Windows](/quest/m0/app-windows.md) runs, with
-a known signal to check. A camera has no such stand-in.
-
-There is no Nix dev shell, so agents here run cargo and `just` natively;
-`just check` steps that call Nix tools cannot run.
-
-The remaining agent step: build with
-`quest gate cargo build -p moq-studio --features capture`, then list devices
-by starting the studio, whose setup and Devices panel enumerate cameras,
-displays, windows, and audio inputs (`rs/moq-studio/src/devices.rs`).
-Whatever fails to build on this host is this quest's to fix.
-
-Decided 2026-11-12 (maintainer, /quest-review checkpoint): ✅ this quest owns
-every build error on the host (rejected: handing errors CI also shows to the
-CI build quest, which would make that quest this one's prerequisite; merging
-that split as is).
-
-Found 2026-11-15 (maintainer, /quest-complete): the `windows` PC is dead (it
-kept crash looping), so the host above no longer exists and the two earlier
-Waiting items (free 4 GiB for the gate; plug in a USB camera) no longer apply.
-The quest needs a new Windows host; the maintainer has not picked one. The
-Goal and host notes above describe the dead PC and stay until `/quest-plan`
-replans this quest around the new host.
+The agent steps once the maintainer has it on Tailscale with T3 Code: install
+the toolchain, build with `quest gate cargo build -p moq-studio --features
+capture`, start the studio and check its setup and Devices panel
+(`rs/moq-studio/src/devices.rs`) list the camera, displays, windows, and the
+microphone, then publish once with each GPU's encoder. The PR records the host
+facts above, refreshed.
 
 ## Hosts
 
@@ -62,9 +57,10 @@ replans this quest around the new host.
 
 ## Waiting
 
-- Maintainer: pick a new Windows host and replan this quest with
-  `/quest-plan`. Options: a cloud or GitHub-hosted Windows machine, a Windows
-  VM on another host, or new hardware. Not picked here: the maintainer
-  chooses in `/quest-plan`. Check: an agent on the new host builds
-  `moq-studio --features capture` and the studio's Devices panel lists a
-  camera and a microphone.
+- Maintainer (PC): buy the PC
+  ([corp quest](https://github.com/kixelated/corp/blob/main/quest/m0/windows-pc.md)),
+  assemble it if it is a parts build, install Windows 11 Pro, sign in to
+  Tailscale as `windows` and to T3 Code, enable OpenSSH with the Linux hosts'
+  keys, and plug in the webcam and a display. An agent cannot handle
+  hardware or the first Windows sign-in. Check: `ssh windows ver` answers
+  from another host.
