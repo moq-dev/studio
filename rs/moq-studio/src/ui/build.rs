@@ -205,7 +205,8 @@ impl Panels {
 	}
 
 	/// The live picture at `at`, or the scene open off air: unless locked, a
-	/// click selects the layer under it, a drag moves, resizes, or crops it,
+	/// click selects the layer under it, a double-click starts or ends
+	/// cropping it, a drag moves, resizes, or crops it,
 	/// and a right click offers what applies there. While interacting, the
 	/// pointer and keyboard pass to the selected layer's web page instead,
 	/// until Escape. The NEXT card docks on the live picture while a scene is
@@ -457,7 +458,14 @@ impl Panels {
 				});
 			if !held {
 				let picked = response.interact_pointer_pos().and_then(hit);
+				// Its first click selected the layer, so a double-click on one
+				// starts cropping it, or ends the crop, as the toolbar's Crop
+				// does. The pointer passes through a locked one, as a click's.
+				let twice = response.double_clicked() && picked.is_some();
 				self.select(picked.map(|(index, _)| shown[index].0.clone()));
+				if twice {
+					self.cropping = !self.cropping;
+				}
 			}
 		}
 		if response.drag_started()
