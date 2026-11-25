@@ -28,16 +28,19 @@ does not contain `main`. In the 2026-11-25 run, each landing put every other
 pick behind again: about ten base merges, each with an agent turn and a CI run,
 across moq-dev/studio#251, #252, #254, #256 and #257, none of which conflicted.
 
-Studio's side, once both waits clear:
+In this order, so the ruleset never requires a check nothing runs:
 
-- Check (`.github/workflows/check.yml`) builds the queue's candidate pushes on
-  the branch self-queue names (`quest-queue/main/candidate` as planned), and
-  reports the context the ruleset requires.
-- Update `AGENTS.md`'s Development section if landing changes what an agent
-  does before pushing.
-- Validate on this repository: two reviewed picks behind `main` land in one
-  candidate with no base merge, and `main`'s tip is the tested candidate; a
-  pick that breaks Check in the candidate is dropped with the check named.
+1. Once the kixel.quest item clears, land a PR in which Check
+   (`.github/workflows/check.yml`) builds the queue's candidate pushes on the
+   branch self-queue names (`quest-queue/main/candidate` as planned). Confirm
+   a push to that branch reports Check. That PR rewrites this quest to the
+   steps left.
+2. Only then does the dotfiles item below apply the ruleset.
+3. Validate on this repository: two reviewed picks behind `main` land in one
+   candidate with no base merge, and `main`'s tip is the tested candidate; a
+   pick that breaks Check in the candidate is dropped with the check named.
+   Update `AGENTS.md`'s Development section if landing changes what an agent
+   does before pushing.
 
 ## Waiting
 
@@ -46,7 +49,7 @@ Studio's side, once both waits clear:
   merged, and its README says how another repository joins.
 - kixel-ai/dotfiles: `bin/repo-settings` gives moq-dev/studio's `main` the
   queue's ruleset, requiring `quest land` and Check with the kixel-quest App
-  as an `always` bypass actor. Plan it there with `/quest-plan` once the
-  kixel.quest item clears and kixel.quest's own ruleset sets the pattern.
+  as an `always` bypass actor. Plan it there with `/quest-plan` once step 1
+  is on `main` and kixel.quest's own ruleset sets the pattern.
   Check: `repo-settings check` passes and `gh api
   repos/moq-dev/studio/rules/branches/main` lists `quest land`.
