@@ -50,15 +50,17 @@ mod remotes;
 mod review;
 mod settings;
 mod shell;
+mod shows;
 mod slots;
+mod start;
 
-pub(crate) use layout::fit;
 use levels::Levels;
 #[cfg(test)]
 pub(crate) use mixer::View as MixView;
 #[cfg(test)]
 pub(crate) use mods::layout_off;
-pub(crate) use shell::dashed;
+pub(crate) use shell::{dashed, window_buttons};
+pub use shows::Leave;
 
 /// The smallest the window gets, at which every part still has room.
 pub const MIN_SIZE: egui::Vec2 = layout::MIN;
@@ -306,9 +308,9 @@ impl Studio {
 				state.dropped,
 			)
 		};
+		let review = review::Review::new(&engine, &stream.saved().earlier, &runtime);
 		let controls = Arc::new(Controls::new(engine.clone(), stream, runtime.clone()));
 		drop(controls.follow_relays());
-		let review = review::Review::new(&engine, &runtime);
 		let multiview = multiview::Multiview::new(render.clone(), engine.clone(), controls.clone());
 		let mut panels = Panels {
 			engine,
@@ -380,7 +382,11 @@ impl Studio {
 			faults: Vec::new(),
 			reloads: 0,
 			shifts: 0,
-			closing: false,
+			leaving: None,
+			shows: Vec::new(),
+			show_dialog: None,
+			renaming_show: None,
+			quick: start::QuickStart::default(),
 			levels: Levels::default(),
 			graph: graph::View::default(),
 			review,
@@ -471,12 +477,6 @@ impl Studio {
 		})
 	}
 
-	/// Whether Close show was clicked since this last said so, which the
-	/// window then answers by closing the show, or [`refuse`](Self::refuse).
-	pub fn closing(&mut self) -> bool {
-		std::mem::take(&mut self.panels.closing)
-	}
-
 	/// Claim the show for closing against a go-live, which a hotkey could
 	/// start after an off-air check alone.
 	pub fn reserve_close(&self) -> anyhow::Result<()> {
@@ -534,6 +534,13 @@ impl Studio {
 	pub(crate) fn mix(&mut self, view: mixer::View, opened: Option<&str>) {
 		self.panels.page = Page::Mix;
 		self.panels.desk = mixer::Desk::new(view, opened);
+	}
+
+	/// List `listing` as this machine's devices, in place of any listing
+	/// under way, as a refresh would.
+	pub(crate) fn seed_devices(&mut self, listing: Listing) {
+		self.panels.devices.listing = Some(listing);
+		self.panels.devices.pending = None;
 	}
 
 	/// Open Settings at `setting`, as the gear would.
@@ -975,8 +982,16 @@ struct Panels {
 	reloads: u64,
 	/// The engine's [shifts](engine::State::shifts) seen so far.
 	shifts: u64,
-	/// Whether Close show was clicked, until the window has closed the show.
-	closing: bool,
+	/// What the Show menu asked the window for, until the window takes it.
+	leaving: Option<Leave>,
+	/// The other shows the Show menu lists.
+	shows: Vec<crate::recent::Show>,
+	/// The Show menu's file dialog, while open.
+	show_dialog: Option<shows::Dialog>,
+	/// The show's name and the one typed so far, while renaming it.
+	renaming_show: Option<(String, String)>,
+	/// The quick start's state, while the picture is empty.
+	quick: start::QuickStart,
 	/// Each sound's and audio scene's recent levels, for the meters.
 	levels: Levels,
 	graph: graph::View,

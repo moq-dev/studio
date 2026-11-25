@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use egui::{Align, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
 
 use super::*;
-use crate::setup::Task;
 use crate::stream::Saved;
+use crate::task::Task;
 
 /// The window's size, as the mock-up draws it, or less in a smaller window.
 const WINDOW: Vec2 = vec2(960.0, 664.0);

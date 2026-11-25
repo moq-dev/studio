@@ -1,4 +1,4 @@
-//! The capture devices this machine has, for the Devices panel and setup.
+//! The capture devices this machine has, for BUILD's Add and the quick start.
 
 use moq_scene::Source;
 
@@ -57,7 +57,7 @@ async fn find() -> Listing {
 
 	let cameras = moq_video::capture::cameras().await;
 	// Never the program's virtual camera, which the camera extension lists
-	// even while it is off, and which setup or Add would feed what it shows
+	// even while it is off, and which Add or the quick start would feed what it shows
 	// back into. Every other one of the studio's is listed only while on,
 	// when Add leaves it out.
 	#[cfg(target_os = "macos")]
@@ -109,8 +109,8 @@ async fn find() -> Listing {
 }
 
 /// Offer `picked`, the system picker, beside the X11 `listed`: first on a
-/// Wayland desktop, whose screens X11 cannot capture, so setup proposes it,
-/// and last otherwise. A Wayland desktop may have no X server to list at all,
+/// Wayland desktop, whose screens X11 cannot capture, so the quick start
+/// adds it, and last otherwise. A Wayland desktop may have no X server to list at all,
 /// which leaves the picker.
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 fn with_picker(listed: Result<Vec<Pick>, String>, picked: Source, wayland: bool) -> Result<Vec<Pick>, String> {

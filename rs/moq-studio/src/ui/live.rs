@@ -8,8 +8,9 @@ use moq_net::bandwidth::Rate;
 use super::*;
 use crate::controls::Probing;
 use crate::engine::OnAir;
-use crate::setup::{self, Encoding, Task};
+use crate::probe::{self, Encoding};
 use crate::stream::{Saved, Stream, Switched};
+use crate::task::Task;
 use crate::uplink;
 
 /// The check going live waits on, run in the background off air: whether the
@@ -96,7 +97,7 @@ impl Ready {
 			let canvases = of.canvases.clone();
 			move || async move {
 				let _probing = probing;
-				setup::probe(gpu, &canvases).await
+				probe::probe(gpu, &canvases).await
 			}
 		})
 		.unwrap_or_else(|err| Task::Done(Err(format!("cannot start the check: {err}"))));
@@ -118,7 +119,7 @@ impl Ready {
 				Ok(encodings) => {
 					// Up to past what they send, so a connection that carries
 					// it says so rather than stopping at its rate.
-					let ceiling = setup::total(encodings).scaled(1.0 / setup::headroom());
+					let ceiling = probe::total(encodings).scaled(1.0 / probe::headroom());
 					measure(controls, runtime, ceiling)
 				}
 				Err(_) => Measuring {
@@ -151,7 +152,7 @@ impl Ready {
 			return None;
 		};
 		let encoding = encodings.first()?;
-		setup::keeps_up(&self.of.canvases, encodings)
+		probe::keeps_up(&self.of.canvases, encodings)
 			.then(|| format!("{} {}", encoding.encoder, named(self.of.canvases[0])))
 	}
 
@@ -174,7 +175,7 @@ impl Ready {
 				word: "",
 				fixes: Vec::new(),
 			},
-			Task::Done(Ok(encodings)) if setup::keeps_up(&self.of.canvases, encodings) => Check {
+			Task::Done(Ok(encodings)) if probe::keeps_up(&self.of.canvases, encodings) => Check {
 				mark: Outcome::Passed,
 				icon: Icon::Encoder,
 				name: "Encoder",
@@ -220,12 +221,12 @@ impl Ready {
 		let task = self.uplink.as_ref().map(|uplink| &uplink.task);
 		let connection = match (task, &self.encoder) {
 			(Some(Task::Done(Ok(carries))), Task::Done(Ok(encodings))) => {
-				let needs = setup::total(encodings);
+				let needs = probe::total(encodings);
 				let sending = match encodes {
 					1 => "the program",
 					_ => "the program in both formats",
 				};
-				match carries.scaled(setup::headroom()) >= needs {
+				match carries.scaled(probe::headroom()) >= needs {
 					true => Check {
 						mark: Outcome::Passed,
 						icon: Icon::Uplink,
