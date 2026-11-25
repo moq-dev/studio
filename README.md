@@ -236,7 +236,7 @@ The **strip** holds:
   in red says what just failed on it under the pointer. The last pad, **+**,
   adds an empty scene and switches to it, showing its quick start: it takes
   it while nothing uses the program, and opens it off air while the stream,
-  a recording, or the virtual camera does, so nothing blank reaches them.
+  a recording, or a virtual camera runs, so nothing blank reaches them.
   With its mod on, the switch after it turns
   [Studio mode](#off-air-and-studio-mode) on and off.
 - The **panic key**, shown once a scene is marked safe or the stream is on

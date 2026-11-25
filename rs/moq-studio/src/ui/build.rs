@@ -215,6 +215,9 @@ impl Panels {
 					})
 					.inner
 					.rect;
+				if self.locked {
+					self.drops_on_locked(ui, image);
+				}
 				let (scene, since) = self.edited_since(&state);
 				let scene = scene.map(|scene| (scene, since));
 				self.rebind(&state.sources);

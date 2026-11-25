@@ -869,13 +869,13 @@ impl Panels {
 					draft.insert_scene(index, Scene::new(name.clone()))
 				});
 				// Straight to it, empty but for the quick start: taken while
-				// nothing uses program, and opened off air while anything does,
-				// never putting a blank scene on the stream, a recording, or the
-				// virtual camera.
+				// nothing uses program, and opened off air while anything might,
+				// never putting a blank scene on the stream, a recording, or a
+				// virtual camera, the program's or a scene's that may draw it.
 				let used = self.engine.on_air() != crate::engine::OnAir::Off
 					|| self.controls.going()
 					|| self.engine.recorder.status().is_some_and(|status| !status.done)
-					|| state.camera(None).is_some();
+					|| state.cameras().next().is_some();
 				match (added, used) {
 					(Err(err), _) => Err(err),
 					(Ok(()), false) => {
