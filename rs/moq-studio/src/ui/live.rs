@@ -92,7 +92,16 @@ pub(super) struct Going {
 impl Ready {
 	/// Start checking what `of` names, the encoder noted as `probing` until
 	/// it finishes, which a go-live waits out before the program's open.
-	fn new(gpu: crate::engine::Gpu, runtime: &tokio::runtime::Handle, of: Checked, probing: Probing) -> Self {
+	fn new(controls: &Controls, runtime: &tokio::runtime::Handle, of: Checked, probing: Probing) -> Self {
+		#[cfg(test)]
+		if let Some(fed) = controls.fed.lock().unwrap().clone() {
+			return Self {
+				of,
+				encoder: Task::Done(Ok(fed.encodings)),
+				uplink: None,
+			};
+		}
+		let gpu = controls.engine.gpu().clone();
 		let encoder = Task::spawn(runtime, {
 			let canvases = of.canvases.clone();
 			move || async move {
@@ -414,7 +423,7 @@ impl Panels {
 			self.ready = self
 				.controls
 				.probing()
-				.map(|probing| Ready::new(self.engine.gpu().clone(), &self.runtime, of.clone(), probing));
+				.map(|probing| Ready::new(&self.controls, &self.runtime, of.clone(), probing));
 			// A refusal from before is of what this checks again.
 			if self.ready.is_some() && self.going.as_ref().is_some_and(|going| going.armed) {
 				*self.controls.refused.lock().unwrap() = None;
@@ -1466,6 +1475,19 @@ fn address(ui: &mut Ui, text: &mut String, hint: &str, flag: Option<(&str, &url:
 /// Measure the connection to the first relay toward `ceiling`, reading its
 /// token on the task's own thread, since the credential store blocks.
 fn measure(controls: &Controls, runtime: &tokio::runtime::Handle, ceiling: Rate) -> Measuring {
+	#[cfg(test)]
+	if let Some(fed) = controls.fed.lock().unwrap().clone() {
+		let mut carries = fed.carries;
+		let task = Task::spawn(runtime, move || async move {
+			let carries = carries.wait_for(Option::is_some).await;
+			let carries = *carries.expect("the test feeds what the connection carries");
+			Ok(carries.expect("waited for above"))
+		});
+		return Measuring {
+			task: task.expect("a thread for the fed measurement"),
+			_stop: None,
+		};
+	}
 	let stream = controls.stream.lock().unwrap().clone();
 	let handle = runtime.clone();
 	let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
