@@ -823,18 +823,16 @@ fn a_marker_is_named_where_it_is_typed() {
 /// with no further press. A click on the
 /// clock then asks before it ends the stream: Keep live keeps it on air, End
 /// stream ends it. The window as a person uses it, on a real engine and
-/// relay. It draws no view.
+/// relay, with the check's results fed in, since timing the encoder and
+/// measuring the connection fall short on a loaded host; `probe` and `uplink`
+/// test those against a real encoder and relay. It draws no view.
 #[test]
 #[ignore = "draws on a GPU; run with `just shots`"]
 fn go_live_from_no_relay_and_end_on_confirm() {
 	let (_show, runtime, gpu) = lavapipe();
 	let _entered = runtime.enter();
 	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
-	// Small enough for the software encoder to keep up on Mesa's software
-	// driver, so the check passes on any machine.
-	let show = std::fs::read_to_string(fixture.join("shots/show.toml")).unwrap();
-	let show = show.replacen("width = 1920\nheight = 1080", "width = 640\nheight = 360", 1);
-	std::fs::write("show.toml", show).unwrap();
+	std::fs::copy(fixture.join("shots/show.toml"), "show.toml").unwrap();
 	let relay = Relay::start(&runtime);
 	// The relay's certificate is trusted, but no relay is set.
 	let mut client = moq_tokio::connect::Config::default();
@@ -852,6 +850,20 @@ fn go_live_from_no_relay_and_end_on_confirm() {
 	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, recent::Recent::default());
 	harness.step();
 	let engine = started.get().expect("the studio started").clone();
+	// An encoder that keeps up, on a connection measuring until told.
+	let (carries, fed) = tokio::sync::watch::channel(None);
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		panic!("the studio starts on its first frame")
+	};
+	*studio.controls().fed.lock().unwrap() = Some(crate::controls::Fed {
+		encodings: vec![crate::probe::Encoding {
+			encoder: "openh264".into(),
+			gpu: false,
+			bitrate: moq_net::bandwidth::Rate::from_mbps(4),
+			frame: Duration::from_millis(5),
+		}],
+		carries: fed,
+	});
 	runtime
 		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
 		.expect("the sources and pictures settle");
@@ -871,23 +883,32 @@ fn go_live_from_no_relay_and_end_on_confirm() {
 		.type_text(relay.url.as_str());
 	harness.run_steps(2);
 	harness.get_by_label("Go live now").click();
-	// The save runs on a thread of its own; once it lands, the popover waits
-	// on the check.
+	// The save runs on a thread of its own; once it lands and the relay is
+	// dialed, the check measures the connection, and the popover waits on it.
 	runtime
 		.block_on(kio::clock::timeout(SETTLE, async {
-			while harness.query_by_label("Going live once checked").is_none() {
+			while harness
+				.query_by_label("Measuring the connection to the relay")
+				.is_none()
+			{
 				harness.step();
 				kio::clock::sleep(Duration::from_millis(20)).await;
 			}
 		}))
-		.expect("it waits on the check");
-	// The check measures the connection for seconds before it passes.
+		.expect("the check measures the connection");
+	harness.run_steps(4);
+	assert!(
+		harness.query_by_label("Going live once checked").is_some(),
+		"it waits on the check"
+	);
+	assert_eq!(engine.on_air(), engine::OnAir::Off, "and not before it passes");
+	carries.send_replace(Some(moq_net::bandwidth::Rate::from_mbps(100)));
 	runtime
 		.block_on(kio::clock::timeout(SETTLE, async {
 			while engine.on_air().live().is_none() {
 				harness.step();
 				assert!(harness.query_by_label("Go live anyway").is_none(), "the check passes");
-				kio::clock::sleep(Duration::from_millis(50)).await;
+				kio::clock::sleep(Duration::from_millis(20)).await;
 			}
 		}))
 		.expect("the studio goes live once the check passes");
