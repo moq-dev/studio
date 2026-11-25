@@ -66,7 +66,7 @@ impl Corner {
 enum Ask {
 	Take,
 	Auto,
-	/// Open the cued scene off air on BUILD.
+	/// Open the cued scene off air on Studio.
 	Edit,
 	/// Leave nothing cued.
 	Clear,
@@ -135,7 +135,7 @@ impl Panels {
 		);
 		let edit = ui
 			.put(edit, egui::Button::new(egui::RichText::new("Edit").font(kit::ui(12.0))))
-			.on_hover_text("Open it on Build to edit it off air");
+			.on_hover_text("Edit this scene off air");
 		if edit.clicked() {
 			ask = Some(Ask::Edit);
 		}

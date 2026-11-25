@@ -1134,9 +1134,9 @@ pub struct Pad<'a> {
 	picture: Option<egui::load::SizedTexture>,
 	key: Option<&'a str>,
 	tally: Tally,
-	/// The tag over the tally's own, such as FIRST for the scene a stream
-	/// opens on.
-	tag: Option<&'a str>,
+	/// Whether its tally's word tags it, such as ON AIR, or only its color
+	/// shows, as for the scene a stream opens on.
+	tagged: bool,
 	/// Why the scene cannot be taken, if it cannot.
 	refused: Option<&'a str>,
 	/// What just failed on it, such as a rename.
@@ -1159,7 +1159,7 @@ impl<'a> Pad<'a> {
 			picture: None,
 			key: None,
 			tally: Tally::Off,
-			tag: None,
+			tagged: true,
 			refused: None,
 			fault: None,
 			dark: false,
@@ -1197,9 +1197,9 @@ impl<'a> Pad<'a> {
 		self
 	}
 
-	/// Tagged `tag` in its tally's color, rather than the tally's own word.
-	pub fn tag(mut self, tag: Option<&'a str>) -> Self {
-		self.tag = tag;
+	/// Tagged with its tally's word, or only ringed in its color.
+	pub fn tagged(mut self, tagged: bool) -> Self {
+		self.tagged = tagged;
 		self
 	}
 
@@ -1289,9 +1289,10 @@ impl Widget for Pad<'_> {
 				painter.rect_filled(thumb, 7, BG.gamma_multiply(0.6));
 			}
 			let tag_text = match self.tally {
+				_ if !self.tagged => None,
 				Tally::Off => None,
-				Tally::Air => Some(self.tag.unwrap_or("On air")),
-				Tally::Cue => Some(self.tag.unwrap_or("Next")),
+				Tally::Air => Some("On air"),
+				Tally::Cue => Some("Next"),
 			};
 			if let Some(text) = tag_text {
 				tag(painter, thumb.min + vec2(4.0, 4.0), text, self.tally, 11.0);

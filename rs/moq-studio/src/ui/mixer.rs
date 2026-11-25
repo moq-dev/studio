@@ -64,10 +64,10 @@ const SCALE: [(f32, f32); 9] = [
 ];
 
 /// Where unity gain, and full scale on a meter, sit on a strip's scale.
-const UNITY: f32 = 0.8;
+pub(super) const UNITY: f32 = 0.8;
 
 /// Where `db` sits on a strip's scale, from 0 at its foot to 1 at its head.
-fn taper(db: f32) -> f32 {
+pub(super) fn taper(db: f32) -> f32 {
 	let db = db.clamp(SCALE[0].0, SCALE[SCALE.len() - 1].0);
 	let next = SCALE
 		.iter()
@@ -81,7 +81,7 @@ fn taper(db: f32) -> f32 {
 }
 
 /// The decibels at `at` on a strip's scale, the inverse of [`taper`].
-fn untaper(at: f32) -> f32 {
+pub(super) fn untaper(at: f32) -> f32 {
 	let at = at.clamp(0.0, 1.0);
 	let next = SCALE
 		.iter()
@@ -96,7 +96,7 @@ fn untaper(at: f32) -> f32 {
 
 /// Where a level of `amplitude` lights a strip's meter, which runs from
 /// silence at the scale's foot to full scale at unity.
-fn lit(amplitude: f32) -> f32 {
+pub(super) fn lit(amplitude: f32) -> f32 {
 	(taper(decibels(amplitude)) / UNITY).clamp(0.0, 1.0)
 }
 
@@ -282,7 +282,7 @@ fn holds(scene: &AudioScene) -> String {
 }
 
 /// An edit the page asked for this frame, made once it is drawn.
-enum Change {
+pub(super) enum Change {
 	/// One of the sound called `name`'s settings.
 	Audio {
 		name: String,
@@ -323,7 +323,7 @@ enum Change {
 /// would undo an edit made in between, such as the panic key's mute from a
 /// hotkey's thread.
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Setting {
+pub(super) enum Setting {
 	Gain(f32),
 	Muted(bool),
 	Pan(f32),
@@ -1174,7 +1174,7 @@ impl Panels {
 	}
 
 	/// Make the edits the page asked for, under one lock.
-	fn apply(&mut self, changes: Vec<Change>) {
+	pub(super) fn apply(&mut self, changes: Vec<Change>) {
 		if changes.is_empty() {
 			return;
 		}
@@ -1249,10 +1249,14 @@ impl Panels {
 				Change::Listen(scene) => self.listen(&mut state, scene.as_deref()),
 				Change::Speaker(speaker) => {
 					self.speaker = speaker;
-					// The monitor moves to the new output.
-					match self.engine.listening() {
-						Some((heard, _)) => self.listen(&mut state, Some(&heard)),
-						None => Ok(()),
+					// The monitor moves to the new output, still playing what it did.
+					match (self.engine.listening(), self.engine.soloing()) {
+						(Some((heard, _)), _) => self.listen(&mut state, Some(&heard)),
+						(None, Some((solo, _))) => {
+							self.engine
+								.monitor_source(&mut state, &self.runtime, Some(&solo), self.speaker.as_deref())
+						}
+						(None, None) => Ok(()),
 					}
 				}
 			};
@@ -1342,7 +1346,7 @@ impl Parts {
 }
 
 /// The latest step's RMS and peak where they light a strip's meter.
-fn reading(history: Option<&History>) -> (f32, f32) {
+pub(super) fn reading(history: Option<&History>) -> (f32, f32) {
 	let level = latest(history);
 	(lit(level.rms()), lit(level.peak()))
 }
@@ -1403,11 +1407,7 @@ fn pan_field(pan: &mut f32) -> egui::DragValue<'_> {
 	egui::DragValue::new(pan)
 		.range(-1.0..=1.0)
 		.speed(0.01)
-		.custom_formatter(|pan, _| match pan {
-			0.0 => "Center".to_string(),
-			pan if pan < 0.0 => format!("L{:.0}", -pan * 100.0),
-			pan => format!("R{:.0}", pan * 100.0),
-		})
+		.custom_formatter(|pan, _| pan_words(pan as f32))
 		.custom_parser(|text| {
 			let text = text.trim().to_ascii_uppercase();
 			let percent = |side: &str| side.trim().parse::<f64>().ok().map(|n| n / 100.0);
@@ -1420,9 +1420,18 @@ fn pan_field(pan: &mut f32) -> egui::DragValue<'_> {
 		})
 }
 
+/// A pan as a person reads it: `Center`, `L50` halfway left, `R100` hard right.
+pub(super) fn pan_words(pan: f32) -> String {
+	match pan {
+		0.0 => "Center".to_string(),
+		pan if pan < 0.0 => format!("L{:.0}", -pan * 100.0),
+		pan => format!("R{:.0}", pan * 100.0),
+	}
+}
+
 /// Whether the pointer double-clicked on `response`, which senses drags
 /// alone, so a press starts a drag at once.
-fn double_clicked(ui: &Ui, response: &egui::Response) -> bool {
+pub(super) fn double_clicked(ui: &Ui, response: &egui::Response) -> bool {
 	response.contains_pointer() && ui.input(|input| input.pointer.button_double_clicked(egui::PointerButton::Primary))
 }
 
@@ -1662,7 +1671,7 @@ pub(super) struct Speakers {
 
 impl Speakers {
 	/// List the outputs again, in the background.
-	fn refresh(&mut self, runtime: &tokio::runtime::Handle) {
+	pub(super) fn refresh(&mut self, runtime: &tokio::runtime::Handle) {
 		if self.pending.is_some() {
 			return;
 		}
@@ -1684,7 +1693,7 @@ impl Speakers {
 	/// The output `speaker` names, as the listing calls it, listing the
 	/// outputs first if nothing has yet; marked if the listing lacks it,
 	/// such as a headset since unplugged.
-	fn named(&mut self, runtime: &tokio::runtime::Handle, speaker: Option<&str>) -> String {
+	pub(super) fn named(&mut self, runtime: &tokio::runtime::Handle, speaker: Option<&str>) -> String {
 		self.poll();
 		let Some(id) = speaker else {
 			return "System default".to_string();
@@ -1704,7 +1713,7 @@ impl Speakers {
 
 	/// The outputs to pick `speaker` from, or the system default; whether
 	/// the pick changed.
-	fn menu(&mut self, ui: &mut Ui, speaker: &mut Option<String>) -> bool {
+	pub(super) fn menu(&mut self, ui: &mut Ui, speaker: &mut Option<String>) -> bool {
 		self.poll();
 		let before = speaker.clone();
 		ui.label(kit::caps("Listen on", kit::display(11.0)).color(kit::DIM));
@@ -1775,7 +1784,7 @@ mod tests {
 		}
 	}
 
-	/// A desk meter turns hot at the same level as LIVE's, which places
+	/// A desk meter turns hot at the same level as the strip's, which places
 	/// levels evenly in decibels from silence and keeps the meter's own
 	/// threshold.
 	#[test]
