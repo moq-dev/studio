@@ -27,11 +27,14 @@ pub enum Mod {
 	Published,
 	/// The scene graph's window.
 	Graph,
+	/// Where a layer's source shows elsewhere, sharing its look, and a copy
+	/// of its own to edit apart.
+	Linked,
 }
 
 impl Mod {
 	/// Each mod, in the order Settings lists them.
-	pub const ALL: [Self; 9] = [
+	pub const ALL: [Self; 10] = [
 		Self::Audio,
 		Self::Review,
 		Self::Studio,
@@ -40,6 +43,7 @@ impl Mod {
 		Self::Multiview,
 		Self::Remote,
 		Self::Published,
+		Self::Linked,
 		Self::Graph,
 	];
 
@@ -54,6 +58,7 @@ impl Mod {
 			Self::Remote => "Phone remote",
 			Self::Published => "Published scenes",
 			Self::Graph => "Scene graph",
+			Self::Linked => "Linked layers",
 		}
 	}
 
@@ -73,6 +78,9 @@ impl Mod {
 				"Scenes and sources as broadcasts of their own, at their own size, with their own virtual camera."
 			}
 			Self::Graph => "Every source, scene, and audio scene, drawn as one map you can wire.",
+			Self::Linked => {
+				"Where else a layer's source shows, sharing its look, and a copy of its own to edit it apart."
+			}
 		}
 	}
 
@@ -88,6 +96,7 @@ impl Mod {
 			Self::Remote => &["phone", "pair", "qr"],
 			Self::Published => &["publish", "broadcast", "scene size", "virtual camera"],
 			Self::Graph => &["wires", "nodes", "map"],
+			Self::Linked => &["linked", "independent", "copy", "shared"],
 		}
 	}
 

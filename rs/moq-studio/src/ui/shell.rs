@@ -951,6 +951,11 @@ impl Panels {
 			if toggle.changed() {
 				action = Some(PadAction::Safe(pad.name.clone(), safe));
 			}
+			// Show-wide, as in Settings, Show, but where a scene goes on air.
+			ui.menu_button("Transition", |ui| {
+				let result = self.transition(ui, true);
+				self.check(result);
+			});
 			if ui.button("Rename").clicked() {
 				action = Some(PadAction::Rename(pad.name.clone()));
 			}

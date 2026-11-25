@@ -302,7 +302,7 @@ impl Panels {
 	}
 
 	/// Settings, Show: the format, the canvas size and frame rate by name or
-	/// by number, and each scene's own size.
+	/// by number, how every scene goes on air, and each scene's own size.
 	fn show_pane(&mut self, ui: &mut Ui) {
 		let (current, scenes, both) = {
 			let state = self.engine.state.lock().unwrap();
@@ -359,6 +359,16 @@ impl Panels {
 		if let Some(apply) = self.custom_canvas(ui, current) {
 			wanted = Some(apply);
 		}
+		field_row(
+			ui,
+			"Transition",
+			"How every scene goes on air, by its pad's click or key. A stinger plays a video file over the cut.",
+			None,
+			|ui| {
+				let result = self.transition(ui, false);
+				self.check(result);
+			},
+		);
 
 		let resized = match self.controls.mods.on(Mod::Published) {
 			true => {
