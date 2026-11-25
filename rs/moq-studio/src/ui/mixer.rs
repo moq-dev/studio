@@ -751,10 +751,13 @@ impl Panels {
 			.align(egui::RectAlign::BOTTOM)
 			.gap(6.0)
 			.width(280.0)
+			// A click on the list's scrollbar keeps it open; a pick closes it.
+			.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
 			.show(|ui| {
 				let mut speaker = self.speaker.clone();
 				if self.speakers.menu(ui, &mut speaker) {
 					changes.push(Change::Speaker(speaker));
+					ui.close();
 				}
 				if ui.add(kit::button(Icon::Reload, "Look for outputs again")).clicked() {
 					self.speakers.refresh(&self.runtime);
