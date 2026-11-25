@@ -207,7 +207,7 @@ fn make(new: New, collection: &Collection) -> anyhow::Result<Made> {
 		// the user may still want: theirs to move aside, not ours to delete.
 		let history = autosave::history_path(&path);
 		anyhow::ensure!(
-			!exists(&history)?,
+			!occupied(&history)?,
 			"{} is there without its scene file: move it aside to make a new show here",
 			history.display()
 		);
@@ -349,7 +349,7 @@ fn files(path: &Path) -> [PathBuf; 3] {
 /// Whether a show at `path` would meet any file already there.
 fn taken(path: &Path) -> anyhow::Result<bool> {
 	for file in files(path) {
-		if exists(&file)? {
+		if occupied(&file)? {
 			return Ok(true);
 		}
 	}
@@ -468,6 +468,16 @@ pub fn rename(path: &Path, name: &str, recordings: &Path) -> anyhow::Result<Path
 /// Whether `file` is there.
 fn exists(file: &Path) -> anyhow::Result<bool> {
 	file.try_exists().with_context(|| format!("reading {}", file.display()))
+}
+
+/// Whether anything is at `file`, a dangling link included, which a write
+/// would follow into a folder that may be gone.
+fn occupied(file: &Path) -> anyhow::Result<bool> {
+	match std::fs::symlink_metadata(file) {
+		Ok(_) => Ok(true),
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+		Err(err) => Err(err).with_context(|| format!("reading {}", file.display())),
+	}
 }
 
 /// The stream settings in the file at `path`, or the defaults if it is not
@@ -785,6 +795,19 @@ mod tests {
 		);
 		assert!(!named.exists(), "nothing is made");
 		std::fs::remove_file(autosave::history_path(&named)).unwrap();
+		// A dangling link is there too: the history's saves would follow it.
+		#[cfg(unix)]
+		{
+			let gone = dir.path().join("gone").join("history");
+			std::os::unix::fs::symlink(&gone, autosave::history_path(&named)).unwrap();
+			assert!(make(New::At(named.clone()), &collection).is_err());
+			std::os::unix::fs::symlink(&gone, autosave::history_path(&dir.path().join("My Show 3.toml"))).unwrap();
+			assert_eq!(
+				make(into(), &collection).unwrap().path,
+				dir.path().join("My Show 4.toml")
+			);
+			std::fs::remove_file(autosave::history_path(&named)).unwrap();
+		}
 		assert_eq!(make(New::At(named.clone()), &collection).unwrap().path, named);
 		Autosave::open(named.clone()).expect("the new show opens");
 

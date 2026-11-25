@@ -13,8 +13,9 @@ flatpak install --user moq-studio-x86_64.flatpak
 flatpak run live.kixel.studio
 ```
 
-Its menu entry opens [your shows](#your-shows) and saves recordings to your
-Videos folder. The sandbox reaches
+Its menu entry opens [your shows](#your-shows) and saves every show's
+recordings to your Videos folder, which Settings, Recording then cannot change.
+The sandbox reaches
 cameras through the camera portal, which asks once, and files under your home
 directory. The virtual camera is its PipeWire node only, since the sandbox
 has no `/dev/video*`.
@@ -112,7 +113,7 @@ frame's period at most, leaving the rest for sources and the compositor), and
 1080p at 30 fps otherwise. If the system has a default microphone, the show
 hears it as **Mic** in the sound. Its recordings go to your Videos folder.
 Change the canvas in Settings, Show, and where recordings go in Settings,
-Recording.
+Recording (except from the Flatpak's menu entry).
 
 While the scene has no layers, the picture shows the quick start (on LIVE,
 only off air): one click on **Camera** (naming the camera it adds), **Screen**
