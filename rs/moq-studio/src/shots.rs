@@ -76,6 +76,11 @@ enum View {
 	Published,
 	/// The edit history, under the title bar's undo, after an edit.
 	History,
+	/// Studio with the pointer on a scene's pad, which shows its ⋯ button.
+	PadHover,
+	/// Studio asking whether to remove a scene holding two sources, from its
+	/// pad's ⋯ menu.
+	RemovePrompt,
 	/// The show's menu, open from the title bar, with a few other shows.
 	ShowMenu,
 	/// On air, the show's menu with New show dimmed, saying why under the
@@ -303,6 +308,11 @@ views! {
 	kit: Still, Open::Kit { sheet: false };
 	/// The kit's sheet, over the gallery.
 	kit_sheet: Still, Open::Kit { sheet: true };
+	/// A scene's pad with the pointer on it: its ⋯ button, which opens the menu
+	/// a right click does.
+	pad_hover: Still, on_show(View::PadHover);
+	/// Removing a scene holding more than one source asks first.
+	remove_prompt: Still, on_show(View::RemovePrompt);
 	/// A new show, as the first launch opens it: the quick start on the empty
 	/// picture, its cards naming the camera and screen they add.
 	first_launch: Still, on_show(View::FirstLaunch);
@@ -656,6 +666,196 @@ fn start(launch: engine::Launch, stream: stream::Stream, runtime: &tokio::runtim
 			.unwrap(),
 		Box::new(stream),
 	)
+}
+
+/// A scene pad's ⋯ button, which shows while the pointer is on it, opens its
+/// menu, and Remove asks first for a scene with more than one source and
+/// removes a plain one at once; a pad the keyboard focused removes its scene
+/// on Delete, leaving the selected layer alone; the scene on program goes
+/// after the next takes its place; and the last one is emptied, so the show
+/// keeps one; undo brings each back. It draws no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn a_scene_removes_from_its_pad() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	std::fs::copy(fixture.join("shots/show.toml"), "show.toml").unwrap();
+	let (mut harness, started, _) = window(
+		start(launch(&gpu), stream(None), &runtime),
+		&gpu,
+		&runtime,
+		SIZE,
+		Default::default(),
+	);
+	harness.step();
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		panic!("the studio starts on its first frame")
+	};
+	studio.build(Side::Layers, Inspect::Layer, Some(1));
+	let engine = started.get().expect("the studio started").clone();
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
+		.expect("the sources and pictures settle");
+	let scenes = || {
+		let state = engine.state.lock().unwrap();
+		let names: Vec<String> = state
+			.collection()
+			.scenes
+			.iter()
+			.map(|scene| scene.name.clone())
+			.collect();
+		(names, state.compositor.program_scene().map(str::to_string))
+	};
+	let names = |names: &[&str]| names.iter().map(|name| name.to_string()).collect::<Vec<_>>();
+	// The menu's or the sheet's, which comes after the layers' own Remove.
+	let more = |harness: &mut Harness<'_, Window>, pad: &str| {
+		harness.get_by_label(pad).hover();
+		harness.run_steps(2);
+		harness.get_by_label("Scene options").click();
+		harness.run_steps(2);
+		harness.get_all_by_label("Remove").last().unwrap().click();
+		harness.run_steps(2);
+	};
+
+	// The button is only there while the pointer is on a pad.
+	assert!(harness.query_by_label("Scene options").is_none());
+	// Two sources: asked first, and left alone until the answer.
+	more(&mut harness, "Break");
+	harness.get_by_label_contains("Undo brings it back").hover();
+	assert_eq!(scenes().0, names(&["Main", "Interview", "Break"]), "it asked first");
+	harness.key_press(egui::Key::Escape);
+	harness.run_steps(2);
+	assert_eq!(scenes().0.len(), 3, "Escape left it");
+	more(&mut harness, "Break");
+	harness.get_all_by_label("Remove").last().unwrap().click();
+	harness.run_steps(2);
+	assert_eq!(scenes().0, names(&["Main", "Interview"]), "it asked, then removed");
+	let undo = || {
+		let mut state = engine.state.lock().unwrap();
+		state.undo().unwrap();
+	};
+	undo();
+	assert_eq!(scenes().0.len(), 3, "undo brought it back");
+
+	// One source: removed at once.
+	{
+		let mut state = engine.state.lock().unwrap();
+		let mut draft = state.collection().draft("Add `Solo`");
+		let mut solo = moq_scene::Scene::new("Solo");
+		solo.items = vec![moq_scene::Item::new(
+			"backdrop",
+			moq_scene::Rect::fill(&state.collection().canvas),
+		)];
+		draft.insert_scene(3, solo).unwrap();
+		state.commit(draft, None).unwrap();
+	}
+	harness.run_steps(2);
+	harness.get_by_label("Solo").click_secondary();
+	harness.run_steps(2);
+	harness.get_all_by_label("Remove").last().unwrap().click();
+	harness.run_steps(2);
+	assert_eq!(scenes().0.len(), 3, "a scene of one source went without asking");
+
+	// A focused pad takes Delete, not the selected layer, which a removal let go of.
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		unreachable!()
+	};
+	studio.build(Side::Layers, Inspect::Layer, Some(1));
+	harness.run_steps(2);
+	let layers = || {
+		engine
+			.state
+			.lock()
+			.unwrap()
+			.collection()
+			.scene("Main")
+			.unwrap()
+			.items
+			.len()
+	};
+	assert!(
+		{
+			let App::Studio(studio) = &harness.state().app else {
+				unreachable!()
+			};
+			studio.selected()
+		},
+		"a layer is selected"
+	);
+	harness.get_by_label("Break").focus();
+	harness.run_steps(2);
+	harness.key_press(egui::Key::Delete);
+	harness.run_steps(2);
+	harness.get_by_label_contains("Undo brings it back").hover();
+	assert_eq!(layers(), 3, "the layer stayed");
+	assert_eq!(scenes().0.len(), 3, "the pad asked first");
+	harness.key_press(egui::Key::Escape);
+	harness.run_steps(2);
+
+	// The scene on program goes after the next takes its place.
+	more(&mut harness, "Main");
+	harness.get_all_by_label("Remove").last().unwrap().click();
+	harness.run_steps(2);
+	assert_eq!(scenes(), (names(&["Interview", "Break"]), Some("Interview".into())));
+	// The last one is emptied.
+	for pad in ["Break", "Interview"] {
+		harness.get_by_label(pad).click_secondary();
+		harness.run_steps(2);
+		harness.get_all_by_label("Remove").last().unwrap().click();
+		harness.run_steps(2);
+		if harness.query_by_label_contains("Undo brings it back").is_some() {
+			harness.get_all_by_label("Remove").last().unwrap().click();
+			harness.run_steps(2);
+		}
+	}
+	let (left, program) = scenes();
+	assert_eq!(left, names(&["Interview"]), "the show keeps one scene");
+	assert_eq!(program.as_deref(), Some("Interview"));
+	let items = engine
+		.state
+		.lock()
+		.unwrap()
+		.collection()
+		.scene("Interview")
+		.unwrap()
+		.items
+		.len();
+	assert_eq!(items, 0, "and empties it");
+	undo();
+	let items = engine
+		.state
+		.lock()
+		.unwrap()
+		.collection()
+		.scene("Interview")
+		.unwrap()
+		.items
+		.len();
+	assert_eq!(items, 3, "undo fills it again");
+
+	// With no other scene able to go on program, a new empty one takes its place.
+	{
+		let mut state = engine.state.lock().unwrap();
+		let mut draft = state.collection().draft("Add `Wide`");
+		let mut wide = moq_scene::Scene::new("Wide");
+		wide.size = Some(moq_scene::Size {
+			width: 640,
+			height: 480,
+		});
+		draft.insert_scene(1, wide).unwrap();
+		state.commit(draft, None).unwrap();
+	}
+	harness.run_steps(2);
+	// The strip's pad, after any other label of the scene's name.
+	harness.get_all_by_label("Interview").last().unwrap().click_secondary();
+	harness.run_steps(2);
+	harness.get_all_by_label("Remove").last().unwrap().click();
+	harness.run_steps(2);
+	harness.get_all_by_label("Remove").last().unwrap().click();
+	harness.run_steps(2);
+	assert_eq!(scenes(), (names(&["Wide", "Scene 3"]), Some("Scene 3".into())));
+	quit(&engine, &runtime);
 }
 
 /// A click on a pad takes its scene on air, and the panic key mutes every
@@ -2695,6 +2895,8 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		View::Hover
 		| View::Going
 		| View::History
+		| View::PadHover
+		| View::RemovePrompt
 		| View::ShowMenu
 		| View::ShowMenuLive
 		| View::OnAir
@@ -2959,6 +3161,18 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 			if !query.is_empty() {
 				harness.get_by_role(Role::TextInput).type_text(query);
 			}
+			harness.run_steps(4);
+		}
+		View::PadHover => {
+			harness.get_by_label("Interview").hover();
+			harness.run_steps(4);
+		}
+		View::RemovePrompt => {
+			harness.get_by_label("Break").hover();
+			harness.run_steps(2);
+			harness.get_by_label("Scene options").click();
+			harness.run_steps(2);
+			harness.get_by_label("Remove").click();
 			harness.run_steps(4);
 		}
 		View::History => {

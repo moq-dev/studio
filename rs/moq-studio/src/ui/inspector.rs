@@ -1132,9 +1132,7 @@ impl Panels {
 				})
 			}
 			SceneAction::Remove(index) => {
-				let result = edit(state, format!("Remove scene `{name}`"), None, |draft| {
-					draft.remove_scene(index)
-				});
+				let result = remove_scene(state, index);
 				if result.is_ok() {
 					// Removing its scene sources removes the items showing
 					// them, which moves the ones after them.
@@ -1332,6 +1330,44 @@ impl Panels {
 		drop(state);
 		self.fail(spot, result);
 	}
+}
+
+/// Remove the scene at `index`. One on program, or leaving it, goes only
+/// after the next scene that can go on program, after it along the strip and
+/// wrapping, takes its place by a cut, or a new empty scene when none can. The
+/// show's last scene is emptied instead, so the show keeps one.
+fn remove_scene(state: &mut State, index: usize) -> anyhow::Result<()> {
+	let (count, name) = {
+		let collection = state.collection();
+		(collection.scenes.len(), collection.scenes[index].name.clone())
+	};
+	if count == 1 {
+		return edit(state, format!("Empty scene `{name}`"), None, |draft| {
+			draft.set_scene(index, Scene::new(name.clone()))
+		});
+	}
+	if state.compositor.on_air().any(|on| on == name) {
+		let collection = state.collection();
+		let mut others = (1..count).map(|step| &collection.scenes[(index + step) % count].name);
+		let next = others.find(|other| collection.takes(other).is_ok()).cloned();
+		let next = match next {
+			Some(next) => next,
+			None => {
+				let free = (count + 1..).find(|number| collection.scene(&format!("Scene {number}")).is_none());
+				let next = format!("Scene {}", free.expect("a free name"));
+				edit(state, format!("Add scene `{next}`"), None, |draft| {
+					draft.insert_scene(count, Scene::new(next.clone()))
+				})?;
+				next
+			}
+		};
+		state.collection().takes(&next)?;
+		state.compositor.set_preview(Some(next));
+		state.cut()?;
+	}
+	edit(state, format!("Remove scene `{name}`"), None, |draft| {
+		draft.remove_scene(index)
+	})
 }
 
 /// Edit `crop`'s four edges as percents in a row, top, right, bottom, and
