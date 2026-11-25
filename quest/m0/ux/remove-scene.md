@@ -4,8 +4,11 @@
 
 A streamer finds how to remove a scene without knowing to right-click, and can
 remove any scene, the one on program included. Removing one on program takes
-the next scene first. Removing the show's last scene empties it instead,
-leaving one empty scene and the quick start. Removing asks first when the
+the next scene that can go on program first (`State::take` refuses a scene at
+its own canvas size or one drawing the program feed); when none can, it
+switches to a new empty scene at the program's canvas size. Removing the
+show's last scene empties it instead, leaving one empty scene and the quick
+start. Removing asks first when the
 show is live or the scene holds more than one source; otherwise it removes at
 once, and undo brings it back.
 

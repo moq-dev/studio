@@ -20,8 +20,8 @@ accepting 30 fps on AMD until then). This machine's RADV (Nix Mesa 26.3,
 RDNA2 iGPU) exposes `VK_KHR_video_encode_h264` and `_h265`.
 
 Advance with `just upgrade-moq` in its own PR. Validate on that desktop with
-a release build: the startup probe logs the Vulkan encoder and "starting the
-show at 60 fps".
+a release build: a new show's canvas runs at 60 fps, and the probe picked the
+Vulkan encoder reading the canvas on the GPU, not the readback route.
 
 ## Hosts
 

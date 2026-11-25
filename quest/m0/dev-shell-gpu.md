@@ -24,7 +24,9 @@ Found 2026-11-25 on the maintainer's Fedora desktop (Radeon, GNOME Wayland):
 
 Recommended: add `libva` to `runtimeLibs`, and in the shell hook, when the
 host has no `/run/opengl-driver` (not NixOS) and no NVIDIA driver, point
-`VK_DRIVER_FILES`, `LIBVA_DRIVERS_PATH`, and `GBM_BACKENDS_PATH` at Nix
-Mesa's, the Mesa from the flake's nixpkgs. Decide this from the host at shell
+`VK_DRIVER_FILES` and `GBM_BACKENDS_PATH` at Nix Mesa's, the Mesa from the
+flake's nixpkgs, and pick the VA-API driver by the GPU's vendor: Mesa's
+`radeonsi` on AMD, and `intel-media-driver`'s `iHD` on Intel, since Mesa has
+no Intel VA-API encoder. Decide this from the host at shell
 setup, not by trying at runtime. Validate on this host: the log shows
 `opened VA-API H264 encoder` and no `wgpu_hal` loader errors.
