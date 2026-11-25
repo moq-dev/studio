@@ -571,7 +571,7 @@ pub(super) fn legend(ui: &Ui, below: egui::Rect) {
 		let width: f32 = galleys.iter().map(|galley| 21.0 + galley.size().x + 18.0).sum();
 		(galleys, width - 18.0)
 	};
-	// Narrow, as BUILD is in a small window, the labels shorten.
+	// Narrow, as Studio is in a small window, the labels shorten.
 	let (galleys, width) = laid(["What matters on screen", "Places it may go", "Where it went"]);
 	let galleys = match x + width <= right {
 		true => galleys,

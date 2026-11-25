@@ -269,7 +269,8 @@ struct SceneTile {
 	refused: Option<String>,
 	key: Option<String>,
 	tally: Tally,
-	tag: Option<&'static str>,
+	/// Whether its tally's word tags it.
+	tagged: bool,
 	/// Whether it draws a layer gone dark or stalled.
 	lost: bool,
 }
@@ -418,7 +419,7 @@ impl Inner {
 			.iter()
 			.map(|scene| {
 				let name = scene.name.as_str();
-				let (tally, tag) = shell::tally(program == Some(name), live, cued == Some(name));
+				let (tally, tagged) = shell::tally(program == Some(name), live, cued == Some(name));
 				let action = Action::Scene(scene.name.clone());
 				SceneTile {
 					name: scene.name.clone(),
@@ -426,7 +427,7 @@ impl Inner {
 					refused: collection.refuses(name),
 					key: self.bindings.get(&action).map(|binding| binding.shown(ctx)),
 					tally,
-					tag,
+					tagged,
 					lost: super::dark::draws_lost(collection, name, |name| state.lost(name, now).is_some()),
 				}
 			})
@@ -783,7 +784,7 @@ fn tile_ui(
 	if refused.is_some() {
 		painter.rect_filled(thumb, top, kit::BG.gamma_multiply(0.6));
 	}
-	// A source gone dark or stalled is marked on its picture, as on BUILD's.
+	// A source gone dark or stalled is marked on its picture, as on Studio's.
 	if let Tile::Source(SourceTile { lost: Some(lost), .. }) = shows {
 		super::dark::on_picture(ui, thumb, name, *lost);
 	}
@@ -820,8 +821,8 @@ fn tile_ui(
 		}
 	}
 	let tag = match (shows, tally) {
-		(Tile::Scene(scene), Tally::Air) => Some((scene.tag.unwrap_or("On air"), kit::ACCENT, Color32::WHITE)),
-		(Tile::Scene(scene), Tally::Cue) => Some((scene.tag.unwrap_or("Next"), kit::CUE, kit::ON_CUE)),
+		(Tile::Scene(scene), Tally::Air) if scene.tagged => Some(("On air", kit::ACCENT, Color32::WHITE)),
+		(Tile::Scene(scene), Tally::Cue) if scene.tagged => Some(("Next", kit::CUE, kit::ON_CUE)),
 		_ => None,
 	};
 	let mut right = bar.right() - 11.0 * scale;

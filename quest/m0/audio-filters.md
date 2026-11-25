@@ -29,6 +29,11 @@ The scene file names filters and their settings, never a plugin's absolute
 path, so a collection stays portable; a missing plugin loads as failed rather
 than refusing the file.
 
+Its controls go in each sound's options popover, from the gear on its row in
+the strip (`Panels::sound_popover` in `rs/moq-studio/src/ui/sound.rs`), as
+the [mock-up](/quest/m0/ux/mock/overhaul-popovers.webp)'s **+ Filter** row:
+the popover leaves that row out until a filter can be added.
+
 Decided 2026-11-09 (maintainer, /quest-audit): ✅ the Goal covers
 microphones and system audio only (rejected: widening moq's chain to bus
 channels). moq's chain runs on the capture producer, so only captured sources

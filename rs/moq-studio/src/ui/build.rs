@@ -1,6 +1,6 @@
-//! The BUILD page: the live picture, or a scene open off air, edited where
-//! it shows, with the scene's layers on the left and the selected layer's
-//! inspector on the right.
+//! The Studio page: the live picture, or a scene open off air, edited where
+//! it shows unless locked, with the scene's layers in a rail on the left,
+//! while it is open, and the selected layer's inspector on the right.
 
 use super::cue::Corner;
 use super::dark::Mend;
@@ -18,26 +18,30 @@ const TOOLBAR_GAP: f32 = 8.0;
 pub(super) const OFF_AIR_TOP: &str = "Always on top is drawn on program; go back to live to change it";
 
 impl Panels {
-	/// The BUILD page: the layers and Add on the left, the live picture, or
-	/// the scene open off air under its banner, in the middle, and the
-	/// inspector on the right, or among the left's tabs when the window is
-	/// narrow.
+	/// The Studio page: the layers and Add on the left while the rail is
+	/// open, the live picture, or the scene open off air under its banner, in
+	/// the middle, and the inspector on the right, or among the rail's tabs
+	/// when the window is narrow.
 	pub(super) fn build(&mut self, ui: &mut Ui, fx: &mut Fx, stage: egui::Rect, snapshot: &Snapshot) {
 		let side = (stage.width() * 0.22).clamp(*SIDE.start(), *SIDE.end());
 		let wide = stage.width() >= side * 2.0 + 360.0;
-		let left = stage.with_max_x(stage.left() + side);
+		let left = self.rail.then(|| stage.with_max_x(stage.left() + side));
 		let right = wide.then(|| stage.with_min_x(stage.right() - side));
 		let middle = stage
-			.with_min_x(left.right())
+			.with_min_x(left.map_or(stage.left(), |left| left.right()))
 			.with_max_x(right.map_or(stage.right(), |right| right.left()));
 		let line = egui::Stroke::new(1.0, kit::LINE);
-		super::shell::bar(ui, fx, left);
-		ui.painter().vline(left.right() - 0.5, left.y_range(), line);
+		if let Some(left) = left {
+			super::shell::bar(ui, fx, left);
+			ui.painter().vline(left.right() - 0.5, left.y_range(), line);
+		}
 		if let Some(right) = right {
 			super::shell::bar(ui, fx, right);
 			ui.painter().vline(right.left() + 0.5, right.y_range(), line);
 		}
-		self.side_column(ui, left, !wide);
+		if let Some(left) = left {
+			self.side_column(ui, left, !wide);
+		}
 		if let Some(right) = right {
 			self.inspector(ui, right);
 		}
@@ -118,7 +122,7 @@ impl Panels {
 		self.build_keys(ui);
 	}
 
-	/// The portrait picture's canvas while BUILD edits a scene drawn in both,
+	/// The portrait picture's canvas while Studio edits a scene drawn in both,
 	/// the one open off air or else the one on program.
 	pub(super) fn edits_both(&self, state: &State) -> Option<Canvas> {
 		let collection = state.collection();
@@ -129,8 +133,8 @@ impl Panels {
 	}
 
 	/// The page's keys, unless a field, a page, or a modal such as Settings
-	/// has the keyboard: A adds a layer, and Escape leaves cropping, then the
-	/// selection.
+	/// has the keyboard: A adds a layer, opening the rail, and Escape leaves
+	/// cropping, then the selection.
 	fn build_keys(&mut self, ui: &Ui) {
 		let ctx = ui.ctx();
 		let modal = ctx.memory(|memory| memory.top_modal_layer()).is_some();
@@ -145,6 +149,7 @@ impl Panels {
 		});
 		if add {
 			self.side = Side::Add;
+			self.rail = true;
 		}
 		if escape {
 			match self.cropping {
@@ -154,11 +159,12 @@ impl Panels {
 		}
 	}
 
-	/// The live picture at `at`, or the scene open off air: a click selects
-	/// the layer under it, a drag moves, resizes, or crops it, and a right
-	/// click offers what applies there. While interacting, the pointer and
-	/// keyboard pass to the selected layer's web page instead, until Escape.
-	/// The NEXT card docks on the live picture while a scene is cued.
+	/// The live picture at `at`, or the scene open off air: unless locked, a
+	/// click selects the layer under it, a drag moves, resizes, or crops it,
+	/// and a right click offers what applies there. While interacting, the
+	/// pointer and keyboard pass to the selected layer's web page instead,
+	/// until Escape. The NEXT card docks on the live picture while a scene is
+	/// cued.
 	fn stage(&mut self, ui: &mut Ui, fx: &mut Fx, snapshot: &Snapshot, at: egui::Rect) {
 		self.staged = true;
 		let engine = self.engine.clone();
@@ -177,7 +183,7 @@ impl Panels {
 			};
 			(canvas, tag)
 		});
-		// The portrait picture, while BUILD edits it: on program, at the size
+		// The portrait picture, while Studio edits it: on program, at the size
 		// it was drawn at, as the landscape one is.
 		let portrait = match self.format {
 			Format::Portrait => self.edits_both(&state).and_then(|canvas| match off_air {
@@ -209,6 +215,9 @@ impl Panels {
 					})
 					.inner
 					.rect;
+				if self.locked {
+					self.drops_on_locked(ui, image);
+				}
 				let (scene, since) = self.edited_since(&state);
 				let scene = scene.map(|scene| (scene, since));
 				self.rebind(&state.sources);
@@ -230,19 +239,27 @@ impl Panels {
 			}
 			self.stop_interacting(&state);
 		}
+		let sense = match self.locked {
+			true => egui::Sense::hover(),
+			false => egui::Sense::click_and_drag(),
+		};
 		let response = ui
 			.scope_builder(builder, |ui| {
-				frame.show(ui, Some(fx), |ui| {
-					kit::named(picture(ui, id, canvas, egui::Sense::click_and_drag()), "Canvas")
-				})
+				frame.show(ui, Some(fx), |ui| kit::named(picture(ui, id, canvas, sense), "Canvas"))
 			})
 			.inner;
-		let (spot, result) = self.arrange(ui, &mut state, &response, canvas);
-		let (spot, result) = match self.on_picture(ui, &mut state, &response, canvas) {
-			Some(acted) => acted,
-			None => (spot, result),
+		let (spot, result) = match self.locked {
+			true => {
+				self.drops_on_locked(ui, response.rect);
+				(None, Ok(()))
+			}
+			false => {
+				let arranged = self.arrange(ui, &mut state, &response, canvas);
+				let acted = self.on_picture(ui, &mut state, &response, canvas);
+				self.drops_on_picture(ui, &mut state, response.rect, canvas);
+				acted.unwrap_or(arranged)
+			}
 		};
-		self.drops_on_picture(ui, &mut state, response.rect, canvas);
 		// Docked on the live picture, away from the selected layer and its
 		// toolbar, which a drag moves with it.
 		let (width, height) = (canvas.width.max(1) as f32, canvas.height.max(1) as f32);
@@ -291,7 +308,7 @@ impl Panels {
 		})
 	}
 
-	/// Whether `item`, `picked`, is drawn in the picture BUILD edits.
+	/// Whether `item`, `picked`, is drawn in the picture Studio edits.
 	fn drawn(&self, state: &State, picked: &Picked, item: &Item) -> bool {
 		let format = state.collection().format_of(&picked.layer, self.format);
 		item.visible && item.shown_in(format)
@@ -832,7 +849,7 @@ impl Panels {
 			)),
 			LayerAction::Slot(slot) => super::slots::set_slot(state, picked, slot),
 			LayerAction::Fit | LayerAction::Fill => {
-				// In the picture BUILD edits.
+				// In the picture Studio edits.
 				let format = collection.format_of(layer, self.format);
 				let canvas = match collection.dual(layer) {
 					true => collection.canvas_of(format),

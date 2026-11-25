@@ -1,12 +1,11 @@
 //! A show going out in landscape and portrait at once: what is said under
-//! its two pictures, where a layer is shown, and which picture BUILD edits.
+//! its two pictures, where a layer is shown, and which picture Studio edits.
 
 use egui::{Align2, Sense, Stroke, StrokeKind, pos2, vec2};
-use moq_net::bandwidth::Rate;
 
 use super::*;
 
-/// Room between the two pictures on LIVE and BUILD.
+/// Room between the two pictures on Studio.
 pub(super) const GAP: f32 = 32.0;
 /// Room under them for what is said about them.
 pub(super) const UNDER: f32 = 48.0;
@@ -41,65 +40,6 @@ pub(super) fn shown_label(name: &str, format: Option<Format>) -> String {
 		None => format!("Show `{name}` in both pictures"),
 		Some(format) => format!("Show `{name}` only in {}", format.name().to_lowercase()),
 	}
-}
-
-/// Under a picture, in `rect`: its format, its size, and what its video sent
-/// over the last interval, while on air, as many of those as fit, right to
-/// left from the rate, with all of them on hover where some did not. The part
-/// of `rect` left free between them.
-pub(super) fn format_label(
-	ui: &Ui,
-	rect: egui::Rect,
-	format: Format,
-	canvas: Canvas,
-	sent: Option<Rate>,
-) -> egui::Rect {
-	let painter = ui.painter();
-	let mid = rect.center().y;
-	mark(painter, pos2(rect.left() + 7.0, mid), format, kit::DIM);
-	let dims = format!("{} × {}", canvas.width, canvas.height);
-	let rate = sent.map(crate::health::rate);
-	let name = kit::caps_galley(painter, format.name(), kit::display_bold(11.5), kit::TEXT, None);
-	let size = painter.layout_no_wrap(dims.clone(), kit::ui(12.0), kit::DIM);
-	let said = rate
-		.clone()
-		.map(|rate| painter.layout_no_wrap(rate, kit::ui(12.0), kit::DIM));
-	// Past the mark, and the rate with its dot.
-	let x = rect.left() + 20.0;
-	let mut room = rect.right() - x;
-	let said = said.filter(|said| said.size().x + 24.0 <= room);
-	if let Some(said) = &said {
-		room -= said.size().x + 24.0;
-	}
-	let named = name.size().x <= room;
-	let sized = named && name.size().x + 10.0 + size.size().x <= room;
-	let mut free = rect.with_min_x(x);
-	if named {
-		let width = name.size().x;
-		painter.galley(pos2(x, mid - name.size().y / 2.0), name, kit::TEXT);
-		free.min.x = x + width + 16.0;
-	}
-	if sized {
-		let at = pos2(free.min.x - 6.0, mid - size.size().y / 2.0);
-		free.min.x = at.x + size.size().x + 16.0;
-		painter.galley(at, size, kit::DIM);
-	}
-	free.max.x = rect.right();
-	let all = said.is_some() == rate.is_some();
-	if let Some(said) = said {
-		let at = pos2(rect.right() - said.size().x, mid - said.size().y / 2.0);
-		painter.circle_filled(pos2(at.x - 9.0, mid), 3.5, kit::OK);
-		free.max.x = at.x - 24.0;
-		painter.galley(at, said, kit::DIM);
-	}
-	if !(named && sized && all) {
-		let words = [Some(format.name().to_string()), Some(dims), rate];
-		let words: Vec<String> = words.into_iter().flatten().collect();
-		let id = ui.id().with(("format label", format));
-		ui.interact(rect, id, Sense::hover()).on_hover_text(words.join(" · "));
-	}
-	free.max.x = free.max.x.max(free.min.x);
-	free
 }
 
 /// A small outline of `format`'s shape, centered at `at`, in `ink`.
@@ -184,7 +124,7 @@ impl Panels {
 		self.fail(spot, result);
 	}
 
-	/// BUILD's choice of the picture it edits, a scene drawn in both: the
+	/// Studio's choice of the picture it edits, a scene drawn in both: the
 	/// landscape one or the portrait one, at the left of `rect`; where it is.
 	pub(super) fn format_tabs(&mut self, ui: &mut Ui, rect: egui::Rect) -> egui::Rect {
 		let options = [(Format::Landscape, "Landscape"), (Format::Portrait, "Portrait")];
@@ -199,7 +139,7 @@ impl Panels {
 		tabs.inner
 	}
 
-	/// The picture BUILD is not editing, small in `rect`, `id` drawn on
+	/// The picture Studio is not editing, small in `rect`, `id` drawn on
 	/// `canvas`, with its format under it. A click edits it instead.
 	pub(super) fn other_picture(&mut self, ui: &mut Ui, rect: egui::Rect, id: egui::TextureId, canvas: Canvas) {
 		let other = self.format.other();

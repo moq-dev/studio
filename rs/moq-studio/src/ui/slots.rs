@@ -1,4 +1,4 @@
-//! Slot layouts on BUILD: each slot's outline on the picture with the role
+//! Slot layouts on Studio: each slot's outline on the picture with the role
 //! in it, a layer dragged onto a slot, and the scene's arrangement and slots
 //! in the inspector.
 
@@ -381,7 +381,7 @@ enum Asked {
 
 impl Panels {
 	/// The Slots section of the scene inspector for the scene at `index`:
-	/// how it arranges its slots in the picture BUILD edits, each slot and
+	/// how it arranges its slots in the picture Studio edits, each slot and
 	/// the role or source in it, and a slot to add for the main picture or
 	/// the camera; the result of what it asked for, if it asked.
 	pub(super) fn slots(&mut self, ui: &mut Ui, state: &mut State, index: usize) -> Option<anyhow::Result<()>> {

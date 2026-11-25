@@ -79,19 +79,17 @@ export function clock(seconds: number): string {
 	return `${two(Math.floor(whole / 3600))}:${two(Math.floor(whole / 60) % 60)}:${two(whole % 60)}`;
 }
 
-/** A pad's tally: on air in the accent, or first or next in amber. */
-export type Tally = { tag: string; on: "air" | "cue" } | undefined;
+/** A pad's tally: on program in the accent, or next in amber. */
+export type Tally = { tag?: string; on: "air" | "cue" } | undefined;
 
 /**
  * The tally of the pad for `scene`, as the studio's own pads show it: the
- * scene on program is ON AIR while live, and FIRST otherwise, the one the
- * stream opens on; the scene cued is NEXT.
+ * scene on program is in the accent, tagged ON AIR while live and untagged
+ * otherwise, as the one the stream opens on; the scene cued is NEXT.
  */
 export function tally(desk: Desk, scene: string): Tally {
 	if (desk.program === scene) {
-		return desk.air === "live" || desk.air === "ending"
-			? { tag: "On air", on: "air" }
-			: { tag: "First", on: "cue" };
+		return desk.air === "live" || desk.air === "ending" ? { tag: "On air", on: "air" } : { on: "air" };
 	}
 	if (desk.cued === scene) return { tag: "Next", on: "cue" };
 	return undefined;
