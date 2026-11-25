@@ -1968,6 +1968,79 @@ fn studio_mode_cues_and_takes() {
 	quit(&engine, &runtime);
 }
 
+/// Studio's title bar and strip as a person uses them: locked, a click on
+/// the picture selects nothing, and unlocked it does; off air with no safe
+/// scene the panic key stays out of the strip; `+` adds a scene and takes it,
+/// showing its quick start; and a sound's mute and gear act on that sound.
+/// It draws no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn the_studio_locks_adds_and_mutes() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	let show = std::fs::read_to_string(fixture.join("shots/show.toml")).unwrap();
+	let show = show.replace("safe = true # the scene the panic key cuts to\n", "");
+	std::fs::write("show.toml", show).unwrap();
+	let (mut harness, started, _) = window(
+		start(launch(&gpu), stream(None), &runtime),
+		&gpu,
+		&runtime,
+		SIZE,
+		Default::default(),
+	);
+	harness.step();
+	let engine = started.get().expect("the studio started").clone();
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
+		.expect("the sources and pictures settle");
+	let selected = |harness: &mut Harness<'_, Window>| {
+		let App::Studio(studio) = &mut harness.state_mut().app else {
+			unreachable!()
+		};
+		studio.selected()
+	};
+
+	harness.get_by_label("Editable").click();
+	harness.run_steps(2);
+	harness.get_by_label("Canvas").click();
+	harness.run_steps(2);
+	assert!(!selected(&mut harness), "locked, the picture selects nothing");
+	harness.get_by_label("Locked").click();
+	harness.run_steps(2);
+	harness.get_by_label("Canvas").click();
+	harness.run_steps(2);
+	assert!(selected(&mut harness), "editable, a click selects the layer under it");
+
+	assert!(harness.query_by_label("Panic").is_none(), "no safe scene off air");
+	harness.get_by_label("Add a scene").click();
+	harness.run_steps(2);
+	let program = engine
+		.state
+		.lock()
+		.unwrap()
+		.compositor
+		.program_scene()
+		.map(str::to_string);
+	assert_eq!(program.as_deref(), Some("Scene 4"), "+ took the new scene");
+	assert!(harness.query_by_label("Screen").is_some(), "its quick start shows");
+
+	harness.get_by_label("Mute guest").click();
+	harness.run_steps(2);
+	let muted = |name: &str| {
+		let state = engine.state.lock().unwrap();
+		state.collection().audio.get(name).is_some_and(|audio| audio.muted)
+	};
+	assert!(muted("guest") && !muted("caller"), "the row's mute is its sound's");
+	harness.get_by_label("guest options").click();
+	harness.run_steps(2);
+	harness.get_by_label("Monitor in headphones");
+	harness.get_by_label("guest delay");
+
+	drop(harness);
+	quit(&engine, &runtime);
+}
+
 /// While a mod is off, its feature is held back where no page shows it: a
 /// key for it does nothing, a layer's menu offers no slot, a guest is not
 /// placed on their own, though the settings ask, and a guest waiting to be

@@ -1777,7 +1777,7 @@ fn switch(ui: &mut Ui, at: egui::Pos2, icon: Icon, text: &str, on: bool, tip: &s
 	let rect = Rect::from_min_size(pos2(at.x, at.y - size.y / 2.0), size);
 	let response = ui.interact(rect, ui.id().with(("switch", text)), Sense::click());
 	response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, text));
-	let response = kit::tip(response, tip, None);
+	let response = kit::tip(kit::named(response, text), tip, None);
 	let fill = match (on, response.hovered()) {
 		(true, _) => kit::P3,
 		(false, true) => kit::P2,
