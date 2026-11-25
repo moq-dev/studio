@@ -1356,28 +1356,28 @@ fn remove_scene(state: &mut State, index: usize) -> anyhow::Result<()> {
 		});
 	}
 	if state.compositor.on_air().any(|on| on == name) {
-		// One only leaving in a transition lets the program it goes to finish.
-		let next = match state.compositor.program_scene() {
-			Some(program) if program != name => program.to_string(),
-			_ => {
-				let collection = state.collection();
-				let mut others = (1..count).map(|step| &collection.scenes[(index + step) % count].name);
-				match others.find(|other| collection.takes(other).is_ok()).cloned() {
-					Some(next) => next,
-					None => {
-						let free = (count + 1..).find(|number| collection.scene(&format!("Scene {number}")).is_none());
-						let next = format!("Scene {}", free.expect("a free name"));
-						edit(state, format!("Add scene `{next}`"), None, |draft| {
-							draft.insert_scene(count, Scene::new(next.clone()))
-						})?;
-						next
-					}
+		// One only leaving in a transition lets the program it goes to finish,
+		// keeping its keyframes where they are.
+		if state.compositor.program_scene() != Some(name.as_str()) {
+			state.end_transition();
+		} else {
+			let collection = state.collection();
+			let mut others = (1..count).map(|step| &collection.scenes[(index + step) % count].name);
+			let next = match others.find(|other| collection.takes(other).is_ok()).cloned() {
+				Some(next) => next,
+				None => {
+					let free = (count + 1..).find(|number| collection.scene(&format!("Scene {number}")).is_none());
+					let next = format!("Scene {}", free.expect("a free name"));
+					edit(state, format!("Add scene `{next}`"), None, |draft| {
+						draft.insert_scene(count, Scene::new(next.clone()))
+					})?;
+					next
 				}
-			}
-		};
-		state.collection().takes(&next)?;
-		state.compositor.set_preview(Some(next));
-		state.cut()?;
+			};
+			state.collection().takes(&next)?;
+			state.compositor.set_preview(Some(next));
+			state.cut()?;
+		}
 	}
 	edit(state, format!("Remove scene `{name}`"), None, |draft| {
 		draft.remove_scene(index)

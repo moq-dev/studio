@@ -933,10 +933,10 @@ impl Panels {
 		let (tally, tagged) = tally(on_air, live, cued);
 		// Keyed by the scene, so the keyboard's focus stays with it, and does not
 		// pass to the scene that takes its place in the strip when it goes.
-		let response = ui.push_id(("pad", &pad.name), |ui| {
-			self.pad(ui, pad, tally, tagged, width, snapshot)
-		});
-		let response = response.inner;
+		let keyed = egui::UiBuilder::new().id(ui.id().with(("pad", &pad.name)));
+		let response = ui
+			.scope_builder(keyed, |ui| self.pad(ui, pad, tally, tagged, width, snapshot))
+			.inner;
 		let click = match snapshot.studio {
 			true => PadAction::Cue(pad.name.clone()),
 			false => PadAction::Take(pad.name.clone()),
@@ -1002,7 +1002,7 @@ impl Panels {
 	/// it names one: the scene, once the streamer says so.
 	fn remove_sheet(&mut self, ctx: &egui::Context) -> Option<String> {
 		let name = self.removing_pad.clone()?;
-		let (live, last, on_air, sources) = {
+		let (live, last, on_air, leaving, sources) = {
 			let state = self.engine.state.lock().unwrap();
 			let collection = state.collection();
 			let sources = collection.scene(&name).map_or(0, |scene| {
@@ -1013,11 +1013,13 @@ impl Panels {
 					.collect::<BTreeSet<_>>()
 					.len()
 			});
-			let on_air = state.compositor.on_air().any(|on| on == name);
+			let on_air = state.compositor.program_scene() == Some(name.as_str());
+			let leaving = !on_air && state.compositor.on_air().any(|on| on == name);
 			(
 				self.engine.on_air().live().is_some(),
 				collection.scenes.len() == 1,
 				on_air,
+				leaving,
 				sources,
 			)
 		};
@@ -1032,6 +1034,8 @@ impl Panels {
 				says.push("It is the show's last scene, so it stays, emptied.".to_string());
 			} else if on_air {
 				says.push("It is on air: the next scene that can go on air takes its place at once.".to_string());
+			} else if leaving {
+				says.push("It is leaving the program: the transition finishes on the scene it goes to.".to_string());
 			}
 			if sources > 1 {
 				says.push(format!("Its {sources} sources leave it."));

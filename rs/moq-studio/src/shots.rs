@@ -793,46 +793,44 @@ fn a_scene_removes_from_its_pad() {
 	harness.key_press(egui::Key::Escape);
 	harness.run_steps(2);
 
-	// The scene on program goes after the next takes its place.
+	// A scene only leaving program in a transition goes with the transition
+	// finished on the scene it goes to.
+	engine
+		.state
+		.lock()
+		.unwrap()
+		.take("Interview", kio::clock::Instant::now())
+		.unwrap();
+	assert!(engine.state.lock().unwrap().compositor.transitioning());
 	more(&mut harness, "Main");
 	harness.get_all_by_label("Remove").last().unwrap().click();
 	harness.run_steps(2);
 	assert_eq!(scenes(), (names(&["Interview", "Break"]), Some("Interview".into())));
+	assert!(!engine.state.lock().unwrap().compositor.transitioning());
+
+	// The scene on program goes after the next takes its place.
+	more(&mut harness, "Interview");
+	harness.get_all_by_label("Remove").last().unwrap().click();
+	harness.run_steps(2);
+	assert_eq!(scenes(), (names(&["Break"]), Some("Break".into())));
+
 	// The last one is emptied.
-	for pad in ["Break", "Interview"] {
-		harness.get_by_label(pad).click_secondary();
-		harness.run_steps(2);
-		harness.get_all_by_label("Remove").last().unwrap().click();
-		harness.run_steps(2);
-		if harness.query_by_label_contains("Undo brings it back").is_some() {
-			harness.get_all_by_label("Remove").last().unwrap().click();
-			harness.run_steps(2);
-		}
-	}
+	harness.get_by_label("Break").click_secondary();
+	harness.run_steps(2);
+	harness.get_all_by_label("Remove").last().unwrap().click();
+	harness.run_steps(2);
+	harness.get_all_by_label("Remove").last().unwrap().click();
+	harness.run_steps(2);
 	let (left, program) = scenes();
-	assert_eq!(left, names(&["Interview"]), "the show keeps one scene");
-	assert_eq!(program.as_deref(), Some("Interview"));
-	let items = engine
-		.state
-		.lock()
-		.unwrap()
-		.collection()
-		.scene("Interview")
-		.unwrap()
-		.items
-		.len();
-	assert_eq!(items, 0, "and empties it");
+	assert_eq!(left, names(&["Break"]), "the show keeps one scene");
+	assert_eq!(program.as_deref(), Some("Break"));
+	let items = || {
+		let state = engine.state.lock().unwrap();
+		state.collection().scene("Break").unwrap().items.len()
+	};
+	assert_eq!(items(), 0, "and empties it");
 	undo();
-	let items = engine
-		.state
-		.lock()
-		.unwrap()
-		.collection()
-		.scene("Interview")
-		.unwrap()
-		.items
-		.len();
-	assert_eq!(items, 3, "undo fills it again");
+	assert_eq!(items(), 2, "undo fills it again");
 
 	// With no other scene able to go on program, a new empty one takes its place.
 	{
@@ -848,7 +846,7 @@ fn a_scene_removes_from_its_pad() {
 	}
 	harness.run_steps(2);
 	// The strip's pad, after any other label of the scene's name.
-	harness.get_all_by_label("Interview").last().unwrap().click_secondary();
+	harness.get_all_by_label("Break").last().unwrap().click_secondary();
 	harness.run_steps(2);
 	harness.get_all_by_label("Remove").last().unwrap().click();
 	harness.run_steps(2);
