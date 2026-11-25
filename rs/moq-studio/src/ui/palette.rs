@@ -32,14 +32,14 @@ enum Command {
 	Page(Page),
 	/// Open Settings at a pane, at the row named, if any.
 	Setting(Setting, Option<&'static str>),
-	/// Select a layer on BUILD.
+	/// Select a layer on Studio.
 	Layer(Picked),
-	/// Add a device the last listing found as a layer of the scene BUILD
+	/// Add a device the last listing found as a layer of the scene Studio
 	/// edits.
 	Device(Pick),
 	/// List this machine's devices, which then show as rows of their own.
 	Devices,
-	/// Open BUILD's Add tab on a kind of source.
+	/// Open Studio's Add tab on a kind of source.
 	Kind(Kind),
 	Undo,
 	Redo,
@@ -168,7 +168,7 @@ impl Panels {
 			rows.push(row);
 		}
 
-		// The layers BUILD edits, by the source each shows: off air, only the
+		// The layers Studio edits, by the source each shows: off air, only the
 		// scene's own, as the always-on-top ones are drawn on program.
 		if let Ok(layer) = self.scene(&state) {
 			let off_air = self.off_air(&state).is_some();
@@ -462,12 +462,13 @@ impl Panels {
 				}
 			}
 			Command::Layer(picked) => {
-				self.page = Page::Build;
+				self.page = Page::Studio;
 				self.side = Side::Layers;
+				self.rail = true;
 				self.select(Some(picked));
 			}
 			Command::Device(pick) => {
-				self.page = Page::Build;
+				self.page = Page::Studio;
 				let mut state = self.engine.state.lock().unwrap();
 				// Two cameras of the same model share a name; number the later ones.
 				let name = state.collection().unused_name(&pick.name);
@@ -485,8 +486,9 @@ impl Panels {
 				self.check(refreshed);
 			}
 			Command::Kind(kind) => {
-				self.page = Page::Build;
+				self.page = Page::Studio;
 				self.side = Side::Add;
+				self.rail = true;
 				self.add.kind = kind;
 			}
 			Command::Undo => self.undo(),

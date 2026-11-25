@@ -7,9 +7,10 @@ use egui::{
 };
 
 use super::build::duplicate_scene;
-use super::cue::{Corner, Cued, transition_words};
-use super::layout::{Arrangement, Layout, SOUND_ROW, fit};
+use super::cue::{Cued, transition_words};
+use super::layout::{Arrangement, Holds, Layout, SOUND_ROW, fit};
 use super::levels::reading;
+use super::sound::Sound;
 use super::*;
 
 /// What the title bar, the strip, and the live picture show, copied under one
@@ -73,22 +74,14 @@ struct ScenePad {
 	dark: bool,
 }
 
-/// A sound the stream carries, as its row shows it.
-struct Sound {
-	name: String,
-	microphone: bool,
-	audio: moq_scene::Audio,
-}
-
-/// A scene's tally, and the tag over its own, if any, by whether it is `on_air`,
-/// the stream is `live`, and it is `cued`: off air, the scene on program is
-/// the one the stream opens on.
-pub(super) fn tally(on_air: bool, live: bool, cued: bool) -> (Tally, Option<&'static str>) {
+/// A scene's tally, and whether its word tags it, by whether it is `on_air`,
+/// the stream is `live`, and it is `cued`: off air, the scene on program,
+/// the one the stream opens on, is ringed as the one picked, untagged.
+pub(super) fn tally(on_air: bool, live: bool, cued: bool) -> (Tally, bool) {
 	match (on_air, live, cued) {
-		(true, true, _) => (Tally::Air, None),
-		(true, false, _) => (Tally::Cue, Some("First")),
-		(false, _, true) => (Tally::Cue, None),
-		(false, _, false) => (Tally::Off, None),
+		(true, live, _) => (Tally::Air, live),
+		(false, _, true) => (Tally::Cue, true),
+		(false, _, false) => (Tally::Off, true),
 	}
 }
 
@@ -275,17 +268,16 @@ impl Panels {
 	/// messages over them.
 	pub(super) fn window(&mut self, ui: &mut Ui, fx: &mut Fx, snapshot: &Snapshot) {
 		let window = ui.max_rect();
-		let (size, mut shape, sounds) = (window.size(), snapshot.shape, snapshot.sounds.len());
-		// LIVE shows both pictures of a show going out in both, and room for
-		// what is said under them, at about the height they are drawn.
-		if let (Page::Live, Some(portrait)) = (self.page, snapshot.portrait) {
-			let pair = super::layout::pair_shape([shape, self::shape(portrait)], super::formats::GAP / 600.0);
-			shape = pair * 600.0 / (600.0 + super::formats::UNDER);
-		}
+		let (size, shape) = (window.size(), snapshot.shape);
+		let holds = Holds {
+			sounds: snapshot.sounds.len(),
+			pages: self.pages().len() > 1,
+			panic: self.panic_key_shown(snapshot) || self.controls.mods.on(Mod::Review),
+		};
 		let layout = match self.page {
 			// MIX puts a live picture in the sound's slot.
-			Page::Mix => Layout::monitor(size, shape, sounds),
-			_ => Layout::new(size, shape, sounds),
+			Page::Mix => Layout::monitor(size, shape, holds),
+			_ => Layout::new(size, shape, holds),
 		};
 		let layout = layout.translate(window.min.to_vec2());
 		ui.painter().rect_filled(window, 0, kit::BG);
@@ -312,18 +304,7 @@ impl Panels {
 	fn page(&mut self, ui: &mut Ui, fx: &mut Fx, snapshot: &Snapshot, layout: &Layout) {
 		let stage = layout.stage;
 		match self.page {
-			Page::Live => {
-				kit::wash(ui.painter(), stage);
-				let picture = match snapshot.portrait {
-					Some(portrait) => self.both_on_air(ui, fx, layout, portrait),
-					None => self.on_air(ui, Some(fx), layout.picture).rect,
-				};
-				if let Some(cued) = &snapshot.cued {
-					self.next(ui, fx, cued, picture, Corner::TopRight);
-				}
-				self.quick_start(ui, picture);
-			}
-			Page::Build => self.build(ui, fx, stage, snapshot),
+			Page::Studio => self.build(ui, fx, stage, snapshot),
 			// The sound slot holds the live picture instead.
 			Page::Mix => self.mix(ui, stage),
 			// The program's card in "replay what" is the live picture.
@@ -355,55 +336,10 @@ impl Panels {
 		.inner
 	}
 
-	/// Both live pictures of a show going out in both, each in its tally
-	/// frame, side by side in the stage, with each one's format, size, and
-	/// what it sends under it, and where the selected layer is shown between
-	/// them. The landscape picture's rect, which the NEXT card docks in.
-	fn both_on_air(&mut self, ui: &mut Ui, fx: &mut Fx, layout: &Layout, portrait: Canvas) -> Rect {
-		let room = layout.stage.shrink(20.0);
-		let room = room.with_max_y(room.bottom() - super::formats::UNDER);
-		let [wide, tall] = super::layout::pair(room, [shape(self.program_drawn), shape(portrait)], super::formats::GAP);
-		self.on_air(ui, Some(fx), wide);
-		let Some(id) = self.portrait.as_ref().map(|registered| registered.id) else {
-			return wide;
-		};
-		self.framed(ui, Some(fx), tall, id, portrait);
-		let sent = self.sent();
-		let under = |picture: Rect| {
-			Rect::from_min_size(
-				pos2(picture.left(), picture.bottom() + 18.0),
-				vec2(picture.width(), 24.0),
-			)
-		};
-		let free = super::formats::format_label(ui, under(wide), Format::Landscape, self.program_drawn, sent[0]);
-		super::formats::format_label(ui, under(tall), Format::Portrait, portrait, sent[1]);
-		// Centered under the landscape picture, clear of what is said there.
-		self.shown_in(ui, free, Some(wide.center().x));
-		wide
-	}
-
-	/// What the landscape and portrait broadcasts' video sent over the last
-	/// interval, while on air.
-	fn sent(&self) -> [Option<moq_net::bandwidth::Rate>; 2] {
-		let report = self.engine.health.lock().unwrap();
-		let video = |name: Option<&str>| {
-			let broadcast = report
-				.broadcasts
-				.iter()
-				.find(|broadcast| broadcast.name.as_deref() == name)?;
-			let tracks = broadcast.tracks.iter().filter(|track| track.label.starts_with("video"));
-			let sent: Vec<u64> = tracks
-				.filter_map(|track| track.sent)
-				.map(|sent| sent.as_bps())
-				.collect();
-			(!sent.is_empty()).then(|| moq_net::bandwidth::Rate::from_bps(sent.into_iter().sum()))
-		};
-		[video(None), video(Some(moq_scene::PORTRAIT))]
-	}
-
-	/// The title bar: the show's menu, undo and redo, the pages, the health
-	/// dot, record, the live control, Settings, and the window's buttons. Its
-	/// empty room moves the window.
+	/// The title bar: the show's menu, undo and redo, the pages while there
+	/// are several, Studio's Layers and Editable switches, the health dot,
+	/// record, the live control, Settings, and the window's buttons. Its empty
+	/// room moves the window.
 	fn title(&mut self, ui: &mut Ui, fx: &mut Fx, snapshot: &Snapshot, layout: &Layout) {
 		let rect = layout.title;
 		bar(ui, fx, rect);
@@ -453,11 +389,6 @@ impl Panels {
 								false => Some(Setting::default()),
 							};
 						}
-						let key = ui.ctx().format_shortcut(&super::palette::OPEN);
-						let search = IconButton::new(Icon::Search, "Search and run anything").key(Some(&key));
-						if ui.add(search).clicked() {
-							self.toggle_palette();
-						}
 						self.live_control(ui);
 						self.record_button(ui, fx);
 						self.health_dot(ui, fx, compact);
@@ -467,29 +398,80 @@ impl Panels {
 				(left, right)
 			})
 			.inner;
-		let nav = match layout.sidebar {
-			Some(_) => 0.0,
-			None => nav_width(ui, &self.pages(), compact) + 24.0,
-		};
+		// The pages, while there are several and no sidebar holds them, and
+		// Studio's switches, centered together.
+		let pages = self.pages();
+		let nav = (pages.len() > 1 && layout.sidebar.is_none()).then(|| nav_width(ui, &pages, compact));
+		let switches = (self.page == Page::Studio).then(|| switches_width(ui, compact));
+		let gap = if nav.is_some() && switches.is_some() { 12.0 } else { 0.0 };
+		let width = nav.unwrap_or(0.0) + gap + switches.unwrap_or(0.0);
 		if !compact {
-			let needs = (left - inner.left()) + nav + (inner.right() - right);
+			let needs = (left - inner.left()) + width + 24.0 + (inner.right() - right);
 			if needs > inner.width() {
 				// Drawn compact from the next frame.
 				ui.ctx().request_repaint();
 			}
 			self.title_needs = needs;
 		}
-		if layout.sidebar.is_none() {
+		if width > 0.0 {
 			// Centered on the bar, or as near as the controls beside it allow.
-			let width = nav_width(ui, &self.pages(), compact);
 			let center = rect
 				.center()
 				.x
 				.min(right - 12.0 - width / 2.0)
 				.max(left + 12.0 + width / 2.0);
-			let at = Rect::from_center_size(pos2(center, rect.center().y), vec2(width, 32.0));
-			self.nav(ui, at, compact);
+			let mut x = center - width / 2.0;
+			if let Some(nav) = nav {
+				let at = Rect::from_min_size(pos2(x, rect.center().y - 16.0), vec2(nav, 32.0));
+				self.nav(ui, at, compact);
+				x += nav + gap;
+			}
+			if switches.is_some() {
+				self.switches(ui, pos2(x, rect.center().y), compact);
+			}
 		}
+	}
+
+	/// Studio's switches from `at`, its left middle: Layers, which opens and
+	/// closes the left rail, and Editable, which locks the picture against
+	/// edits; icons alone while `compact`.
+	fn switches(&mut self, ui: &mut Ui, at: egui::Pos2, compact: bool) {
+		let layers = match self.rail {
+			true => "Hide the layers",
+			false => "Show the layers and what can be added",
+		};
+		let rail = switch(ui, at, Icon::Layers, "Layers", self.rail, layers, compact);
+		if rail.clicked() {
+			self.rail = !self.rail;
+		}
+		let (icon, text, tip) = match self.locked {
+			true => (
+				Icon::Lock,
+				"Locked",
+				"Locked: the picture ignores clicks and drags, so nothing on air moves by accident. Click to edit it",
+			),
+			false => (
+				Icon::Unlock,
+				"Editable",
+				"Editable: drag, resize, and crop layers on the picture. Click to lock it",
+			),
+		};
+		let at = pos2(rail.rect.right() + SWITCH_GAP, at.y);
+		let lock = switch(ui, at, icon, text, self.locked, tip, compact);
+		if lock.clicked() {
+			self.locked = !self.locked;
+			if self.locked {
+				self.cropping = false;
+				self.drag = None;
+			}
+		}
+	}
+
+	/// Whether the panic key shows: a safe scene is set to cut to, or the
+	/// stream is on air, where muting everything is a key away. Off air with
+	/// no safe scene it would only mute what nobody hears.
+	fn panic_key_shown(&self, snapshot: &Snapshot) -> bool {
+		snapshot.safe.is_some() || self.engine.on_air() != crate::engine::OnAir::Off || self.controls.going()
 	}
 
 	/// The logo and the show's name, which open the show's menu.
@@ -710,18 +692,21 @@ impl Panels {
 		let line = Stroke::new(1.0, kit::LINE);
 		match layout.arrangement {
 			Arrangement::Wide | Arrangement::Stacked => {
-				let strip = layout.scenes.union(layout.panic).union(layout.sound);
+				let strip = layout.scenes.union(layout.sound);
+				let strip = layout.panic.map_or(strip, |panic| strip.union(panic));
 				bar(ui, fx, strip);
 				let painter = ui.painter();
 				painter.hline(strip.x_range(), strip.top() + 0.5, line);
-				painter.vline(layout.panic.left() + 0.5, layout.panic.y_range(), line);
+				if let Some(panic) = layout.panic {
+					painter.vline(panic.left() + 0.5, panic.y_range(), line);
+				}
 				match layout.arrangement {
 					Arrangement::Wide => painter.vline(layout.sound.left() + 0.5, layout.sound.y_range(), line),
 					_ => painter.hline(layout.sound.x_range(), layout.sound.top() + 0.5, line),
 				};
 			}
 			Arrangement::Tall => {
-				let column = layout.sound.union(layout.panic);
+				let column = layout.panic.map_or(layout.sound, |panic| layout.sound.union(panic));
 				bar(ui, fx, layout.scenes);
 				bar(ui, fx, column);
 				let painter = ui.painter();
@@ -731,7 +716,9 @@ impl Panels {
 		}
 		let tall = layout.arrangement == Arrangement::Tall;
 		self.scenes_strip(ui, snapshot, layout.scenes, tall);
-		self.panic_key(ui, snapshot, layout.panic, tall);
+		if let Some(panic) = layout.panic {
+			self.panic_key(ui, snapshot, panic, tall);
+		}
 		match self.page {
 			// MIX is the sound, so its slot holds a small live picture.
 			Page::Mix => {
@@ -873,10 +860,23 @@ impl Panels {
 					.find(|name| collection.scene(name).is_none())
 					.expect("a free name");
 				let index = collection.scenes.len();
-				let result = edit(&mut state, format!("Add scene `{name}`"), None, |draft| {
+				let added = edit(&mut state, format!("Add scene `{name}`"), None, |draft| {
 					draft.insert_scene(index, Scene::new(name.clone()))
 				});
-				result.map(|()| self.say(Ok(format!("added scene `{name}`; take it to fill it in Build"))))
+				// Straight to it, empty but for the quick start: taken off air,
+				// and opened off air on air, never putting a blank scene on the
+				// stream.
+				let on_air = self.engine.on_air() != crate::engine::OnAir::Off || self.controls.going();
+				match (added, on_air) {
+					(Err(err), _) => Err(err),
+					(Ok(()), false) => crate::controls::take(&mut state, &name).map(drop),
+					(Ok(()), true) => {
+						drop(state);
+						let result = self.open_off_air(&name);
+						self.check(result);
+						return;
+					}
+				}
 			}
 		};
 		drop(state);
@@ -904,8 +904,8 @@ impl Panels {
 		let on_air = snapshot.program.as_deref() == Some(pad.name.as_str());
 		let cued = snapshot.cued.as_ref().is_some_and(|cued| cued.name == pad.name);
 		let live = self.engine.on_air().live().is_some();
-		let (tally, tag) = tally(on_air, live, cued);
-		let response = self.pad(ui, pad, tally, tag, width, snapshot);
+		let (tally, tagged) = tally(on_air, live, cued);
+		let response = self.pad(ui, pad, tally, tagged, width, snapshot);
 		let click = match snapshot.studio {
 			true => PadAction::Cue(pad.name.clone()),
 			false => PadAction::Take(pad.name.clone()),
@@ -925,8 +925,8 @@ impl Panels {
 			}
 			let edit = ui
 				.add_enabled(!on_air, egui::Button::new("Edit off air"))
-				.on_hover_text("Open it on Build without going on air")
-				.on_disabled_hover_text("On air; Build edits it live");
+				.on_hover_text("Edit it without going on air")
+				.on_disabled_hover_text("On air; Studio edits it live");
 			if edit.clicked() {
 				action = Some(PadAction::Edit(pad.name.clone()));
 			}
@@ -991,7 +991,7 @@ impl Panels {
 		ui: &mut Ui,
 		pad: &ScenePad,
 		tally: Tally,
-		tag: Option<&str>,
+		tagged: bool,
 		width: f32,
 		snapshot: &Snapshot,
 	) -> egui::Response {
@@ -1018,7 +1018,7 @@ impl Panels {
 			.picture(picture)
 			.key(key.as_deref())
 			.tally(tally)
-			.tag(tag)
+			.tagged(tagged)
 			.refused(pad.refused.as_deref())
 			.dark(pad.dark)
 			.fault(fault)
@@ -1043,8 +1043,8 @@ impl Panels {
 		Some(bindings.get(action)?.shown(ctx))
 	}
 
-	/// The panic key, named for the scene it cuts to, and with Replay &
-	/// review on, saving a clip and dropping a marker.
+	/// The panic key, named for the scene it cuts to, while it shows, and
+	/// with Replay & review on, saving a clip and dropping a marker.
 	fn panic_key(&mut self, ui: &mut Ui, snapshot: &Snapshot, rect: Rect, tall: bool) {
 		let room = rect.shrink(MARGIN);
 		let note = match &snapshot.safe {
@@ -1070,24 +1070,30 @@ impl Panels {
 			.key(marker_key.as_deref())
 			.note(Some("Mark this moment, which REVIEW lists and cuts a clip around"));
 		// Clips and markers are Replay & review's, so with it off the panic
-		// key is alone.
+		// key is alone, and without the panic key they are.
 		let review = self.controls.mods.on(Mod::Review);
-		let (panic_at, clip_at) = match (tall, review) {
-			(true, _) => (
+		let shown = self.panic_key_shown(snapshot);
+		let (panic_at, clip_at) = match (tall, review, shown) {
+			(true, _, true) => (
 				Rect::from_min_size(room.min, vec2(room.width(), 30.0)),
 				Rect::from_min_size(room.min + vec2(0.0, 38.0), Vec2::splat(30.0)),
 			),
-			(false, true) => (
+			(true, _, false) => (Rect::NOTHING, Rect::from_min_size(room.min, Vec2::splat(30.0))),
+			(false, true, true) => (
 				Rect::from_center_size(room.center() - vec2(0.0, 19.0), vec2(room.width(), 30.0)),
 				Rect::from_center_size(room.center() + vec2(-19.0, 19.0), Vec2::splat(30.0)),
 			),
-			(false, false) => (
+			(false, _, true) => (
 				Rect::from_center_size(room.center(), vec2(room.width(), 30.0)),
 				Rect::NOTHING,
 			),
+			(false, _, false) => (
+				Rect::NOTHING,
+				Rect::from_center_size(room.center() - vec2(19.0, 0.0), Vec2::splat(30.0)),
+			),
 		};
 		let marker_at = clip_at.translate(vec2(38.0, 0.0));
-		if ui.put(panic_at, panic).clicked() {
+		if shown && ui.put(panic_at, panic).clicked() {
 			self.controls.press(&Action::Panic);
 		}
 		if review && ui.put(clip_at, clip).clicked() {
@@ -1098,8 +1104,8 @@ impl Panels {
 		}
 	}
 
-	/// A row for each sound the stream carries, with its meter and mute, and
-	/// the stream's own meter, with Listen.
+	/// A row for each sound the stream carries, with its volume, meter, mute,
+	/// and options, and the stream's own meter, with Listen.
 	fn sound(&mut self, ui: &mut Ui, snapshot: &Snapshot, rect: Rect, tall: bool) {
 		let room = rect.shrink2(vec2(MARGIN, 10.0));
 		let (rows, stream) = match tall {
@@ -1123,76 +1129,8 @@ impl Panels {
 				room.with_min_x(room.right() - 34.0),
 			),
 		};
-		let mut mute = None;
-		ui.scope_builder(UiBuilder::new().max_rect(rows), |ui| {
-			egui::ScrollArea::vertical().id_salt("sound").show(ui, |ui| {
-				ui.spacing_mut().item_spacing.y = 0.0;
-				if snapshot.sounds.is_empty() {
-					ui.label(egui::RichText::new("Nothing on the stream makes a sound yet").color(kit::DIM));
-				}
-				for sound in &snapshot.sounds {
-					let size = vec2(ui.available_width(), SOUND_ROW);
-					ui.allocate_ui_with_layout(size, egui::Layout::left_to_right(Align::Center), |ui| {
-						ui.spacing_mut().item_spacing.x = 8.0;
-						if self.sound_row(ui, sound) {
-							mute = Some(sound);
-						}
-					});
-				}
-			});
-		});
-		if let Some(sound) = mute {
-			let muted = !sound.audio.muted;
-			let verb = if muted { "Mute" } else { "Unmute" };
-			let audio = moq_scene::Audio {
-				muted,
-				..sound.audio.clone()
-			};
-			let engine = self.engine.clone();
-			let mut state = engine.state.lock().unwrap();
-			let label = format!("{verb} `{}`", sound.name);
-			let result = edit(&mut state, label, None, |draft| {
-				draft.set_audio(&sound.name, Some(audio))
-			});
-			drop(state);
-			self.check(result);
-		}
+		self.sound_rows(ui, &snapshot.sounds, rows);
 		self.stream(ui, snapshot, stream, tall);
-	}
-
-	/// A sound's icon, name, meter, and mute, saying whether the mute was
-	/// clicked.
-	fn sound_row(&self, ui: &mut Ui, sound: &Sound) -> bool {
-		let muted = sound.audio.muted;
-		let icon = match (sound.microphone, muted) {
-			(true, false) => Icon::Mic,
-			(true, true) => Icon::MicMuted,
-			(false, false) => Icon::Sound,
-			(false, true) => Icon::Muted,
-		};
-		let ink = if muted { kit::DIM } else { kit::TEXT };
-		let (at, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
-		icon.paint(ui, at, 15.0, kit::DIM);
-		let name = (ui.available_width() * 0.3).clamp(64.0, 120.0);
-		let label = egui::Label::new(egui::RichText::new(&sound.name).font(kit::ui(12.5)).color(ink)).truncate();
-		let left = egui::Layout::left_to_right(Align::Center);
-		ui.allocate_ui_with_layout(vec2(name, SOUND_ROW), left, |ui| {
-			ui.set_min_width(name);
-			ui.add(label);
-		});
-		let (level, peak) = match muted {
-			true => (0.0, 0.0),
-			false => reading(self.levels.sound(&sound.name)),
-		};
-		let along = (ui.available_width() - 24.0 - 8.0).max(16.0);
-		ui.add(kit::Meter::new(level, peak).run(kit::Run::Across, along, 9.0));
-		let name = if muted { "Unmute" } else { "Mute" };
-		let icon = if sound.microphone { Icon::Mic } else { Icon::Sound };
-		let button = IconButton::new(if muted { Icon::MicMuted } else { icon }, name)
-			.lit(muted, kit::CUE)
-			.look(kit::Look::Boxed)
-			.small();
-		kit::named(ui.add(button), &format!("{name} {}", sound.name)).clicked()
 	}
 
 	/// The stream's meter, the mix of the audio scene it carries, with Listen.
@@ -1793,4 +1731,70 @@ pub(super) fn tabs<T: Copy + PartialEq, S: AsRef<str>>(ui: &mut Ui, current: &mu
 	let y = ui.cursor().top();
 	ui.painter()
 		.hline(ui.max_rect().x_range(), y, Stroke::new(1.0, kit::LINE));
+}
+
+/// The room between Studio's switches.
+const SWITCH_GAP: f32 = 8.0;
+
+/// How wide Studio's switches are together, as [`Panels::switches`] draws
+/// them.
+fn switches_width(ui: &Ui, compact: bool) -> f32 {
+	let wide = |texts: &[&str]| {
+		let widest = texts
+			.iter()
+			.map(|text| switch_text(ui, text).size().x)
+			.fold(0.0, f32::max);
+		switch_size(widest, compact)
+	};
+	wide(&["Layers"]) + SWITCH_GAP + wide(&["Editable", "Locked"])
+}
+
+/// A switch's label as drawn.
+fn switch_text(ui: &Ui, text: &str) -> std::sync::Arc<egui::Galley> {
+	ui.painter()
+		.layout_no_wrap(text.to_string(), kit::ui_medium(13.0), kit::TEXT)
+}
+
+/// How wide a switch is with a label `text` wide, or with its icon alone.
+fn switch_size(text: f32, compact: bool) -> f32 {
+	match compact {
+		true => 32.0,
+		false => 12.0 + 15.0 + 7.0 + text + 13.0,
+	}
+}
+
+/// A switch on the title bar from `at`, its left middle: `icon` and `text`,
+/// or the icon alone if `compact`, lit while `on`, saying `tip` under the
+/// pointer.
+fn switch(ui: &mut Ui, at: egui::Pos2, icon: Icon, text: &str, on: bool, tip: &str, compact: bool) -> egui::Response {
+	let galley = switch_text(ui, text);
+	let size = vec2(switch_size(galley.size().x, compact), 30.0);
+	let rect = Rect::from_min_size(pos2(at.x, at.y - size.y / 2.0), size);
+	let response = ui.interact(rect, ui.id().with(("switch", text)), Sense::click());
+	response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, text));
+	let response = kit::tip(response, tip, None);
+	let fill = match (on, response.hovered()) {
+		(true, _) => kit::P3,
+		(false, true) => kit::P2,
+		(false, false) => egui::Color32::TRANSPARENT,
+	};
+	let painter = ui.painter();
+	painter.rect(
+		rect,
+		kit::RADIUS,
+		fill,
+		Stroke::new(1.0, kit::LINE),
+		egui::StrokeKind::Inside,
+	);
+	let ink = if on || response.hovered() { kit::TEXT } else { kit::DIM };
+	let icon_at = match compact {
+		true => Rect::from_center_size(rect.center(), Vec2::splat(15.0)),
+		false => Rect::from_min_size(pos2(rect.left() + 12.0, rect.center().y - 7.5), Vec2::splat(15.0)),
+	};
+	icon.paint(ui, icon_at, 15.0, ink);
+	if !compact {
+		let text_at = pos2(icon_at.right() + 7.0, rect.center().y - galley.size().y / 2.0);
+		ui.painter().galley(text_at, galley, ink);
+	}
+	response
 }

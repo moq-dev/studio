@@ -1,4 +1,4 @@
-//! The BUILD page's inspector, which follows the selection: the selected
+//! The Studio page's inspector, which follows the selection: the selected
 //! layer's place, shape, look, and source, and where else it shows, with its
 //! keyframes under Animate; with no layer selected, the scene's own settings.
 
@@ -134,7 +134,7 @@ impl Panels {
 				asked = Some(Asked::Act(LayerAction::Slot(slot)));
 			}
 		}
-		// Where it is shown, and its place in the picture BUILD edits, for a
+		// Where it is shown, and its place in the picture Studio edits, for a
 		// layer drawn in both.
 		let format = self.format;
 		if collection.dual(&picked.layer) {
@@ -172,7 +172,7 @@ impl Panels {
 		let placement = keep::placement(&state, &picked.layer, &item, Format::Landscape);
 		let drawn = keep::placement(&state, &picked.layer, &item, format);
 		let mut rect = drawn.map_or(rest.rect, |placement| placement.drawn(rest.rect));
-		// A layer the picture BUILD edits never shows has no place there.
+		// A layer the picture Studio edits never shows has no place there.
 		let placeable = item.shown_in(collection.format_of(&picked.layer, format));
 		if !placeable {
 			ui.label(
@@ -804,7 +804,7 @@ impl Panels {
 		Some((next, label, gesture))
 	}
 
-	/// The settings of the scene BUILD edits, with no layer selected: its
+	/// The settings of the scene Studio edits, with no layer selected: its
 	/// name, whether it is safe or published, and how every scene goes on air.
 	fn scene_inspector(&mut self, ui: &mut Ui) {
 		let engine = self.engine.clone();

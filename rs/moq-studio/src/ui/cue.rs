@@ -66,7 +66,7 @@ impl Corner {
 enum Ask {
 	Take,
 	Auto,
-	/// Open the cued scene off air on BUILD.
+	/// Open the cued scene off air on Studio.
 	Edit,
 	/// Leave nothing cued.
 	Clear,

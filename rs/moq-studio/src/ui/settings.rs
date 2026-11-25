@@ -985,7 +985,7 @@ impl Panels {
 				Some(failure) => (kit::CUE, format!("Tokens are not renewing: {failure}")),
 				None => (
 					kit::OK,
-					format!("Guests join the room `{}`, from Add on BUILD.", room.path()),
+					format!("Guests join the room `{}`, from Add on Studio.", room.path()),
 				),
 			},
 			(None, None) => (

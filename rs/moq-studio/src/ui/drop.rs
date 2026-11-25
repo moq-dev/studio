@@ -53,7 +53,7 @@ impl Arrival {
 struct Landing {
 	/// The layers it joins.
 	layer: Layer,
-	/// The picture it lands in, BUILD's while it edits a scene drawn in both,
+	/// The picture it lands in, Studio's while it edits a scene drawn in both,
 	/// and that picture's canvas.
 	format: Format,
 	canvas: Canvas,
@@ -701,7 +701,7 @@ impl Panels {
 	/// Show a failure at a drop at `at` in canvas pixels, on the picture if
 	/// it shows, or else as the window's message.
 	fn dropped_failed(&mut self, at: [f32; 2], result: anyhow::Result<()>) {
-		if self.page != Page::Build {
+		if self.page != Page::Studio {
 			self.check(result);
 			return;
 		}
