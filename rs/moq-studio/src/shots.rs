@@ -2071,31 +2071,43 @@ fn the_studio_locks_adds_and_mutes() {
 		studio.selected()
 	};
 
-	// Both clicks in one frame: the harness steps a quarter second per queued
-	// event, past egui's double-click delay. The steps after it outlast a
-	// triple-click's, so the next double-click is not one.
-	let double_click = |harness: &mut Harness<'_, Window>| {
-		let pos = harness.get_by_label("Canvas").rect().center();
-		let events = &mut harness.input_mut().events;
-		events.push(egui::Event::PointerMoved(pos));
-		for pressed in [true, false, true, false] {
-			events.push(egui::Event::PointerButton {
-				pos,
-				button: egui::PointerButton::Primary,
-				pressed,
-				modifiers: egui::Modifiers::NONE,
-			});
+	// At `at` across the picture, a click a frame, a twentieth of a second
+	// apart where the harness would step a quarter second, past egui's
+	// double-click delay. The steps after it outlast a triple-click's, so the
+	// next double-click is not one.
+	let double_click = |harness: &mut Harness<'_, Window>, at: egui::Vec2| {
+		let picture = harness.get_by_label("Canvas").rect();
+		let pos = picture.min + at * picture.size();
+		let start = harness.ctx.input(|input| input.time);
+		for click in 1..=2 {
+			let input = harness.input_mut();
+			input.time = Some(start + 0.05 * f64::from(click));
+			input.events.push(egui::Event::PointerMoved(pos));
+			for pressed in [true, false] {
+				input.events.push(egui::Event::PointerButton {
+					pos,
+					button: egui::PointerButton::Primary,
+					pressed,
+					modifiers: egui::Modifiers::NONE,
+				});
+			}
+			harness.step();
 		}
+		// The harness's input keeps a time it is given, which would stop the clock.
+		harness.input_mut().time = None;
 		harness.run_steps(3);
 	};
 	let cropping = |harness: &Harness<'_, Window>| harness.query_by_label("Crop the layer from the top").is_some();
+	let center = egui::vec2(0.5, 0.5);
+	// The bar along the bottom, over the host filling the picture.
+	let bar = egui::vec2(530.0 / 1920.0, 920.0 / 1080.0);
 
 	harness.get_by_label("Editable").click();
 	harness.run_steps(2);
 	harness.get_by_label("Canvas").click();
 	harness.run_steps(2);
 	assert!(!selected(&mut harness), "locked, the picture selects nothing");
-	double_click(&mut harness);
+	double_click(&mut harness, center);
 	assert!(
 		!selected(&mut harness) && !cropping(&harness),
 		"locked, a double-click crops nothing"
@@ -2113,16 +2125,30 @@ fn the_studio_locks_adds_and_mutes() {
 	harness.run_steps(2);
 	assert!(selected(&mut harness), "editable, a click selects the layer under it");
 	assert!(!cropping(&harness));
-	double_click(&mut harness);
-	assert!(cropping(&harness), "a double-click starts cropping the layer");
+	harness.key_press(egui::Key::Escape);
+	harness.run_steps(2);
+	assert!(!selected(&mut harness));
+	// Its first click selects the bar, opening the inspector beside the
+	// picture, which moves it out from under the pointer before the second.
+	double_click(&mut harness, bar);
+	assert!(
+		cropping(&harness) && selected(&mut harness),
+		"a double-click starts cropping the layer"
+	);
+	let picture = harness.get_by_label("Canvas").rect();
+	let top = harness.get_by_label("Crop the layer from the top").rect().center().y;
+	assert!(
+		top > picture.center().y,
+		"it crops the bar the first click selected, not the host the second landed on"
+	);
 	harness.key_press(egui::Key::Escape);
 	harness.run_steps(2);
 	assert!(
 		!cropping(&harness) && selected(&mut harness),
 		"Escape ends the crop first"
 	);
-	double_click(&mut harness);
-	double_click(&mut harness);
+	double_click(&mut harness, bar);
+	double_click(&mut harness, bar);
 	assert!(
 		!cropping(&harness) && selected(&mut harness),
 		"a second double-click ends it"

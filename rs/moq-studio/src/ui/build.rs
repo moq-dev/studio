@@ -456,16 +456,17 @@ impl Panels {
 					let at = response.interact_pointer_pos().map(|pos| view.point(pos));
 					at.is_some_and(|at| snap::Grab::at(&items[index].rect, at, reach).is_some())
 				});
-			if !held {
+			// A double-click starts or ends cropping what its first click
+			// selected, as the toolbar's Crop does, without hitting again:
+			// that selection may have opened the inspector, moving the
+			// picture under the pointer.
+			let twice = response.double_clicked() && self.selection.is_some();
+			if !held && !twice {
 				let picked = response.interact_pointer_pos().and_then(hit);
-				// Its first click selected the layer, so a double-click on one
-				// starts cropping it, or ends the crop, as the toolbar's Crop
-				// does. The pointer passes through a locked one, as a click's.
-				let twice = response.double_clicked() && picked.is_some();
 				self.select(picked.map(|(index, _)| shown[index].0.clone()));
-				if twice {
-					self.cropping = !self.cropping;
-				}
+			}
+			if twice {
+				self.cropping = !self.cropping;
 			}
 		}
 		if response.drag_started()
