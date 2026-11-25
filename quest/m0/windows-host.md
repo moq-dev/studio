@@ -46,9 +46,12 @@ host to dotfiles' `HOSTS.md` in a dotfiles PR.
 
 The agent steps once the maintainer has it on Tailscale with T3 Code: install
 the toolchain, build with `quest gate cargo build -p moq-studio --features
-capture`, start the studio and check its setup and Devices panel
-(`rs/moq-studio/src/devices.rs`) list the camera, displays, windows, and the
-microphone, then publish once with each GPU's encoder. The PR records the host
+capture`, start the studio and check that Add (`rs/moq-studio/src/devices.rs`
+enumerates its sources) lists the camera, displays, windows, and the
+microphone, then publish once per vendor. Media Foundation uses the first
+hardware encoder that activates, so each run leaves only one vendor's
+encoder available (for example by disabling the other adapter in Device
+Manager) and records which GPU encoded the stream. The PR records the host
 facts above, refreshed.
 
 ## Hosts
