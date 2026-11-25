@@ -203,6 +203,14 @@ fn make(new: New, collection: &Collection) -> anyhow::Result<Made> {
 	};
 	let path = made.path.clone();
 	let result = (|| {
+		// A history beside no scene file is a removed or moved show's, which
+		// the user may still want: theirs to move aside, not ours to delete.
+		let history = autosave::history_path(&path);
+		anyhow::ensure!(
+			!exists(&history)?,
+			"{} is there without its scene file: move it aside to make a new show here",
+			history.display()
+		);
 		let settings = stream::path(&path);
 		// Kept out of the app's storage, where nobody would find them.
 		if in_storage(&path)
@@ -224,14 +232,6 @@ fn make(new: New, collection: &Collection) -> anyhow::Result<Made> {
 				autosave::write_file(&settings, &text).with_context(|| format!("writing {}", settings.display()))?;
 				made.wrote.push((file, before, text));
 			}
-		}
-		// A history beside no scene file is a removed show's.
-		let history = autosave::history_path(&path);
-		match std::fs::remove_file(&history) {
-			Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
-				return Err(anyhow::Error::from(err).context(format!("removing {}", history.display())));
-			}
-			_ => {}
 		}
 		let text = collection.to_toml()?;
 		// What a link there names, which a write makes and an undo removes,
@@ -753,9 +753,9 @@ mod tests {
 		other().try_lock().expect("free once the claim ends");
 	}
 
-	/// A new show takes the next free name with its collection, in place of a
-	/// removed show's history; one named on the command line that is there
-	/// is left as it is, with nothing to take back.
+	/// A new show takes the next free name with its collection, and is
+	/// refused beside a moved show's history; one named on the command line
+	/// that is there is left as it is, with nothing to take back.
 	#[test]
 	fn makes_a_new_show() {
 		let dir = tempfile::tempdir().unwrap();
@@ -775,11 +775,17 @@ mod tests {
 
 		let named = dir.path().join("Talk.toml");
 		std::fs::write(autosave::history_path(&named), b"\xff not a history").unwrap();
-		assert_eq!(make(New::At(named.clone()), &collection).unwrap().path, named);
 		assert!(
-			!autosave::history_path(&named).exists(),
-			"the removed show's history goes"
+			make(New::At(named.clone()), &collection).is_err(),
+			"a moved show's history is not ours to delete"
 		);
+		assert_eq!(
+			std::fs::read(autosave::history_path(&named)).unwrap(),
+			b"\xff not a history"
+		);
+		assert!(!named.exists(), "nothing is made");
+		std::fs::remove_file(autosave::history_path(&named)).unwrap();
+		assert_eq!(make(New::At(named.clone()), &collection).unwrap().path, named);
 		Autosave::open(named.clone()).expect("the new show opens");
 
 		std::fs::write(&named, "kept").unwrap();

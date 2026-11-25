@@ -41,7 +41,8 @@ cargo run --release -p moq-studio --features capture,openh264
   [first launch](#first-launch) creates one in the app's storage, and opens
   straight into the studio. Name a show to open it instead:
   `moq-studio show.toml`. A show is its scene file, created as a new show if
-  it does not exist yet. Changes are saved to it a second after you stop
+  it does not exist yet (unless a `show.history.toml` is still beside it,
+  which the studio leaves for you to move aside). Changes are saved to it a second after you stop
   editing, with no save step.
 - Nothing is published until you [go live](#going-live) from the window, and
   you end the stream from it too. Until then the studio composes, previews,
