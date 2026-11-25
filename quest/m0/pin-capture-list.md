@@ -10,7 +10,7 @@ changes.
 ## Plan
 
 Planned 2026-11-09 (maintainer, /quest-plan) for the
-[Add page](/quest/m0/ux/add.md), which shows pictures where the Devices panel
+[Add page](/quest/m0/ux/add-pictures.md), which shows pictures where the Devices panel
 shows names. Advance it with `just upgrade-moq` in its own PR, fixing whatever
 the new API breaks in `rs/moq-studio/src/devices.rs`.
 
