@@ -487,8 +487,7 @@ fn pasted(dir: &Path) -> anyhow::Result<Prepared> {
 impl Panels {
 	/// Place what arrived this frame on the picture at `view`, edited as
 	/// `canvas`, where it arrived on it, and draw what a drag over the window
-	/// would become, what is being read, the offer to replace a file, and
-	/// the last failure at a drop.
+	/// would become, what is being read, and the offer to replace a file.
 	pub(super) fn drops_on_picture(&mut self, ui: &mut Ui, state: &mut State, rect: egui::Rect, canvas: Canvas) {
 		if !rect.is_positive() {
 			return;
@@ -521,11 +520,24 @@ impl Panels {
 				kit::ACCENT,
 			);
 		}
-		if let Some(fault) = self.fault(&Spot::Dropped) {
-			let [x, y] = self.dropping.failed_at;
-			chip(ui, &painter, view.pos(x, y) + CHIP, fault, Icon::Close, kit::ERR);
-		}
 		self.offer(ui, state, &view);
+	}
+
+	/// Draw the last failure at a drop on the picture at `rect`, edited as
+	/// `canvas`, where it landed, or just under the quick start's `cards`
+	/// while they show, so they never cover it. Drawn after them.
+	pub(super) fn dropped_fault(&self, ui: &Ui, rect: egui::Rect, canvas: Canvas, cards: Option<egui::Rect>) {
+		let Some(fault) = self.fault(&Spot::Dropped) else {
+			return;
+		};
+		let at = match cards {
+			Some(cards) => cards.left_bottom() + egui::vec2(0.0, 12.0),
+			None => {
+				let [x, y] = self.dropping.failed_at;
+				View::new(rect, canvas).pos(x, y) + CHIP
+			}
+		};
+		chip(ui, &ui.painter_at(rect), at, fault, Icon::Close, kit::ERR);
 	}
 
 	/// Refuse the files dropped this frame onto the locked picture at

@@ -564,6 +564,12 @@ impl Studio {
 		self.panels.devices.pending = None;
 	}
 
+	/// Land the file at `path` on the picture, as the Media card's dialog
+	/// does once a file is picked.
+	pub(crate) fn pick_file(&mut self, path: std::path::PathBuf) {
+		self.panels.dropping.arrive(drop::Arrival::File(path), None);
+	}
+
 	/// Open Settings at `setting`, as the gear would.
 	pub(crate) fn open(&mut self, setting: Setting) {
 		self.panels.setting = Some(setting);
