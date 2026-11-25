@@ -115,8 +115,8 @@ reference mock-ups live in [`mock/overhaul.html`](/quest/m0/ux/mock/overhaul.htm
   last show in app data immediately with a clean empty-canvas one-click
   quick-start prompt, moving show switching, creation, and export into the
   title bar's Show menu (rejected: one-screen quick starter wizard on first
-  launch; keeping the Library landing screen and 4-step wizard). See
-  [First run](/quest/m0/ux/first-run.md).
+  launch; keeping the Library landing screen and 4-step wizard). Done in
+  [moq-dev/studio#237](https://github.com/moq-dev/studio/pull/237).
 - **Adding sources & editing layers:** ✅ one-click immediate Add from an
   auto-populated modal/popover with smart non-overlapping placement and native
   file pickers, plus a contextual right-hand Inspector that opens only while a
