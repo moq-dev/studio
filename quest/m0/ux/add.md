@@ -55,6 +55,15 @@ Updated 2026-11-22 with the maintainer (/quest-plan):
   OS permission) explains why and offers the action to fix it instead of
   failing silently.
 
+Found 2026-11-25 trying the first launch, kept here (✅ wait for this quest,
+rejected: an interim Add tab fix now):
+
+- The "Drop or paste anything" rows look like buttons and do nothing.
+- The quick start's Camera, Screen, Media, and Web cards were the clearest way
+  to add a source, and they vanish once the picture has one; the Add page
+  offers the same cards.
+- A camera plugged in after launch never appeared until **Refresh**.
+
 Human check: real cameras, capture cards, and microphones, OS permission
 prompts, and verifying 1-click placement feels right over a live screen.
 
