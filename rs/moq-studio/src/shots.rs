@@ -49,23 +49,27 @@ enum Open {
 /// Where a view turns the studio.
 enum View {
 	Page(Page),
-	/// LIVE on a new show, as the first launch opens it: one empty scene, with
-	/// a camera and a screen to add.
+	/// Studio on a new show, as the first launch opens it: one empty scene,
+	/// with a camera and a screen to add.
 	FirstLaunch,
+	/// Studio with its picture locked and the layers' rail closed.
+	Locked,
+	/// Studio with the options of the sound called this open from its gear.
+	SoundOptions(&'static str),
 	/// The MIX page in a view, with the strip of the sound named open.
 	Mix(MixView, Option<&'static str>),
 	/// MIX with Headphones' menu open, as a right click on its strip opens it.
 	MixMenu,
-	/// The BUILD page with `side` and `inspect` shown, and the layer of the
+	/// The Studio page with `side` and `inspect` shown, and the layer of the
 	/// scene on program at `index`, front first, selected.
 	Build {
 		side: Side,
 		inspect: Inspect,
 		index: Option<usize>,
 	},
-	/// BUILD with the host's layer selected and its row's menu open.
+	/// Studio with the host's layer selected and its row's menu open.
 	Menu,
-	/// BUILD with the host's layer selected, its inspector scrolled to how
+	/// Studio with the host's layer selected, its inspector scrolled to how
 	/// viewers may treat it, published independently.
 	Published,
 	/// The edit history, under the title bar's undo, after an edit.
@@ -93,13 +97,13 @@ enum View {
 	Graph,
 	/// The stream's health in detail.
 	Health,
-	/// The LIVE page after a mute, with the health dot's popover open and the
+	/// Studio after a mute, with the health dot's popover open and the
 	/// pointer on undo, which names the mute.
 	Hover,
 	/// GO LIVE pressed: on a show with a relay, its popover waiting on the
 	/// check, started over; on one without, asking for a relay.
 	Going,
-	/// On air, at the LIVE page.
+	/// On air, at the Studio page.
 	OnAir,
 	/// On air, the clock clicked, asking before it ends the stream.
 	EndConfirm,
@@ -114,23 +118,23 @@ enum View {
 		replays: bool,
 		markers: bool,
 	},
-	/// A page in Studio mode, with `Interview` cued.
-	Cued(Page),
-	/// A scene, by name, open for editing off air on BUILD.
+	/// Studio in Studio mode, with `Interview` cued.
+	Cued,
+	/// A scene, by name, open for editing off air.
 	OffAir(&'static str),
-	/// BUILD with the front layer selected, once it kept out of the way:
+	/// Studio with the front layer selected, once it kept out of the way:
 	/// moved off what mattered and landed. If `dual`, with the show going
 	/// out in both formats.
 	KeepClear {
 		dual: bool,
 	},
-	/// BUILD with the game's window gone dark selected, and what to do about
+	/// Studio with the game's window gone dark selected, and what to do about
 	/// it open from its badge.
 	Dark,
-	/// BUILD with the host's camera stalled selected, and what to do about it
+	/// Studio with the host's camera stalled selected, and what to do about it
 	/// open from its badge.
 	Stalled,
-	/// BUILD with no layer selected, after the guest `Ibis` appears on their
+	/// Studio with no layer selected, after the guest `Ibis` appears on their
 	/// own in the scene on program.
 	Joined,
 	/// The multiview, as its own window draws it, with the host and the
@@ -141,22 +145,21 @@ enum View {
 		/// Whether the host's picture stalled.
 		stalled: bool,
 	},
-	/// BUILD's Add tab on the drop views' show, with a file dragged or
+	/// Studio's Add tab on the drop views' show, with a file dragged or
 	/// dropped on the picture.
 	Drop(Drop),
-	/// On the dual-format show, `page` with the layer of the scene on
-	/// program at `index`, front first, selected, BUILD editing `format`'s
-	/// picture, in Studio mode with the scene `cued` cued, if any, and the
-	/// scene `off_air` open off air, if any.
+	/// On the dual-format show, the layer of the scene on program at
+	/// `index`, front first, selected, Studio editing `format`'s picture, in
+	/// Studio mode with the scene `cued` cued, if any, and the scene `off_air`
+	/// open off air, if any.
 	Dual {
-		page: Page,
 		format: moq_scene::Format,
 		index: Option<usize>,
 		cued: Option<&'static str>,
 		off_air: Option<&'static str>,
 	},
-	/// The command palette, open by its key over LIVE with a few keys bound,
-	/// with what is typed into it.
+	/// The command palette, open by its key over Studio with a few keys
+	/// bound, with what is typed into it.
 	Palette(&'static str),
 	/// Settings, Mods, each switched on, as a power user has it.
 	ModsOn,
@@ -164,12 +167,11 @@ enum View {
 	ModsAt(&'static str),
 }
 
-/// The studio on the dual-format views' show, at the mock-ups' size, turned
-/// to `page` with the camera's layer selected, editing `format`'s picture.
-fn dual(page: Page, format: moq_scene::Format) -> Open {
+/// The studio on the dual-format views' show, at the mock-ups' size, with
+/// the camera's layer selected, editing `format`'s picture.
+fn dual(format: moq_scene::Format) -> Open {
 	Open::Studio {
 		view: View::Dual {
-			page,
 			format,
 			index: Some(2),
 			cued: None,
@@ -187,7 +189,7 @@ impl View {
 		match self {
 			Self::Mix(..) | Self::MixMenu => vec![Mod::Audio],
 			Self::Review { .. } => vec![Mod::Review],
-			Self::Cued(_) | Self::Dual { cued: Some(_), .. } => vec![Mod::Studio],
+			Self::Cued | Self::Dual { cued: Some(_), .. } => vec![Mod::Studio],
 			Self::Multiview { live: false, .. } => vec![Mod::Multiview],
 			Self::Multiview { live: true, .. } => vec![Mod::Multiview, Mod::Studio],
 			Self::Setting(Setting::Remote) | Self::Paired => vec![Mod::Remote],
@@ -213,7 +215,7 @@ enum Drop {
 	Placed,
 }
 
-/// The studio on the drop views' show, turned to BUILD's Add tab with `drop`.
+/// The studio on the drop views' show, turned to Studio's Add tab with `drop`.
 fn dropping(drop: Drop) -> Open {
 	Open::Studio {
 		view: View::Drop(drop),
@@ -223,7 +225,7 @@ fn dropping(drop: Drop) -> Open {
 	}
 }
 
-/// BUILD with the host's layer, the middle of the scene on program's three,
+/// Studio with the host's layer, the middle of the scene on program's three,
 /// selected, as the mock-up's.
 const BUILD: View = View::Build {
 	side: Side::Layers,
@@ -232,7 +234,7 @@ const BUILD: View = View::Build {
 };
 
 /// The studio on the shots' show, at the mock-ups' size, turned to `view`.
-fn studio(view: View) -> Open {
+fn on_show(view: View) -> Open {
 	Open::Studio {
 		view,
 		size: SIZE,
@@ -241,7 +243,7 @@ fn studio(view: View) -> Open {
 	}
 }
 
-/// [`studio`], with a relay to go live on.
+/// [`on_show`], with a relay to go live on.
 fn relayed(view: View) -> Open {
 	Open::Studio {
 		view,
@@ -301,37 +303,41 @@ views! {
 	kit_sheet: Still, Open::Kit { sheet: true };
 	/// A new show, as the first launch opens it: the quick start on the empty
 	/// picture, its cards naming the camera and screen they add.
-	first_launch: Still, studio(View::FirstLaunch);
-	/// The LIVE page: the picture as large as the window allows, the pads, the
-	/// panic key, and the sound.
-	live: Still, studio(View::Page(Page::Live));
+	first_launch: Still, on_show(View::FirstLaunch);
+	/// The Studio page: the picture, editable, with the layers' rail beside
+	/// it, and the slim strip of the pads, the panic key, and each sound's
+	/// volume, meter, mute, and gear.
+	studio: Still, on_show(View::Page(Page::Studio));
+	/// Studio locked against stray edits with the layers' rail closed: the
+	/// picture as large as the window allows.
+	studio_locked: Still, on_show(View::Locked);
+	/// A sound's options from its gear in the strip: monitoring it alone in
+	/// headphones, its delay, and its pan.
+	audio_popover: Still, on_show(View::SoundOptions("guest"));
 	/// What the title bar's controls show under the pointer.
-	live_hover: Still, studio(View::Hover);
-	/// A portrait show: the pages in a sidebar, and the scenes and the sound
-	/// in columns beside the picture.
-	live_portrait: Still, Open::Studio { view: View::Page(Page::Live), size: SIZE, show: "portrait.toml", relay: false };
+	studio_hover: Still, on_show(View::Hover);
+	/// A portrait show: the scenes and the sound in columns beside the
+	/// picture.
+	studio_portrait: Still, Open::Studio { view: View::Page(Page::Studio), size: SIZE, show: "portrait.toml", relay: false };
 	/// A window snapped beside a game stacks the picture, the scenes, and the
 	/// sound.
-	live_compact: Still, Open::Studio { view: View::Page(Page::Live), size: HALF, show: "show.toml", relay: false };
-	/// Studio mode: the cued scene's pad turns amber, and NEXT docks on the
-	/// live picture with TAKE and AUTO.
-	live_studio: Still, studio(View::Cued(Page::Live));
-	/// BUILD with the host's layer selected: its row in Layers, its handles
+	studio_compact: Still, Open::Studio { view: View::Page(Page::Studio), size: HALF, show: "show.toml", relay: false };
+	/// Studio with the host's layer selected: its row in Layers, its handles
 	/// and toolbar on the picture, and its inspector.
-	build: Still, studio(BUILD);
-	/// BUILD with no layer selected: the inspector shows the scene.
-	build_scene: Still, studio(View::Build { side: Side::Layers, inspect: Inspect::Layer, index: None });
+	build: Still, on_show(BUILD);
+	/// Studio with no layer selected: the inspector shows the scene.
+	build_scene: Still, on_show(View::Build { side: Side::Layers, inspect: Inspect::Layer, index: None });
 	/// The selected layer's keyframes.
-	build_animate: Still, studio(View::Build { side: Side::Layers, inspect: Inspect::Animate, index: Some(1) });
+	build_animate: Still, on_show(View::Build { side: Side::Layers, inspect: Inspect::Animate, index: Some(1) });
 	/// What can be added: sources no layer shows, devices, by hand, and
 	/// guests.
-	build_add: Still, studio(View::Build { side: Side::Add, inspect: Inspect::Layer, index: None });
+	build_add: Still, on_show(View::Build { side: Side::Add, inspect: Inspect::Layer, index: None });
 	/// A layer row's menu, as a right click opens it.
-	build_menu: Still, studio(View::Menu);
+	build_menu: Still, on_show(View::Menu);
 	/// A source published independently selected: under its switch in the
 	/// inspector, whether viewers may switch it off and its priority for them.
 	build_published: Still, Open::Studio { view: View::Published, size: SIZE, show: "published.toml", relay: false };
-	/// BUILD in a window snapped beside a game: the inspector is a tab beside
+	/// Studio in a window snapped beside a game: the inspector is a tab beside
 	/// Layers and Add.
 	build_compact: Still, Open::Studio { view: BUILD, size: HALF, show: "show.toml", relay: false };
 	/// A scene laid out by slots: each slot outlined with the role or guest
@@ -345,12 +351,13 @@ views! {
 	/// The camera's layer selected in its slot: no handles to resize it, its
 	/// slot in the inspector, and the source filling its role.
 	build_slots_layer: Still, slotted(View::Build { side: Side::Layers, inspect: Inspect::Layer, index: Some(2) });
-	/// BUILD in Studio mode edits the scene on air, with NEXT docked on it.
-	build_studio: Still, studio(View::Cued(Page::Build));
+	/// Studio mode: the cued scene's pad turns amber, and NEXT docks on the
+	/// picture, edited on air, with TAKE and AUTO.
+	build_studio: Still, on_show(View::Cued);
 	/// A scene open off air: the frame turns amber, and the live picture
 	/// shrinks to a corner beside the banner that takes it live or goes back.
-	/// Layers lists the scene's own, as always on top is drawn on program.
-	build_off_air: Still, studio(View::OffAir("Break"));
+	/// Layers lists the scene's own alone.
+	build_off_air: Still, on_show(View::OffAir("Break"));
 	/// A scene that cannot go on air opens off air too, its Take it live
 	/// dimmed, saying why under the pointer.
 	build_off_air_refused: Still, Open::Studio { view: View::OffAir("Vertical"), size: SIZE, show: "published.toml", relay: false };
@@ -385,36 +392,29 @@ views! {
 	build_drop_refused: Still, dropping(Drop::Refused);
 	/// The logo dropped lands where it was let go, at its own size, selected.
 	build_dropped: Still, dropping(Drop::Placed);
-	/// A show going out in both formats: the landscape and portrait
-	/// pictures side by side, each in its tally frame with its size under
-	/// it, where the selected camera is shown between them, and each pad
-	/// showing the pair, as the `dual` mock-up frame has it.
-	live_dual: Still, dual(Page::Live, moq_scene::Format::Landscape);
-	/// It in a half-size window: the chip of where the camera is shown keeps
-	/// clear of what is said under the landscape picture, without its words.
-	live_dual_compact: Still, Open::Studio { view: View::Dual { page: Page::Live, format: moq_scene::Format::Landscape, index: Some(2), cued: None, off_air: None }, size: HALF, show: "dual.toml", relay: false };
+	/// A show going out in both formats: the landscape picture edited, the
+	/// portrait one small beside it, and under them the tabs that pick which
+	/// and where the selected camera is shown, which the inspector says too,
+	/// and each pad showing the pair, as the `dual` mock-up frame has it.
+	build_dual: Still, dual(moq_scene::Format::Landscape);
+	/// It in a half-size window: the chip keeps clear of the tabs, or leaves
+	/// the choice to the inspector where there is no room.
+	build_dual_compact: Still, Open::Studio { view: View::Dual { format: moq_scene::Format::Landscape, index: Some(2), cued: None, off_air: None }, size: HALF, show: "dual.toml", relay: false };
 	/// Studio mode on it: NEXT shows the cued scene in both formats.
-	live_dual_studio: Still, Open::Studio { view: View::Dual { page: Page::Live, format: moq_scene::Format::Landscape, index: None, cued: Some("Guests"), off_air: None }, size: SIZE, show: "dual.toml", relay: false };
-	/// BUILD on it: the landscape picture edited, the portrait one small
-	/// beside it, and under them the tabs that pick which and where the
-	/// selected camera is shown, which the inspector says too.
-	build_dual: Still, dual(Page::Build, moq_scene::Format::Landscape);
-	/// BUILD on it in a half-size window: the chip keeps clear of the tabs,
-	/// or leaves the choice to the inspector where there is no room.
-	build_dual_compact: Still, Open::Studio { view: View::Dual { page: Page::Build, format: moq_scene::Format::Landscape, index: Some(2), cued: None, off_air: None }, size: HALF, show: "dual.toml", relay: false };
-	/// BUILD editing the portrait picture: the camera's handles at its
-	/// portrait place, the landscape picture small beside it.
-	build_dual_portrait: Still, dual(Page::Build, moq_scene::Format::Portrait);
+	build_dual_studio: Still, Open::Studio { view: View::Dual { format: moq_scene::Format::Landscape, index: None, cued: Some("Guests"), off_air: None }, size: SIZE, show: "dual.toml", relay: false };
+	/// Editing the portrait picture: the camera's handles at its portrait
+	/// place, the landscape picture small beside it.
+	build_dual_portrait: Still, dual(moq_scene::Format::Portrait);
 	/// A scene laid out by slots on it, open off air in portrait: its own
 	/// arrangement there, a row, which the inspector picks.
-	build_dual_slots: Still, Open::Studio { view: View::Dual { page: Page::Build, format: moq_scene::Format::Portrait, index: None, cued: None, off_air: Some("Guests") }, size: SIZE, show: "dual.toml", relay: false };
+	build_dual_slots: Still, Open::Studio { view: View::Dual { format: moq_scene::Format::Portrait, index: None, cued: None, off_air: Some("Guests") }, size: SIZE, show: "dual.toml", relay: false };
 	/// Settings, Show on it: Both at once on.
 	settings_show_dual: Still, Open::Studio { view: View::Setting(Setting::Show), size: SIZE, show: "dual.toml", relay: false };
 	/// GO LIVE's popover on it: both broadcasts to each relay, and the
 	/// encoder and connection checked for both pictures.
 	golive_dual: Live, Open::Studio { view: View::Going, size: SIZE, show: "dual.toml", relay: true };
-	/// On air on it: both pictures in their ON AIR frames, each with what
-	/// its video sends under it.
+	/// On air on it: the landscape picture edited in its ON AIR frame, the
+	/// portrait one small beside it.
 	on_air_dual: Live, Open::Studio { view: View::OnAir, size: SIZE, show: "dual.toml", relay: true };
 	/// MIX: a strip per sound and per audio scene, with their sends, and a
 	/// small live picture in the sound's place.
@@ -431,25 +431,25 @@ views! {
 	mix_compact: Still, mixing(MixView::Strips, None, HALF);
 	/// REVIEW off air: the program keeps no past until it goes live, which the
 	/// strip and both actions say, beside this show's recordings and clips.
-	review: Still, studio(View::Review { picked: false, replays: false, markers: false });
+	review: Still, on_show(View::Review { picked: false, replays: false, markers: false });
 	/// REVIEW with the last 30 seconds held: a stretch picked between the
 	/// handles, the head inside it, the picture under the head large, and
 	/// Replay saying why it cannot play without a replay source.
-	review_picked: Still, studio(View::Review { picked: true, replays: false, markers: false });
+	review_picked: Still, on_show(View::Review { picked: true, replays: false, markers: false });
 	/// REVIEW on a show with two replay sources: which one Replay plays in is
 	/// picked under the speed, in place of its note.
-	review_into: Still, studio(View::Review { picked: true, replays: true, markers: false });
+	review_into: Still, on_show(View::Review { picked: true, replays: true, markers: false });
 	/// REVIEW with markers: each still in the last 30 seconds a numbered
 	/// pennant on the strip, and the list over the recordings, the newest
 	/// first, one named, and the oldest too old to clip around.
-	review_markers: Still, studio(View::Review { picked: true, replays: false, markers: true });
+	review_markers: Still, on_show(View::Review { picked: true, replays: false, markers: true });
 	/// The edit history, open under undo.
-	history: Still, studio(View::History);
+	history: Still, on_show(View::History);
 	/// The health dot's details off air: the encoders and their timings.
-	health: Live, studio(View::Health);
+	health: Live, on_show(View::Health);
 	/// Settings, Show: the format, the canvas size and frame rate by name,
 	/// and the scene sizes behind their disclosure.
-	settings_show: Still, studio(View::Setting(Setting::Show));
+	settings_show: Still, on_show(View::Setting(Setting::Show));
 	/// Settings, Show in the smallest window: each row's control under its
 	/// name, and the categories as icons.
 	settings_compact: Still, Open::Studio { view: View::Setting(Setting::Show), size: crate::ui::MIN_SIZE, show: "show.toml", relay: false };
@@ -458,50 +458,50 @@ views! {
 	/// On air, a new canvas size waits for a yes before it restarts the video.
 	settings_restart: Live, relayed(View::Restart);
 	/// Custom's editor: a width, height, and frame rate of the host's own.
-	settings_custom: Still, studio(View::CustomCanvas);
+	settings_custom: Still, on_show(View::CustomCanvas);
 	/// Settings, Recording: the folder, and what a recording holds.
-	settings_recording: Still, studio(View::Setting(Setting::Recording));
+	settings_recording: Still, on_show(View::Setting(Setting::Recording));
 	/// Settings, Hotkeys: each action by what it is for, on keycaps.
-	settings_hotkeys: Still, studio(View::Setting(Setting::Hotkeys));
+	settings_hotkeys: Still, on_show(View::Setting(Setting::Hotkeys));
 	/// Settings, Guests, with no room yet.
-	settings_guests: Still, studio(View::Setting(Setting::Guests));
+	settings_guests: Still, on_show(View::Setting(Setting::Guests));
 	/// Settings, Guests, when the room saved cannot be joined, such as when
 	/// its key file is gone: why, and Try again.
 	settings_guests_failed: Live, relayed(View::GuestsFailed);
 	/// Settings, Remote with no room yet, which a remote joins.
-	settings_remote: Still, studio(View::Setting(Setting::Remote));
+	settings_remote: Still, on_show(View::Setting(Setting::Remote));
 	/// Settings, Remote with a phone just paired: the code its camera scans,
 	/// when its link expires, and every phone paired, one removed. Live, as
 	/// each link carries a token of its own.
-	settings_remote_paired: Live, studio(View::Paired);
+	settings_remote_paired: Live, on_show(View::Paired);
 	/// Settings, Mods: each feature most streamers never use, off.
-	settings_mods: Still, studio(View::Setting(Setting::Mods));
+	settings_mods: Still, on_show(View::Setting(Setting::Mods));
 	/// Settings, Mods with each switched on: Published scenes keeps its
 	/// scenes and sources here, and Scene graph opens.
-	settings_mods_on: Still, studio(View::ModsOn);
+	settings_mods_on: Still, on_show(View::ModsOn);
 	/// Settings, Mods on a show with a source published, which switched
 	/// Published scenes on as it opened: how viewers may treat it, as a
 	/// sound alone, with no layer to inspect, sets it.
 	settings_mods_published: Still, Open::Studio { view: View::ModsAt("Priority"), size: SIZE, show: "published.toml", relay: false };
 	/// The scene graph, in a window of its own.
-	graph: Still, studio(View::Graph);
+	graph: Still, on_show(View::Graph);
 	/// The command palette as its key opens it: every action that can run
 	/// now, each with its key, before the pages, settings, and what can be
 	/// added.
-	palette: Still, studio(View::Palette(""));
+	palette: Still, on_show(View::Palette(""));
 	/// The palette finding what `take` names: the scenes, as TAKE is Studio
 	/// mode's, off.
-	palette_found: Still, studio(View::Palette("take"));
+	palette_found: Still, on_show(View::Palette("take"));
 	/// The palette finding a setting by its name.
-	palette_setting: Still, studio(View::Palette("frame"));
+	palette_setting: Still, on_show(View::Palette("frame"));
 	/// The show's menu: its file, the other recent shows to switch to, New
 	/// show, Open show file, Rename, Export a copy, Reload, Copy, and Paste.
-	show_menu: Still, studio(View::ShowMenu);
+	show_menu: Still, on_show(View::ShowMenu);
 	/// On air, switching shows is dimmed, and says to end the stream first.
 	show_menu_live: Live, relayed(View::ShowMenuLive);
 	/// GO LIVE on a show with no relay: its popover asks for one, and its
 	/// token, to go live now.
-	golive_inline: Still, studio(View::Going);
+	golive_inline: Still, on_show(View::Going);
 	/// GO LIVE's popover while the check runs: the relay and its state, the
 	/// encoder and the connection as they come in, and going live once they
 	/// pass.
@@ -515,17 +515,17 @@ views! {
 	on_air_health: Live, relayed(View::OnAirHealth);
 	/// Settings, Destinations: the relay, its token, and the broadcast's
 	/// name, with the failover and on demand under Advanced.
-	settings_destinations: Still, studio(View::Setting(Setting::Destinations));
+	settings_destinations: Still, on_show(View::Setting(Setting::Destinations));
 	/// Settings, Destinations with `--connect` set: the flag's relay, locked,
 	/// and the token kept for it.
 	settings_destinations_flagged: Live, relayed(View::Setting(Setting::Destinations));
 	/// The multiview off air: every scene and the sources picked, the scene
 	/// the stream opens on amber, and the clock, which keeps it from being
 	/// still.
-	multiview: Live, studio(View::Multiview { live: false, stalled: false });
+	multiview: Live, on_show(View::Multiview { live: false, stalled: false });
 	/// The multiview with the host's camera stalled: its tile and each scene
 	/// tile showing it carry the amber badge, and its picture says so.
-	multiview_stalled: Live, studio(View::Multiview { live: false, stalled: true });
+	multiview_stalled: Live, on_show(View::Multiview { live: false, stalled: true });
 	/// The multiview on air in Studio mode: the scene on air framed in the
 	/// accent, the cued one amber, and the sources the live picture shows
 	/// dotted.
@@ -1040,7 +1040,7 @@ fn a_marker_is_clipped_around() {
 	quit(&engine, &runtime);
 }
 
-/// The command palette as a person uses it: its key opens it from LIVE,
+/// The command palette as a person uses it: its key opens it from Studio,
 /// what is typed finds a scene, a sound, and a setting, and Enter runs the
 /// one picked, taking the scene, muting the sound, and opening Settings at
 /// the setting. An action that cannot run now says why and stays open.
@@ -1503,7 +1503,7 @@ fn an_edit_being_typed_saves_on_the_way_out() {
 	quit(&engine, &runtime);
 }
 
-/// On LIVE, the quick start never draws over the program on air, where one
+/// On Studio, the quick start never draws over the program on air, where one
 /// click would put a device straight on the stream: an empty show going live
 /// hides it, and ending the stream brings it back. It draws no view.
 #[test]
@@ -1691,7 +1691,7 @@ fn the_show_menu_switches_shows() {
 	quit(&engine, &runtime);
 }
 
-/// On BUILD, a layer row's menu hides, locks, reorders, and duplicates its
+/// On Studio, a layer row's menu hides, locks, reorders, and duplicates its
 /// layer, a scene's pad's duplicates the scene with its own copies, and
 /// undo takes each back, and a take lets go of a layer of the scene it
 /// leaves. It draws no view.
@@ -1777,7 +1777,7 @@ fn a_layer_menu_edits_its_layer() {
 			.is_none()
 	);
 
-	// A take moves BUILD to another scene, letting go of a layer of this one.
+	// A take moves Studio to another scene, letting go of a layer of this one.
 	let selected = |harness: &mut Harness<'_, Window>| {
 		let App::Studio(studio) = &mut harness.state_mut().app else {
 			unreachable!()
@@ -1846,7 +1846,7 @@ fn a_row_dropped_on_a_slot_after_a_guest_appears_moves_nothing() {
 		harness.run_steps(2);
 	};
 	// The logo's row, and the main slot on the picture.
-	let row = egui::pos2(160.0, 217.0);
+	let row = egui::pos2(160.0, 147.0);
 	let main = egui::pos2(574.0, 400.0);
 	let grab = |harness: &mut Harness<'_, Window>| {
 		pointer(harness, row, None);
@@ -1910,9 +1910,9 @@ fn a_row_dropped_on_a_slot_after_a_guest_appears_moves_nothing() {
 
 /// Studio mode, driven as a person does: its switch turns it on, a pad then
 /// cues its scene rather than taking it, and TAKE puts it on air. NEXT's Edit
-/// opens the cued scene off air on BUILD, Back to live keeps it cued, and
+/// opens the cued scene off air on Studio, Back to live keeps it cued, and
 /// the card's close clears it. Off again, a pad's menu opens a scene off air,
-/// whose own layers BUILD lists and selects, and the banner's Take it live
+/// whose own layers Studio lists and selects, and the banner's Take it live
 /// takes it, keeping the selection on the scene now live. It draws no view.
 #[test]
 #[ignore = "draws on a GPU; run with `just shots`"]
@@ -1976,9 +1976,7 @@ fn studio_mode_cues_and_takes() {
 	harness.get_by_label("Edit off air").click();
 	harness.run_steps(2);
 	assert_eq!(staged(), scenes("Interview", Some("Main")), "open off air, not taken");
-	// BUILD lists the layers of the scene open off air, and
-	// leaves always on top to the program.
-	harness.get_by_label_contains("Always on top is drawn on program");
+	// Studio lists the layers of the scene open off air.
 	harness.get_all_by_label("bar").next().unwrap().click();
 	harness.run_steps(2);
 	assert!(selected(&mut harness), "the click selected Main's bar off air");
@@ -1986,6 +1984,87 @@ fn studio_mode_cues_and_takes() {
 	harness.run_steps(2);
 	assert_eq!(staged(), scenes("Main", None), "taken live");
 	assert!(selected(&mut harness), "the bar stays selected, its scene now live");
+
+	drop(harness);
+	quit(&engine, &runtime);
+}
+
+/// Studio's title bar and strip as a person uses them: locked, a click on
+/// the picture selects nothing and a file dropped on it is refused, and
+/// unlocked a click selects; off air with no safe
+/// scene the panic key stays out of the strip; `+` adds a scene and takes it,
+/// showing its quick start; and a sound's mute and gear act on that sound.
+/// It draws no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn the_studio_locks_adds_and_mutes() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	let show = std::fs::read_to_string(fixture.join("shots/show.toml")).unwrap();
+	let show = show.replace("safe = true # the scene the panic key cuts to\n", "");
+	std::fs::write("show.toml", show).unwrap();
+	let (mut harness, started, _) = window(
+		start(launch(&gpu), stream(None), &runtime),
+		&gpu,
+		&runtime,
+		SIZE,
+		Default::default(),
+	);
+	harness.step();
+	let engine = started.get().expect("the studio started").clone();
+	runtime
+		.block_on(kio::clock::timeout(SETTLE, settle(&mut harness, &engine)))
+		.expect("the sources and pictures settle");
+	let selected = |harness: &mut Harness<'_, Window>| {
+		let App::Studio(studio) = &mut harness.state_mut().app else {
+			unreachable!()
+		};
+		studio.selected()
+	};
+
+	harness.get_by_label("Editable").click();
+	harness.run_steps(2);
+	harness.get_by_label("Canvas").click();
+	harness.run_steps(2);
+	assert!(!selected(&mut harness), "locked, the picture selects nothing");
+	// Dropped where the click left the pointer, on the picture.
+	image::RgbaImage::new(4, 4).save("dropped.png").unwrap();
+	let dropped = std::env::current_dir().unwrap().join("dropped.png");
+	harness.input_mut().dropped_files.push(Arc::new(Dropped(dropped)));
+	harness.run_steps(2);
+	harness.get_by_label_contains("the picture is locked");
+	assert!(harness.query_by_label_contains("Reading").is_none(), "nothing is read");
+	harness.get_by_label("Locked").click();
+	harness.run_steps(2);
+	harness.get_by_label("Canvas").click();
+	harness.run_steps(2);
+	assert!(selected(&mut harness), "editable, a click selects the layer under it");
+
+	assert!(harness.query_by_label("Panic").is_none(), "no safe scene off air");
+	harness.get_by_label("Add a scene").click();
+	harness.run_steps(2);
+	let program = engine
+		.state
+		.lock()
+		.unwrap()
+		.compositor
+		.program_scene()
+		.map(str::to_string);
+	assert_eq!(program.as_deref(), Some("Scene 4"), "+ took the new scene");
+	assert!(harness.query_by_label("Screen").is_some(), "its quick start shows");
+
+	harness.get_by_label("Mute guest").click();
+	harness.run_steps(2);
+	let muted = |name: &str| {
+		let state = engine.state.lock().unwrap();
+		state.collection().audio.get(name).is_some_and(|audio| audio.muted)
+	};
+	assert!(muted("guest") && !muted("caller"), "the row's mute is its sound's");
+	harness.get_by_label("guest options").click();
+	harness.run_steps(2);
+	harness.get_by_label("Monitor in headphones");
+	harness.get_by_label("guest delay");
 
 	drop(harness);
 	quit(&engine, &runtime);
@@ -2542,6 +2621,11 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 	match view {
 		View::Page(page) => studio.turn(*page),
 		View::FirstLaunch => studio.seed_devices(first_devices()),
+		View::Locked => {
+			studio.lock(true);
+			studio.rail(false);
+		}
+		View::SoundOptions(name) => studio.sound_options(name),
 		View::Mix(view, opened) => studio.mix(*view, *opened),
 		View::MixMenu => studio.mix(MixView::Strips, None),
 		View::Build { side, inspect, index } => studio.build(*side, *inspect, *index),
@@ -2562,10 +2646,9 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		| View::OnAir
 		| View::EndConfirm
 		| View::OnAirHealth => {}
-		View::Cued(page) => {
+		View::Cued => {
 			studio.studio_mode(true);
 			studio.cue("Interview");
-			studio.turn(*page);
 		}
 		View::OffAir(scene) => studio.edit_off_air(scene),
 		// The game's window, the back one of three over the black.
@@ -2581,7 +2664,6 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		}
 		View::Drop(_) => studio.build(Side::Add, Inspect::Layer, None),
 		View::Dual {
-			page,
 			format,
 			index,
 			cued,
@@ -2593,7 +2675,6 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 				studio.studio_mode(true);
 				studio.cue(cued);
 			}
-			studio.turn(*page);
 			if let Some(scene) = off_air {
 				studio.edit_off_air(scene);
 			}
@@ -2939,22 +3020,22 @@ fn gallery(gpu: &engine::Gpu, sheet: bool) -> image::RgbaImage {
 	harness.render().unwrap()
 }
 
-/// A file on the picture as `drop` has it, from the show's directory.
-fn drag(harness: &mut Harness<'_, Window>, engine: &engine::Engine, drop: Drop) {
-	/// A file the system drops, which the studio reads by its path.
-	#[derive(Debug)]
-	struct Dropped(std::path::PathBuf);
+/// A file the system drops, which the studio reads by its path.
+#[derive(Debug)]
+struct Dropped(std::path::PathBuf);
 
-	impl egui::DroppedFile for Dropped {
-		fn path(&self) -> &Path {
-			&self.0
-		}
-
-		fn bytes(&self) -> Result<Vec<u8>, String> {
-			unreachable!("the studio reads the file itself")
-		}
+impl egui::DroppedFile for Dropped {
+	fn path(&self) -> &Path {
+		&self.0
 	}
 
+	fn bytes(&self) -> Result<Vec<u8>, String> {
+		unreachable!("the studio reads the file itself")
+	}
+}
+
+/// A file on the picture as `drop` has it, from the show's directory.
+fn drag(harness: &mut Harness<'_, Window>, engine: &engine::Engine, drop: Drop) {
 	// A white ring, as the mock-up's logo.
 	let logo = image::RgbaImage::from_fn(400, 400, |x, y| {
 		let distance = ((x as f32 - 200.0).powi(2) + (y as f32 - 200.0).powi(2)).sqrt();

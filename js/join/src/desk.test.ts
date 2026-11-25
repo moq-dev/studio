@@ -24,8 +24,8 @@ test("the clock reads hours, minutes, and seconds, past a day too", () => {
 test("the scene on program is on air only while live, and first before", () => {
 	expect(tally(desk({ air: "live" }), "Gameplay")).toEqual({ tag: "On air", on: "air" });
 	expect(tally(desk({ air: "ending" }), "Gameplay")?.on).toBe("air");
-	expect(tally(desk({ air: "off" }), "Gameplay")).toEqual({ tag: "First", on: "cue" });
-	expect(tally(desk({ air: "starting" }), "Gameplay")?.tag).toBe("First");
+	expect(tally(desk({ air: "off" }), "Gameplay")).toEqual({ on: "air" });
+	expect(tally(desk({ air: "starting" }), "Gameplay")?.tag).toBeUndefined();
 	expect(tally(desk({ cued: "Chatting" }), "Chatting")).toEqual({ tag: "Next", on: "cue" });
 	expect(tally(desk({ cued: "Chatting" }), "BRB")).toBeUndefined();
 });

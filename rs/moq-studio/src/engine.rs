@@ -1585,27 +1585,80 @@ impl Engine {
 			(None, _) => *monitor = None,
 			(Some(listen), Some(monitor)) if monitor.failed().is_none() => {
 				monitor.set_name(listen.scene);
+				monitor.set_solo(None);
 				monitor.set_speaker(listen.speaker);
 			}
 			// Listening again after a failure starts over.
 			(Some(listen), _) => *monitor = Some(mix::Monitor::start(runtime, listen.scene, listen.speaker)?),
 		}
+		state.sources.solo(None);
 		// Synced on the next frame, which picks the audio scene by its name.
 		state.stale = true;
 		Ok(())
 	}
 
-	/// The audio scene played to the speakers, and why it stopped if it did.
+	/// Play the source called `source` alone to the output `speaker`, or the
+	/// system default, in place of any audio scene Listen plays, from the
+	/// next frame; or stop with `None`, which stops only a source's.
+	pub fn monitor_source(
+		&self,
+		state: &mut State,
+		runtime: &tokio::runtime::Handle,
+		source: Option<&str>,
+		speaker: Option<&str>,
+	) -> anyhow::Result<()> {
+		let mut monitor = self.monitor.lock().unwrap();
+		match (source, monitor.as_mut()) {
+			(None, Some(playing)) if playing.solo().is_some() => *monitor = None,
+			(None, _) => {}
+			(Some(source), Some(playing)) if playing.failed().is_none() => {
+				playing.set_solo(Some(source));
+				playing.set_speaker(speaker);
+			}
+			(Some(source), _) => {
+				let program = state.collection.program_audio().unwrap_or_default();
+				let mut started = mix::Monitor::start(runtime, program, speaker)?;
+				started.set_solo(Some(source));
+				*monitor = Some(started);
+			}
+		}
+		state.sources.solo(source);
+		state.stale = true;
+		Ok(())
+	}
+
+	/// The audio scene played to the speakers, and why it stopped if it did;
+	/// `None` while a source plays alone.
 	pub fn listening(&self) -> Option<(String, Option<String>)> {
 		let monitor = self.monitor.lock().unwrap();
 		monitor
 			.as_ref()
+			.filter(|monitor| monitor.solo().is_none())
 			.map(|monitor| (monitor.name().to_string(), monitor.failed()))
+	}
+
+	/// The source played alone to the speakers, by name, and why it stopped
+	/// if it did.
+	pub fn soloing(&self) -> Option<(String, Option<String>)> {
+		let monitor = self.monitor.lock().unwrap();
+		let monitor = monitor.as_ref()?;
+		Some((monitor.solo()?.to_string(), monitor.failed()))
 	}
 
 	/// Run exactly the sources `state`'s collection has, each on a thread of
 	/// its own, and point the audio at its audio scenes.
 	fn sync(&self, state: &mut State) {
+		// A source played alone stops playing once it leaves the show.
+		let mut monitor = self.monitor.lock().unwrap();
+		if monitor
+			.as_ref()
+			.and_then(mix::Monitor::solo)
+			.is_some_and(|solo| !state.collection.sources.contains_key(solo))
+		{
+			*monitor = None;
+			state.sources.solo(None);
+		}
+		drop(monitor);
 		let drivers = state.sources.sync(&state.collection);
 		self.recorder.set_sources(&state.collection);
 		if !drivers.is_empty() {
@@ -1636,8 +1689,13 @@ impl Engine {
 			if collection.audio_scene(monitor.name()).is_none() {
 				monitor.set_name(program);
 			}
-			// What viewers hear, published sources included.
-			if let Some(mix) = state.sources.listened(monitor.name()) {
+			// What viewers hear, published sources included, or the source
+			// played alone.
+			let mix = match monitor.solo() {
+				Some(_) => state.sources.soloed(),
+				None => state.sources.listened(monitor.name()),
+			};
+			if let Some(mix) = mix {
 				monitor.play(mix.clone());
 			}
 		}

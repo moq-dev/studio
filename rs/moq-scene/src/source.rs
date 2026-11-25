@@ -337,6 +337,9 @@ pub struct Sources {
 	/// The mix people in the studio hear of each audio scene that reaches a
 	/// source published independently, by its name: its mix with those in.
 	listened: BTreeMap<String, Mix>,
+	/// The one source monitored alone, by name, and its mix, which holds it
+	/// and nothing else: at most one entry.
+	solo: BTreeMap<String, Mix>,
 	/// The sources on program, as last set.
 	on_program: BTreeSet<String>,
 	/// The picked displays and windows the last sync ran, by name, whose
@@ -352,6 +355,7 @@ impl Sources {
 			feeds: BTreeMap::new(),
 			mixes: BTreeMap::new(),
 			listened: BTreeMap::new(),
+			solo: BTreeMap::new(),
 			on_program: BTreeSet::new(),
 			picked: None,
 		}
@@ -395,7 +399,7 @@ impl Sources {
 	/// [`Collection::validate`] refuses.
 	pub fn sync(&mut self, collection: &Collection) -> Vec<Driver> {
 		self.forget_grants(collection);
-		let mixes = [&self.mixes, &self.listened];
+		let mixes = [&self.mixes, &self.listened, &self.solo];
 		self.feeds.retain(|name, feed| {
 			let keep = match collection.sources.get(name) {
 				// A layer moved onto its clock anew plays on, so a guest's offset
@@ -425,7 +429,7 @@ impl Sources {
 			.collect();
 		for name in orphaned {
 			let feed = self.feeds.remove(&name).expect("listed above");
-			leave(&[&self.mixes, &self.listened], &feed);
+			leave(&[&self.mixes, &self.listened, &self.solo], &feed);
 		}
 		// Nested audio scenes are flattened: a mix sums every source an audio
 		// scene reaches, each once, so a sound reached two ways is not doubled.
@@ -494,6 +498,9 @@ impl Sources {
 				for (scene, mix) in &self.listened {
 					route(mix, strip, reached(scene));
 				}
+				for (solo, mix) in &self.solo {
+					route(mix, strip, solo == name);
+				}
 				if let Some(sound) = &self.feeds[name].sound {
 					let heard = self.mixes.values().any(|mix| mix.routes(strip));
 					sound.send_if_modified(|playing| std::mem::replace(playing, heard) != heard);
@@ -538,7 +545,7 @@ impl Sources {
 	/// every mix at once, as an edited source does.
 	pub fn restart(&mut self, name: &str) {
 		if let Some(feed) = self.feeds.remove(name) {
-			leave(&[&self.mixes, &self.listened], &feed);
+			leave(&[&self.mixes, &self.listened, &self.solo], &feed);
 		}
 	}
 
@@ -557,7 +564,7 @@ impl Sources {
 	/// and the next [`sync`](Self::sync) starts the sources again.
 	pub fn stop(&mut self) {
 		for feed in std::mem::take(&mut self.feeds).into_values() {
-			leave(&[&self.mixes, &self.listened], &feed);
+			leave(&[&self.mixes, &self.listened, &self.solo], &feed);
 		}
 	}
 
@@ -581,6 +588,33 @@ impl Sources {
 	/// carries no composition, encodes the program's audio scene's.
 	pub fn listened(&self, scene: &str) -> Option<&Mix> {
 		self.listened.get(scene).or_else(|| self.mixes.get(scene))
+	}
+
+	/// A mix of the source called `name` alone, after its gain, mute, pan,
+	/// and delay, which follows it through restarts and edits, as headphones
+	/// check one microphone with; `None` lets go of it. The source need not
+	/// run yet, nor have sound: its mix is silent until it does.
+	pub fn solo(&mut self, name: Option<&str>) -> Option<Mix> {
+		if self.solo.keys().next().map(String::as_str) != name {
+			for (was, mix) in std::mem::take(&mut self.solo) {
+				if let Some(strip) = self.feeds.get(&was).and_then(Feed::strip) {
+					mix.unroute(strip);
+				}
+			}
+			if let Some(name) = name {
+				let mix = self.context.bus.mix();
+				if let Some(strip) = self.feeds.get(name).and_then(Feed::strip) {
+					mix.route(strip);
+				}
+				self.solo.insert(name.to_string(), mix);
+			}
+		}
+		self.soloed().cloned()
+	}
+
+	/// The mix of the source monitored alone, while there is one.
+	pub fn soloed(&self) -> Option<&Mix> {
+		self.solo.values().next()
 	}
 
 	/// Whether the audio scene called `scene` plays the source called `name`:
@@ -3334,6 +3368,40 @@ mod tests {
 			collection.audio.insert("guest".into(), muted);
 			assert!(sources.sync(&collection).is_empty());
 			assert!(!sources.plays("Headphones", "guest"), "muted everywhere");
+		})
+		.await;
+	}
+
+	/// A source monitored alone is in its mix through a restart, and
+	/// letting go of it leaves every audio scene as it was.
+	#[tokio::test]
+	async fn a_solo_mix_holds_its_source_alone() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (context, _origin) = context(dir.path());
+			let mut sources = Sources::new(context);
+			let collection = collection();
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+			let strip = |sources: &Sources, name: &str| sources.get(name).unwrap().strip().unwrap().clone();
+			let solo = sources.solo(Some("guest")).unwrap();
+			assert!(solo.routes(&strip(&sources, "guest")));
+
+			let before = strip(&sources, "guest");
+			sources.restart("guest");
+			assert!(!solo.routes(&before), "a restart leaves it");
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+			assert!(solo.routes(&strip(&sources, "guest")), "and comes back in");
+
+			let program = sources.mix(crate::AudioScene::DEFAULT).unwrap().clone();
+			assert!(
+				sources
+					.solo(Some("guest"))
+					.is_some_and(|again| again.routes(&strip(&sources, "guest")))
+			);
+			assert!(sources.solo(None).is_none());
+			assert!(program.routes(&strip(&sources, "guest")), "the program keeps it");
 		})
 		.await;
 	}

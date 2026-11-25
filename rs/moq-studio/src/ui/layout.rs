@@ -4,9 +4,10 @@
 //! The picture is larger than any other part of the window but the title bar,
 //! and as large as the window allows; the scenes, the panic key, and the sound
 //! take whichever side is left over, in one of the mock-ups' three
-//! arrangements (`quest/m0/ux/mock/shell.html`): `live`, `portrait`, and
-//! `compact`. Each part gives way in a small window, so the picture stays the
-//! largest of them.
+//! arrangements (`quest/m0/ux/mock/shell.html` and `overhaul.html`): `studio`,
+//! `portrait`, and `compact`. Each part gives way in a small window, so the
+//! picture stays the largest of them. The panic key's slot and the pages'
+//! sidebar are there only while they hold something.
 
 use egui::{Rect, Vec2, pos2, vec2};
 
@@ -20,9 +21,9 @@ const TITLE_STACKED: f32 = 44.0;
 
 /// The strip under the picture in the wide arrangement, and its panic and
 /// sound slots' widths.
-const STRIP: f32 = 150.0;
+const STRIP: f32 = 112.0;
 const PANIC: f32 = 112.0;
-const SOUND: f32 = 360.0;
+const SOUND: f32 = 420.0;
 
 /// The tall arrangement's columns: the pages, the scenes, two pads wide at
 /// most and one at least, and the sound with the panic key under it. The
@@ -34,7 +35,7 @@ const SOUND_COLUMN: [f32; 2] = [200.0, 292.0];
 const PANIC_TALL: f32 = 96.0;
 
 /// The stacked arrangement's row of scenes and the panic key.
-const SCENES_ROW: f32 = 118.0;
+const SCENES_ROW: f32 = 112.0;
 
 /// A sound's row, the room around the rows, and the most rows a stacked
 /// window gives room to before they scroll, fewer when the picture needs it.
@@ -52,14 +53,28 @@ const FRAME: f32 = 20.0;
 /// The narrowest and shortest the stage gets before an arrangement is out.
 const STAGE_MIN: f32 = 120.0;
 
+/// What the window holds beside the picture, which its layout makes room for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Holds {
+	/// How many sounds the strip lists.
+	pub sounds: usize,
+	/// Whether more than one page is listed, which a portrait show's sidebar
+	/// holds.
+	pub pages: bool,
+	/// Whether the panic key, or Replay & review's clip and marker, have a
+	/// slot.
+	pub panic: bool,
+}
+
 /// How the window is arranged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Arrangement {
 	/// The pages in the title bar, and the scenes, the panic key, and the
 	/// sound in one strip under the picture: a landscape show.
 	Wide,
-	/// The pages in a sidebar, the scenes in a column beside it, then the
-	/// picture, then the sound over the panic key: a portrait show.
+	/// The pages in a sidebar, if there are several, the scenes in a column
+	/// beside it, then the picture, then the sound over the panic key: a
+	/// portrait show.
 	Tall,
 	/// The picture, then the scenes beside the panic key, then the sound,
 	/// each as wide as the window: a window snapped to half a screen.
@@ -76,7 +91,8 @@ impl Arrangement {
 pub struct Layout {
 	pub arrangement: Arrangement,
 	pub title: Rect,
-	/// The pages' sidebar, or `None` while they sit in the title bar.
+	/// The pages' sidebar, or `None` while they sit in the title bar or
+	/// there is only one.
 	pub sidebar: Option<Rect>,
 	/// What holds the picture, on the stage's wash.
 	pub stage: Rect,
@@ -84,20 +100,21 @@ pub struct Layout {
 	/// room around it for its frame.
 	pub picture: Rect,
 	pub scenes: Rect,
-	pub panic: Rect,
+	/// The panic key's slot, while it holds anything.
+	pub panic: Option<Rect>,
 	pub sound: Rect,
 }
 
 impl Layout {
 	/// The arrangement of a window `window` large, at least [`MIN`], showing
-	/// a picture of `shape` (width over height) and `sounds` sounds, that
+	/// a picture of `shape` (width over height) beside what it `holds`, that
 	/// gives the picture the most room while it is the largest part, or the
 	/// most room at all if none keeps it the largest.
-	pub fn new(window: Vec2, shape: f32, sounds: usize) -> Self {
+	pub fn new(window: Vec2, shape: f32, holds: Holds) -> Self {
 		let (window, shape) = clean(window, shape);
 		let mut best: Option<Self> = None;
 		for arrangement in Arrangement::ALL {
-			let Some(layout) = Self::arrange(arrangement, window, shape, sounds) else {
+			let Some(layout) = Self::arrange(arrangement, window, shape, holds) else {
 				continue;
 			};
 			// Strictly better, so a tie keeps the earlier arrangement.
@@ -113,19 +130,22 @@ impl Layout {
 	/// rather than a row per sound, as on MIX: the same arrangement, so the
 	/// window keeps its shape between pages, with a stacked slot as tall as
 	/// the most rows.
-	pub fn monitor(window: Vec2, shape: f32, sounds: usize) -> Self {
-		let layout = Self::new(window, shape, sounds);
+	pub fn monitor(window: Vec2, shape: f32, holds: Holds) -> Self {
+		let layout = Self::new(window, shape, holds);
 		if layout.arrangement != Arrangement::Stacked {
 			return layout;
 		}
 		let (window, shape) = clean(window, shape);
-		Self::stacked(window, shape, SOUND_ROWS).expect("the most rows fit any window of at least MIN")
+		Self::stacked(window, shape, SOUND_ROWS, holds.panic).expect("the most rows fit any window of at least MIN")
 	}
 
 	/// The parts the picture shares the window with, beside the title bar,
 	/// which spans the window's width whatever the picture's shape.
 	pub fn parts(&self) -> impl Iterator<Item = Rect> {
-		[self.scenes, self.panic, self.sound].into_iter().chain(self.sidebar)
+		[self.scenes, self.sound]
+			.into_iter()
+			.chain(self.panic)
+			.chain(self.sidebar)
 	}
 
 	/// Whether the picture is larger than every other part.
@@ -141,19 +161,20 @@ impl Layout {
 			stage: self.stage.translate(by),
 			picture: self.picture.translate(by),
 			scenes: self.scenes.translate(by),
-			panic: self.panic.translate(by),
+			panic: self.panic.map(|panic| panic.translate(by)),
 			sound: self.sound.translate(by),
 			..self
 		}
 	}
 
 	/// `arrangement` in `window`, or `None` if it leaves a part too little room.
-	fn arrange(arrangement: Arrangement, window: Vec2, shape: f32, sounds: usize) -> Option<Self> {
+	fn arrange(arrangement: Arrangement, window: Vec2, shape: f32, holds: Holds) -> Option<Self> {
 		let at = |x: f32, y: f32, width: f32, height: f32| Rect::from_min_size(pos2(x, y), vec2(width, height));
 		let (w, h) = (window.x, window.y);
+		let panic = if holds.panic { PANIC } else { 0.0 };
 		let layout = match arrangement {
 			Arrangement::Wide => {
-				let scenes = w - PANIC - SOUND;
+				let scenes = w - panic - SOUND;
 				let stage = h - TITLE - STRIP;
 				if scenes < SCENES_MIN || stage < STAGE_MIN {
 					return None;
@@ -166,38 +187,42 @@ impl Layout {
 					stage: at(0.0, TITLE, w, stage),
 					picture: Rect::NOTHING,
 					scenes: at(0.0, strip, scenes, STRIP),
-					panic: at(scenes, strip, PANIC, STRIP),
-					sound: at(scenes + PANIC, strip, SOUND, STRIP),
+					panic: holds.panic.then(|| at(scenes, strip, PANIC, STRIP)),
+					sound: at(scenes + panic, strip, SOUND, STRIP),
 				}
 			}
 			Arrangement::Tall => {
+				let sidebar = if holds.pages { SIDEBAR } else { 0.0 };
+				// The sound leaves the panic key's room under it either way, so
+				// the picture between the columns stays the largest part.
+				let panic = PANIC_TALL;
 				let [least, most] = SCENES_COLUMN;
 				let scenes = (w * 0.15).min(h * 0.3).clamp(least, most).round();
 				let [least, most] = SOUND_COLUMN;
 				let sound = (w * 0.205).min(h * 0.34).clamp(least, most).round();
-				let stage = w - SIDEBAR - scenes - sound;
+				let stage = w - sidebar - scenes - sound;
 				let body = h - TITLE;
-				if stage < STAGE_MIN || body - PANIC_TALL < STAGE_MIN {
+				if stage < STAGE_MIN || body - panic < STAGE_MIN {
 					return None;
 				}
-				let right = SIDEBAR + scenes + stage;
+				let right = sidebar + scenes + stage;
 				Self {
 					arrangement,
 					title: at(0.0, 0.0, w, TITLE),
-					sidebar: Some(at(0.0, TITLE, SIDEBAR, body)),
-					stage: at(SIDEBAR + scenes, TITLE, stage, body),
+					sidebar: holds.pages.then(|| at(0.0, TITLE, SIDEBAR, body)),
+					stage: at(sidebar + scenes, TITLE, stage, body),
 					picture: Rect::NOTHING,
-					scenes: at(SIDEBAR, TITLE, scenes, body),
-					panic: at(right, h - PANIC_TALL, sound, PANIC_TALL),
-					sound: at(right, TITLE, sound, body - PANIC_TALL),
+					scenes: at(sidebar, TITLE, scenes, body),
+					panic: holds.panic.then(|| at(right, h - PANIC_TALL, sound, PANIC_TALL)),
+					sound: at(right, TITLE, sound, body - panic),
 				}
 			}
 			Arrangement::Stacked => {
 				// As many rows as the sounds want, fewer while that leaves the
 				// picture smaller than another part: they scroll instead.
 				let mut layout = None;
-				for rows in (1..=sounds.clamp(1, SOUND_ROWS)).rev() {
-					let Some(stacked) = Self::stacked(window, shape, rows) else {
+				for rows in (1..=holds.sounds.clamp(1, SOUND_ROWS)).rev() {
+					let Some(stacked) = Self::stacked(window, shape, rows, holds.panic) else {
 						continue;
 					};
 					layout = Some(stacked);
@@ -214,9 +239,10 @@ impl Layout {
 		})
 	}
 
-	/// The stacked arrangement in `window` with `rows` rows of sound, or
-	/// `None` if that leaves the stage too little room.
-	fn stacked(window: Vec2, shape: f32, rows: usize) -> Option<Self> {
+	/// The stacked arrangement in `window` with `rows` rows of sound, and the
+	/// panic key's slot if `panic`, or `None` if that leaves the stage too
+	/// little room.
+	fn stacked(window: Vec2, shape: f32, rows: usize, panic: bool) -> Option<Self> {
 		let at = |x: f32, y: f32, width: f32, height: f32| Rect::from_min_size(pos2(x, y), vec2(width, height));
 		let w = window.x;
 		let sound = rows as f32 * SOUND_ROW + SOUND_PAD;
@@ -226,14 +252,15 @@ impl Layout {
 		}
 		let row = TITLE_STACKED + stage;
 		let stage = at(0.0, TITLE_STACKED, w, stage);
+		let scenes = if panic { w - PANIC } else { w };
 		Some(Self {
 			arrangement: Arrangement::Stacked,
 			title: at(0.0, 0.0, w, TITLE_STACKED),
 			sidebar: None,
 			stage,
 			picture: fit(stage.shrink(FRAME), shape),
-			scenes: at(0.0, row, w - PANIC, SCENES_ROW),
-			panic: at(w - PANIC, row, PANIC, SCENES_ROW),
+			scenes: at(0.0, row, scenes, SCENES_ROW),
+			panic: panic.then(|| at(scenes, row, PANIC, SCENES_ROW)),
 			sound: at(0.0, row + SCENES_ROW, w, sound),
 		})
 	}
@@ -292,20 +319,58 @@ mod tests {
 	const LANDSCAPE: f32 = 16.0 / 9.0;
 	const PORTRAIT: f32 = 9.0 / 16.0;
 
+	/// `sounds` sounds, one page, and the panic key's slot.
+	fn holds(sounds: usize) -> Holds {
+		Holds {
+			sounds,
+			pages: false,
+			panic: true,
+		}
+	}
+
 	/// The mock-ups' three frames: a landscape show at 1440x900 has the strip
 	/// under the picture, a portrait one the columns beside it, and a window
 	/// snapped to half the screen stacks.
 	#[test]
 	fn the_mock_ups_arrangements() {
 		let window = vec2(1440.0, 900.0);
-		assert_eq!(Layout::new(window, LANDSCAPE, 4).arrangement, Arrangement::Wide);
-		let portrait = Layout::new(window, PORTRAIT, 4);
+		assert_eq!(Layout::new(window, LANDSCAPE, holds(4)).arrangement, Arrangement::Wide);
+		let portrait = Layout::new(window, PORTRAIT, holds(4));
 		assert_eq!(portrait.arrangement, Arrangement::Tall);
-		assert!(portrait.sidebar.is_some(), "a portrait show's pages are in a sidebar");
+		assert!(portrait.sidebar.is_none(), "one page needs no sidebar");
+		let pages = Layout::new(
+			window,
+			PORTRAIT,
+			Holds {
+				pages: true,
+				..holds(4)
+			},
+		);
+		assert!(pages.sidebar.is_some(), "a portrait show's pages are in a sidebar");
 		assert_eq!(
-			Layout::new(vec2(711.0, 872.0), LANDSCAPE, 4).arrangement,
+			Layout::new(vec2(711.0, 872.0), LANDSCAPE, holds(4)).arrangement,
 			Arrangement::Stacked
 		);
+	}
+
+	/// Without a panic key, its slot goes to the scenes or the sound.
+	#[test]
+	fn no_panic_key_leaves_its_room_to_the_scenes() {
+		let window = vec2(1440.0, 900.0);
+		for shape in [LANDSCAPE, PORTRAIT] {
+			let with = Layout::new(window, shape, holds(2));
+			let without = Layout::new(
+				window,
+				shape,
+				Holds {
+					panic: false,
+					..holds(2)
+				},
+			);
+			assert!(with.panic.is_some() && without.panic.is_none());
+			assert!(without.scenes.width() >= with.scenes.width());
+			assert!(without.sound.area() >= with.sound.area());
+		}
 	}
 
 	/// Both pictures of a show going out in both fit side by side, as tall
@@ -329,8 +394,8 @@ mod tests {
 	/// count of sounds: every part is inside the window, none overlaps
 	/// another, the picture is inside its stage and larger than every part
 	/// beside the title bar, and no other arrangement that keeps it so would
-	/// give it more room. MIX's layout fits too, with the room of the most
-	/// rows for its live picture.
+	/// give it more room. MIX's layout fits too, stacked with the room of the
+	/// most rows for its live picture.
 	#[test]
 	fn nothing_overlaps_and_the_picture_is_largest() {
 		let shapes = [LANDSCAPE, PORTRAIT, 1.0, 4.0 / 3.0, 3.0 / 4.0, 21.0 / 9.0, 9.0 / 21.0];
@@ -341,21 +406,28 @@ mod tests {
 				let window = vec2(width, height);
 				let bounds = Rect::from_min_size(egui::Pos2::ZERO, window);
 				for shape in shapes {
-					for sounds in 0..=6 {
-						let layout = Layout::new(window, shape, sounds);
-						let case = format!("{window:?} {shape} {sounds}: {layout:?}");
+					// Every count of sounds with the pages and the panic key, and a
+					// few without, which only free room.
+					let bare = [0, 4].map(|sounds| (sounds, false, false));
+					for (sounds, pages, panic) in (0..=6).map(|sounds| (sounds, true, true)).chain(bare) {
+						let holds = Holds { sounds, pages, panic };
+						let layout = Layout::new(window, shape, holds);
+						let case = format!("{window:?} {shape} {holds:?}: {layout:?}");
 						fits(&layout, bounds, &case);
 						// MIX keeps the arrangement, and its live picture gets
 						// the room of the most rows.
-						let monitor = Layout::monitor(window, shape, sounds);
+						let monitor = Layout::monitor(window, shape, holds);
 						let mix = format!("MIX, {case}: {monitor:?}");
 						fits(&monitor, bounds, &mix);
 						assert_eq!(monitor.arrangement, layout.arrangement, "{mix}");
+						// Stacked, its slot is as tall as the most rows; in a strip or
+						// a column, it has the strip's or the column's room.
 						let rows = SOUND_ROWS as f32 * SOUND_ROW + SOUND_PAD;
-						assert!(monitor.sound.height() >= rows, "{mix}");
+						let stacked = monitor.arrangement == Arrangement::Stacked;
+						assert!(!stacked || monitor.sound.height() >= rows, "{mix}");
 						assert!(layout.largest(), "the picture is not the largest, {case}");
 						for arrangement in Arrangement::ALL {
-							let other = Layout::arrange(arrangement, window, shape, sounds);
+							let other = Layout::arrange(arrangement, window, shape, holds);
 							if let Some(other) = other.filter(Layout::largest) {
 								assert!(
 									area(layout.picture) >= area(other.picture),
@@ -376,16 +448,17 @@ mod tests {
 	#[test]
 	fn a_smaller_window_is_laid_out_as_the_smallest() {
 		assert_eq!(
-			Layout::new(vec2(100.0, 50.0), LANDSCAPE, 2),
-			Layout::new(MIN, LANDSCAPE, 2)
+			Layout::new(vec2(100.0, 50.0), LANDSCAPE, holds(2)),
+			Layout::new(MIN, LANDSCAPE, holds(2))
 		);
 	}
 
 	/// Every part of `layout` inside `bounds`, none overlapping another, and
 	/// the picture inside its stage.
 	fn fits(layout: &Layout, bounds: Rect, case: &str) {
-		let parts: Vec<Rect> = [layout.title, layout.stage, layout.scenes, layout.panic, layout.sound]
+		let parts: Vec<Rect> = [layout.title, layout.stage, layout.scenes, layout.sound]
 			.into_iter()
+			.chain(layout.panic)
 			.chain(layout.sidebar)
 			.collect();
 		for (index, part) in parts.iter().enumerate() {

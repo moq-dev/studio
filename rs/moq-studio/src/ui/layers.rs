@@ -1,4 +1,4 @@
-//! The BUILD page's left column: the layers the picture draws, front to back,
+//! The Studio page's left column: the layers the picture draws, front to back,
 //! and what can be added to it.
 
 use egui::{Align2, Rect, Sense, Stroke, Vec2, pos2, vec2};
@@ -58,7 +58,7 @@ impl Panels {
 		});
 	}
 
-	/// The layers of the scene BUILD edits and the always-on-top ones over
+	/// The layers of the scene Studio edits and the always-on-top ones over
 	/// it, front first, with Add a layer under them. A scene open off air
 	/// has only its own, as the always-on-top ones are drawn on program.
 	fn layers(&mut self, ui: &mut Ui) {
@@ -78,7 +78,11 @@ impl Panels {
 					ui.spacing_mut().item_spacing.y = 0.0;
 					let groups = [(Layer::top(), "Always on top"), (Layer::scene(""), "This scene")];
 					let off_air = self.off_air(&state).is_some();
-					for (layer, caption) in groups {
+					let pinned = state
+						.collection()
+						.items(&Layer::top())
+						.is_some_and(|items| !items.is_empty());
+					for (layer, caption) in groups.into_iter().filter(|(layer, _)| pinned || layer.scene.is_some()) {
 						if off_air && layer.scene.is_none() {
 							caption_row(ui, caption);
 							ui.label(egui::RichText::new(OFF_AIR_TOP).color(kit::DIM));

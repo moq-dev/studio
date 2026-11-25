@@ -1856,7 +1856,7 @@ pub(super) fn health_word(engine: &Engine) -> (String, Color32) {
 		(Verdict::Unknown, true, _) => ("Starting", kit::DIM),
 	};
 	// When layers gone dark or stalled are among the worst problems, the
-	// word counts them, as the streamer can see and fix them on BUILD. A
+	// word counts them, as the streamer can see and fix them on Studio. A
 	// stalled picture is unhealthy, a dark one degraded.
 	let among = match worst {
 		Verdict::Unhealthy => report.stalled > 0,
