@@ -18,4 +18,4 @@ that does it.
 
 ## Required
 
-- [Adding a source by picking a picture](/quest/m0/ux/add.md) - the page and the cards
+- [Adding a source in one click](/quest/m0/ux/add.md) - the page and the cards

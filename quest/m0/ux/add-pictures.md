@@ -10,6 +10,10 @@ when a camera or monitor is plugged in or out or a window opens or closes,
 with no `Refresh` button. Where the system cannot give a picture, the card
 keeps its name and says why.
 
+Audio inputs are out of scope: Add lists them each time it opens, and a
+microphone plugged in while it is open shows the next time, until moq-audio
+reports device changes.
+
 ## Plan
 
 Split from [Adding a source in one click](/quest/m0/ux/add.md) on 2026-11-25

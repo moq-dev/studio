@@ -40,4 +40,4 @@ data type, on every backend including Wayland.
 
 ## Related
 
-- [Adding a source by picking a picture](/quest/m0/ux/add.md) - its cards land where they are dropped, inside the window
+- [Adding a source in one click](/quest/m0/ux/add.md) - its cards land where they are dropped, inside the window
