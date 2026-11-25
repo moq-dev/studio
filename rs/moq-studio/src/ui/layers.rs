@@ -1,5 +1,5 @@
-//! The Studio page's left column: the layers the picture draws, front to back,
-//! and what can be added to it.
+//! The Studio page's left column: the layers the picture draws, front to
+//! back, and a button opening Add.
 
 use egui::{Align2, Rect, Sense, Stroke, Vec2, pos2, vec2};
 
@@ -30,12 +30,12 @@ pub(super) fn unplaced(collection: &Collection, name: &str) -> bool {
 }
 
 impl Panels {
-	/// The left column in `rect`: Layers and Add, and the inspector too while
+	/// The left column in `rect`: Layers, and the inspector too while
 	/// it has anything to show when `narrow` leaves no room for its own
 	/// column.
 	pub(super) fn side_column(&mut self, ui: &mut Ui, rect: egui::Rect, narrow: bool) {
 		let tabs: &[Side] = match narrow && self.inspecting {
-			true => &[Side::Layers, Side::Add, Side::Inspect],
+			true => &[Side::Layers, Side::Inspect],
 			false => &Side::ALL,
 		};
 		if !tabs.contains(&self.side) {
@@ -48,12 +48,6 @@ impl Panels {
 			ui.add_space(8.0);
 			match self.side {
 				Side::Layers => self.layers(ui),
-				Side::Add => {
-					egui::ScrollArea::vertical()
-						.id_salt("add")
-						.auto_shrink(false)
-						.show(ui, |ui| self.adding(ui));
-				}
 				Side::Inspect => self.inspector_body(ui),
 			}
 		});
@@ -114,7 +108,7 @@ impl Panels {
 			vec2(ui.max_rect().width(), footer),
 		);
 		if ui.put(button, AddLayer).clicked() {
-			self.side = Side::Add;
+			self.open_add();
 		}
 		let Some((picked, action)) = acted else { return };
 		let (spot, result) = self.act(&mut state, &picked, action);
@@ -154,9 +148,8 @@ impl Panels {
 			let capture = collection.sources.get(collection.capture(&item.source));
 			// A window chosen by id offers the windows listed now in its place.
 			let window = matches!(status.lost, Some(Lost::Dark(_))) && matches!(capture, Some(Source::Window { .. }));
-			if window && self.devices.listing.is_none() && self.devices.pending.is_none() {
-				let refreshed = self.devices.refresh(&self.runtime).context("cannot list windows");
-				self.fail(Spot::Add, refreshed);
+			if window && self.devices.listing.is_none() {
+				self.devices.renew(&self.runtime);
 			}
 			let fault = self.fault(&Spot::Layer(layer.clone(), item.source.clone()));
 			let what = words(collection, &item.source);
@@ -178,9 +171,8 @@ impl Panels {
 			let (response, asked, opened) = row.show(ui, ui.id().with(("layer", layer.scene.as_deref(), index)));
 			// Its popover, opened, lists the windows afresh: the listing kept
 			// may be from before the window went, or another opened.
-			if opened && window && self.devices.pending.is_none() {
-				let refreshed = self.devices.refresh(&self.runtime).context("cannot list windows");
-				self.fail(Spot::Add, refreshed);
+			if opened && window {
+				self.devices.renew(&self.runtime);
 			}
 			if let Some(asked) = asked {
 				action = Some((picked.clone(), asked));
@@ -548,200 +540,6 @@ pub(super) fn words(collection: &Collection, name: &str) -> String {
 	}
 }
 
-impl Panels {
-	/// What can be added: what a drop or paste makes, the sources nothing
-	/// shows, this machine's devices, any source by hand, and guests. The Add page replaces it with pictures
-	/// (quest/m0/ux/add.md).
-	fn adding(&mut self, ui: &mut Ui) {
-		if let Some(fault) = self.fault(&Spot::Add) {
-			ui.colored_label(kit::ERR, fault);
-			ui.add_space(6.0);
-		}
-		ui.label(kit::caps("Drop or paste anything", kit::display(11.0)).color(kit::DIM));
-		ui.add_space(4.0);
-		self.drop_kinds(ui);
-		self.unused(ui);
-		section(ui, "Devices");
-		self.devices(ui);
-		section(ui, "Any source");
-		self.by_hand(ui);
-		section(ui, "Guests");
-		self.guests(ui);
-	}
-
-	/// The sources no layer shows and no audio scene hears, each to add as a
-	/// layer of the scene on program, or remove for good.
-	fn unused(&mut self, ui: &mut Ui) {
-		let engine = self.engine.clone();
-		let mut state = engine.state.lock().unwrap();
-		self.follow_reloads(&state);
-		let collection = state.collection();
-		let heard = |name: &str| collection.audio_scenes.iter().any(|scene| scene.sounds.contains(name));
-		let unused: Vec<String> = collection
-			.sources
-			.keys()
-			.filter(|name| unplaced(collection, name) && !heard(name))
-			.cloned()
-			.collect();
-		if unused.is_empty() {
-			return;
-		}
-		section(ui, "Not in any scene");
-		let mut add = None;
-		let mut remove = None;
-		for name in &unused {
-			let source = &collection.sources[name];
-			ui.horizontal(|ui| {
-				let (icon, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
-				kind(collection, name).paint(ui, icon, 15.0, kit::DIM);
-				ui.vertical(|ui| {
-					ui.label(egui::RichText::new(name).font(kit::ui_medium(13.0)));
-					ui.label(
-						egui::RichText::new(describe(source))
-							.font(kit::ui(11.0))
-							.color(kit::DIM),
-					);
-				});
-				ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-					let gone = IconButton::new(Icon::Remove, "Remove for good")
-						.small()
-						.note(Some("Remove the source from the show; undo brings it back"));
-					if kit::named(ui.add(gone), &format!("Remove {name} for good")).clicked() {
-						remove = Some(name.clone());
-					}
-					if source.has_video() && kit::named(ui.button("Add"), &format!("Add {name}")).clicked() {
-						add = Some(name.clone());
-					}
-				});
-			});
-		}
-		let result = if let Some(name) = add {
-			match self.scene(&state) {
-				Ok(layer) => {
-					let canvas = state
-						.collection()
-						.canvas(layer.scene.as_deref())
-						.unwrap_or(state.collection().canvas);
-					let mut index = state.collection().items(&layer).map_or(0, <[Item]>::len);
-					let mut item = Item::new(name.clone(), moq_scene::Rect::fill(&canvas));
-					// A guest takes the next tile of a scene with slots.
-					let room = self.engine.room();
-					let guest = room.as_ref().is_some_and(|room| {
-						let source = state.collection().sources.get(&name);
-						source.is_some_and(|source| crate::guests::plays_guest(room.path(), source))
-					});
-					let tile = layer
-						.scene
-						.as_deref()
-						.and_then(|scene| crate::guests::tile(state.collection(), scene, &name));
-					if let Some(at) = tile.filter(|_| guest) {
-						index = at;
-						item = Item {
-							slot: Some(moq_scene::Slot::Tile),
-							..Item::new(name.clone(), moq_scene::Rect::default())
-						};
-					}
-					// Its sound joins the stream with it, as a new source's does.
-					let heard = state.collection().sources.get(&name).is_some_and(Source::has_audio);
-					let result = edit(&mut state, format!("Add `{name}` {}", place(&layer)), None, |draft| {
-						draft.insert_item(&layer, index, item)?;
-						if heard {
-							draft.hear(&name)?;
-						}
-						Ok(())
-					});
-					if result.is_ok() {
-						self.select(Some(Picked { layer, index }));
-						self.side = Side::Layers;
-					}
-					result
-				}
-				Err(why) => Err(anyhow::anyhow!(why)),
-			}
-		} else if let Some(name) = remove {
-			edit(&mut state, format!("Remove `{name}`"), None, |draft| {
-				draft.remove_source(&name)
-			})
-		} else {
-			return;
-		};
-		drop(state);
-		self.fail(Spot::Add, result);
-	}
-
-	/// This machine's cameras, screens, and inputs, each added as a layer of
-	/// the scene on program.
-	fn devices(&mut self, ui: &mut Ui) {
-		self.devices.poll();
-		if ui.add(kit::button(Icon::Reload, "Refresh")).clicked() {
-			let refreshed = self.devices.refresh(&self.runtime).context("cannot list devices");
-			self.fail(Spot::Add, refreshed);
-		}
-		let own: Vec<String> = self
-			.engine
-			.state
-			.lock()
-			.unwrap()
-			.cameras()
-			.map(|camera| camera.id)
-			.collect();
-		let Some(picked) = self.devices.ui(ui, &own) else {
-			return;
-		};
-		let mut state = self.engine.state.lock().unwrap();
-		// Two cameras of the same model share a name; number the later ones.
-		let name = state.collection().unused_name(&picked.name);
-		let layer = self.scene(&state).ok();
-		let result = add(&mut state, layer, name, picked.source, None);
-		drop(state);
-		self.added(result);
-	}
-
-	/// The form that adds any kind of source by hand.
-	fn by_hand(&mut self, ui: &mut Ui) {
-		let engine = self.engine.clone();
-		let mut state = engine.state.lock().unwrap();
-		let scenes: Vec<String> = state
-			.collection()
-			.scenes
-			.iter()
-			.map(|scene| scene.name.clone())
-			.collect();
-		let Some(source) = self.add.ui(ui, &scenes, &self.controls.mods) else {
-			return;
-		};
-		let name = self.add.name.trim().to_string();
-		let layer = self.scene(&state).ok();
-		let result = add(&mut state, layer, name, source, None);
-		if result.is_ok() {
-			self.add.name.clear();
-		}
-		drop(state);
-		self.added(result);
-	}
-
-	/// Follow an added source to its layer, or show why it was not added.
-	pub(super) fn added(&mut self, result: anyhow::Result<String>) {
-		match result {
-			Ok(name) => {
-				let state = self.engine.state.lock().unwrap();
-				let picked = self.scene(&state).ok().and_then(|layer| {
-					let items = state.collection().items(&layer)?;
-					let index = items.iter().rposition(|item| item.source == name)?;
-					Some(Picked { layer, index })
-				});
-				drop(state);
-				if picked.is_some() {
-					self.select(picked);
-					self.side = Side::Layers;
-				}
-				self.fail(Spot::Add, Ok(()));
-			}
-			Err(err) => self.fail(Spot::Add, Err(err)),
-		}
-	}
-}
-
 /// A section's caption, under a line.
 pub(super) fn section(ui: &mut Ui, caption: &str) {
 	ui.add_space(10.0);
@@ -751,169 +549,4 @@ pub(super) fn section(ui: &mut Ui, caption: &str) {
 	ui.add_space(10.0);
 	ui.label(kit::caps(caption, kit::display(11.0)).color(kit::DIM));
 	ui.add_space(4.0);
-}
-
-impl Panels {
-	/// Invite guests, show their links, and see who joined.
-	fn guests(&mut self, ui: &mut Ui) {
-		let engine = self.engine.clone();
-		let Some(room) = engine.room() else {
-			match self.controls.room_failure() {
-				Some(failure) => ui.colored_label(kit::ERR, format!("Guests cannot join: {failure}")),
-				None => ui.label("Guests join a room on your relay, which needs a room and its key."),
-			};
-			if ui.add(kit::button(Icon::Settings, "Set up the room")).clicked() {
-				self.setting = Some(Setting::Guests);
-			}
-			return;
-		};
-		// A link into a room the studio has left joins nothing.
-		self.shown.take_if(|shown| !shown.joins(&room));
-
-		ui.horizontal(|ui| {
-			ui.label("Name");
-			let field = ui.text_edit_singleline(&mut self.guest);
-			let entered = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-			if ui.add(kit::button(Icon::Add, "Invite")).clicked() || entered {
-				let name = self.guest.trim().to_string();
-				match room.invite(&name) {
-					Ok(invite) => {
-						self.show(ui.ctx(), &room, name, invite);
-						self.guest.clear();
-					}
-					Err(err) => self.fail(Spot::Add, Err(err)),
-				}
-			}
-		});
-
-		let now = kio::clock::wall();
-		if let Some(shown) = &self.shown {
-			let title = format!("Invite {}", shown.name);
-			let close = kit::Sheet::new(egui::Id::new("join link"), &title).show(ui.ctx(), |ui| {
-				ui.label(format!("Their join link {}.", expiry(shown.invite.expires, now)));
-				ui.add_space(8.0);
-				// The link is the guest's credential, so it shows only as a code to scan.
-				match &shown.qr {
-					Ok(qr) => {
-						ui.vertical_centered(|ui| ui.image((qr.id(), egui::vec2(240.0, 240.0))));
-					}
-					Err(err) => {
-						ui.colored_label(ui.visuals().error_fg_color, format!("{err}; copy the link instead."));
-					}
-				}
-				ui.add_space(8.0);
-				if ui.add(kit::button(Icon::Copy, "Copy link")).clicked() {
-					ui.ctx().copy_text(shown.invite.link.to_string());
-				}
-			});
-			if close {
-				self.shown = None;
-			}
-		}
-
-		ui.separator();
-		if let Some(failure) = room.renewal_failure() {
-			ui.colored_label(
-				ui.visuals().error_fg_color,
-				format!("Guests' tokens are not renewing, so each leaves when their link expires: {failure}"),
-			);
-		}
-		let participants = room.participants();
-		if participants.is_empty() {
-			ui.weak("Nobody invited yet.");
-			return;
-		}
-		let mut show = None;
-		let mut invite = None;
-		let mut remove = None;
-		egui::ScrollArea::vertical().show(ui, |ui| {
-			egui::Grid::new("guests").striped(true).show(ui, |ui| {
-				for heading in ["Guest", "Camera", "Screen", "Link", ""] {
-					ui.strong(heading);
-				}
-				ui.end_row();
-				for (name, participant) in &participants {
-					ui.label(name);
-					for online in [participant.camera, participant.screen] {
-						if online {
-							ui.colored_label(kit::OK, "live");
-						} else {
-							ui.weak("offline");
-						}
-					}
-					// A renewed guest no longer depends on their link's expiry.
-					match &participant.invite {
-						_ if participant.renewed() => ui.label("renewing"),
-						_ if participant.removed => ui.weak("not renewed"),
-						Some(link) => ui.label(expiry(link.expires, now)),
-						None => ui.weak("invited before this session"),
-					};
-					ui.horizontal(|ui| {
-						// Only a link that still works is worth sharing again.
-						if let Some(link) = &participant.invite
-							&& link.expires > now
-							&& ui.small_button("Show link").clicked()
-						{
-							show = Some((name.clone(), link.clone()));
-						}
-						if ui.small_button("New link").clicked() {
-							invite = Some(name.clone());
-						}
-						if ui
-							.small_button("Remove from scenes")
-							.on_hover_text(
-								"Take their camera and screen, and any mask reading them, out of every scene and mute them. Their token stops renewing, so they leave within the link lifetime in Settings, Guests. Undo puts them back in the scenes; only New link renews them again.",
-							)
-							.clicked()
-						{
-							remove = Some(name.clone());
-						}
-					});
-					ui.end_row();
-				}
-			});
-		});
-
-		if let Some((name, link)) = show {
-			self.show(ui.ctx(), &room, name, link);
-		}
-		if let Some(name) = invite {
-			match room.invite(&name) {
-				Ok(link) => self.show(ui.ctx(), &room, name, link),
-				Err(err) => self.fail(Spot::Add, Err(err)),
-			}
-		}
-		if let Some(name) = remove {
-			if let Err(err) = room.stop_renewing(&name) {
-				self.report(Err(err));
-				return;
-			}
-			let mut state = engine.state.lock().unwrap();
-			let mut draft = state.collection().draft(format!("Remove `{name}` from scenes"));
-			let result = match room.take_off(&mut draft, &name) {
-				Ok(false) => Ok(()),
-				Ok(true) => {
-					// Removing items moves the ones after them.
-					self.deselect_item();
-					state.commit(draft, None)
-				}
-				Err(err) => Err(err.into()),
-			};
-			drop(state);
-			self.report(result.map(|()| format!("removed {name} from every scene and muted them")));
-		}
-	}
-
-	/// Put `invite`'s link for `name` on screen as a QR code.
-	pub(super) fn show(
-		&mut self,
-		ctx: &egui::Context,
-		room: &Arc<crate::guests::Room>,
-		name: String,
-		invite: crate::guests::Invite,
-	) {
-		let qr = qr(ctx, invite.link.as_str());
-		let room = Arc::downgrade(room);
-		self.shown = Some(Shown { name, invite, qr, room });
-	}
 }

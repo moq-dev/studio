@@ -1,4 +1,4 @@
-//! The capture devices this machine has, for Studio's Add and the quick start.
+//! The capture devices this machine has, for Add, the palette, and the quick start.
 
 use moq_scene::Source;
 
@@ -16,18 +16,6 @@ pub struct Listing {
 	pub windows: Result<Vec<Pick>, String>,
 	/// Microphones and other inputs, plus system audio where it can be captured.
 	pub audio: Result<Vec<Pick>, String>,
-}
-
-impl Listing {
-	/// Each kind with its heading, in the order the Devices panel shows them.
-	pub fn kinds(&mut self) -> [(&'static str, &mut Result<Vec<Pick>, String>); 4] {
-		[
-			("Cameras", &mut self.cameras),
-			("Displays", &mut self.displays),
-			("Windows", &mut self.windows),
-			("Audio inputs", &mut self.audio),
-		]
-	}
 }
 
 /// List every kind of device, logging what each listing found.

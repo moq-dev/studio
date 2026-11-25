@@ -20,9 +20,7 @@ the [mock-up](/quest/m0/ux/mock/overhaul-first.webp):
   quick start's Camera card adds a live camera in one click. Note how long
   the window shows "Opening My Show…" and whether the canvas came out at
   60 fps on a hardware encoder. Counting the clicks to a live screen, which
-  goes through Add, is left to Add's own try, since
-  [Add](/quest/m0/ux/add.md) is being redesigned (decided 2026-11-25,
-  maintainer, /quest-run).
+  goes through Add, is [Try Add](/quest/m0/ux/try-add.md)'s.
 - **Permissions:** the camera and microphone prompts macOS raises on that
   launch (run `tccutil reset Camera live.kixel.studio` and `tccutil reset
   Microphone live.kixel.studio` first if you answered them before), the

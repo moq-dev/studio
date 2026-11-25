@@ -301,17 +301,41 @@ or send it backward, keep it always on top or move it into this scene,
 duplicate it, or remove it. With **Linked layers** on in Settings,
 [Mods](#mods), it also duplicates a layer as its own copy and makes one
 independent, and with Smart layout on, it puts one in a slot. **Add a layer**
-(A) turns to Add.
+(A) opens Add.
 
-**Add** lists what can be placed: what a drop or paste makes (see
-[Dropping and pasting](#dropping-and-pasting)), the kind a drag over the
-window holds lit; the sources no layer shows, no audio scene
-hears, and nothing reads, each with **Add**, to place it in the edited
-scene, or the bin, to remove it for good; this machine's cameras, displays,
-windows, and audio inputs; any source by hand; and, with a room, guests:
-invite one, show their join link as a QR code in a sheet over the window, see
-who joined, and take a guest out of every scene. A new source with a picture
-is placed in front of the edited scene, and selected.
+**Add** opens over the picture, titled with the scene it adds to, and lists
+this machine's devices by name each time it opens. Click any card to add it
+at once under its own name (numbered past one already taken), which closes
+Add with the new layer selected; undo or Delete takes it back. Drag a card
+onto the picture instead to place it where you let go. Escape, the close
+button, or a click beside it closes Add. Its tabs:
+
+- **Devices & Screens:** the sources no layer shows, no audio scene hears,
+  and nothing reads (right-click one to remove it for good), then the
+  cameras, displays, and windows. On a Wayland desktop, **Picked display**
+  and **Picked window** come first and open the desktop's own picker (see
+  [Picked displays and windows](#picked-displays-and-windows)). A kind that
+  cannot be listed, such as without a permission, says why, with **Try
+  again** to list it once fixed.
+- **Media & Web:** **Image or video file…** opens the system's file dialog,
+  and the file lands as a dropped one does (see
+  [Dropping and pasting](#dropping-and-pasting)); a web address adds the
+  page; **Text** adds a lower third to edit; **Color** adds the color beside
+  its caption; and **From the show** puts the program or another scene
+  inside this one, and with their mods on, the replay and a role.
+- **Audio:** each microphone, and on macOS the system's sound, with a level
+  meter so the one that moves when you talk is the one to pick. A sound has
+  no layer: it joins the audio scene on program.
+- **Guests:** with a room, invite one, show their join link as a QR code in a
+  sheet over the window, see who joined, and take a guest out of every
+  scene; a guest's picture no scene shows yet is a card to add.
+
+Where a new picture goes: the first fills the canvas; one added while
+nothing covers the canvas fills it behind the smaller layers already there;
+one added over a layer covering the canvas lands as a picture-in-picture, a
+third of its width, in the first corner clear of the others (bottom right,
+bottom left, top right, then top left); a color goes behind everything; and
+a web page or overlay lands at its own size.
 
 On the **picture**, click a layer to select it, drag it to move it, and drag
 its edges or corners to resize it (see [Placing layers](#placing-layers)). A
@@ -414,10 +438,9 @@ it. It lists:
   what GO LIVE does and **End stream** asks first, as clicking the clock
   does; the rest act at once, as their keys do.
 - Selecting each layer of the scene Studio edits, by its source's name.
-- Adding a camera, screen, window, or input: the first time, **Find cameras,
-  screens, windows, and inputs to add** lists them, then each is a row of its
-  own, added as a layer as the Add tab adds it. **Add a source** opens the
-  Add tab on any kind of source, to fill in by hand.
+- Adding a camera, screen, window, or input: opening the palette lists them,
+  each a row of its own once found, added as Add adds it. **Add a source**
+  opens Add.
 - The pages, each Settings pane, and each setting by its name, such as
   **Frame rate** or **Room key**, which opens its pane at that setting.
 - Undo and redo, naming the edit, the multiview, the stream's health in
@@ -1168,11 +1191,9 @@ On Linux with the `pipewire` feature, a `picked_display` or `picked_window`
 source opens the desktop's screen-sharing picker (xdg-desktop-portal) the
 first time it opens, and shows whichever display or window you choose there.
 It is the way to share a screen or window on a Wayland desktop, where the
-studio cannot list them itself. Studio's Add, among this machine's devices,
-offers them as **Picked display** and **Picked window**, first on a Wayland
-desktop, where the quick start's Screen adds **Picked display**, and Add's
-form for any source as **Display (system picker)** and **Window (system
-picker)**.
+studio cannot list them itself. Add offers them among this machine's
+screens and windows as **Picked display** and **Picked window**, first on a
+Wayland desktop, where the quick start's Screen adds **Picked display**.
 
 The scene file records only that the source is picked, not what you picked,
 so it stays portable. What you picked is the portal's grant, kept per machine

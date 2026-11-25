@@ -37,10 +37,8 @@ enum Command {
 	/// Add a device the last listing found as a layer of the scene Studio
 	/// edits.
 	Device(Pick),
-	/// List this machine's devices, which then show as rows of their own.
-	Devices,
-	/// Open Studio's Add tab on a kind of source.
-	Kind(Kind),
+	/// Open Add over Studio's picture.
+	Add,
 	Undo,
 	Redo,
 	Multiview,
@@ -136,6 +134,8 @@ impl Panels {
 			self.stop_interacting(&engine.state.lock().unwrap());
 		}
 		self.palette = Some(Palette::default());
+		// What can be added is listed afresh, so a camera plugged in since shows.
+		self.devices.renew(&self.runtime);
 	}
 
 	/// Everything the palette offers now, in the order it lists them before
@@ -195,53 +195,48 @@ impl Panels {
 			}
 		}
 
-		// What can be added: each device the last listing found, or else a
-		// listing, and each kind of source by hand.
+		// What can be added: each device listed as the palette opened, once
+		// found, and Add itself.
 		let devices = &["device", "source", "layer"];
-		match &self.devices.listing {
-			Some(listing) => {
-				let kinds = [
-					("Cameras", &listing.cameras),
-					("Displays", &listing.displays),
-					("Windows", &listing.windows),
-					("Audio inputs", &listing.audio),
-				];
-				// Never the studio's own virtual cameras, which would feed what
-				// one shows back into itself.
-				let own: Vec<String> = state.cameras().map(|camera| camera.id).collect();
-				let own = |pick: &&Pick| matches!(&pick.source, Source::Camera { id: Some(id) } if own.contains(id));
-				for (kind, picks) in kinds {
-					for pick in picks.iter().flatten().filter(|pick| !own(pick)) {
-						let name = format!("Add `{}`", pick.name);
-						rows.push(Row::new(
-							Command::Device(pick.clone()),
-							name,
-							format!("Add, {kind}"),
-							devices,
-						));
-					}
+		if let Some(listing) = &self.devices.listing {
+			let kinds = [
+				("Cameras", &listing.cameras),
+				("Displays", &listing.displays),
+				("Windows", &listing.windows),
+				("Audio inputs", &listing.audio),
+			];
+			// Never the studio's own virtual cameras, which would feed what
+			// one shows back into itself.
+			let own: Vec<String> = state.cameras().map(|camera| camera.id).collect();
+			let own = |pick: &&Pick| matches!(&pick.source, Source::Camera { id: Some(id) } if own.contains(id));
+			for (kind, picks) in kinds {
+				for pick in picks.iter().flatten().filter(|pick| !own(pick)) {
+					let name = format!("Add `{}`", pick.name);
+					rows.push(Row::new(
+						Command::Device(pick.clone()),
+						name,
+						format!("Add, {kind}"),
+						devices,
+					));
 				}
 			}
-			None => {
-				let mut row = Row::new(
-					Command::Devices,
-					"Find cameras, screens, windows, and inputs to add",
-					"Add",
-					&["device", "camera", "display", "screen", "window", "microphone", "list"],
-				);
-				if self.devices.pending.is_some() {
-					row.refused = Some("listing them now".into());
-				}
-				rows.push(row);
-			}
 		}
-		let picker =
-			|kind: &Kind| cfg!(target_os = "linux") || !matches!(kind, Kind::PickedDisplay | Kind::PickedWindow);
-		let offered = |kind: &Kind| on(kind.needs());
-		for kind in Kind::ALL.into_iter().filter(picker).filter(offered) {
-			let name = format!("Add a source: {}", kind.label());
-			rows.push(Row::new(Command::Kind(kind), name, "Add", &["new", "layer", "by hand"]));
-		}
+		rows.push(Row::new(
+			Command::Add,
+			"Add a source",
+			"Add",
+			&[
+				"new",
+				"layer",
+				"camera",
+				"screen",
+				"window",
+				"microphone",
+				"file",
+				"web",
+				"guest",
+			],
+		));
 
 		for page in Page::ALL.into_iter().filter(|page| on(page.needs())) {
 			rows.push(Row::new(
@@ -318,8 +313,11 @@ impl Panels {
 	/// arrows pick a row, Enter or a click runs it, and Escape closes.
 	pub(super) fn palette(&mut self, ctx: &egui::Context) {
 		let Some(mut palette) = self.palette.take() else { return };
-		// A listing asked for from here arrives on any page.
+		// The listing asked for as it opened arrives on any page.
 		self.devices.poll();
+		if self.devices.pending.is_some() {
+			ctx.request_repaint_after(Duration::from_millis(100));
+		}
 		let all = self.palette_rows(ctx);
 		// Taken before the search box sees them, which would move its cursor
 		// or lose focus on them.
@@ -420,8 +418,7 @@ impl Panels {
 				// Shown on its row already; the palette stays open on it.
 				Some(_) => {}
 				None => {
-					// A listing keeps the palette open, to show what it finds.
-					open = matches!(row.command, Command::Devices);
+					open = false;
 					self.run(ctx, row.command);
 				}
 			}
@@ -441,7 +438,7 @@ impl Panels {
 				| Command::Page(_)
 				| Command::Layer(_)
 				| Command::Device(_)
-				| Command::Kind(_)
+				| Command::Add
 				| Command::Health
 				| Command::Graph
 		) {
@@ -473,7 +470,13 @@ impl Panels {
 				// Two cameras of the same model share a name; number the later ones.
 				let name = state.collection().unused_name(&pick.name);
 				let layer = self.scene(&state).ok();
-				let result = add(&mut state, layer, name, pick.source, None);
+				let new = New {
+					name,
+					source: pick.source,
+					layer,
+					at: None,
+				};
+				let result = add(&mut state, new);
 				drop(state);
 				self.added(result);
 				if let Some(fault) = self.fault(&Spot::Add) {
@@ -481,15 +484,9 @@ impl Panels {
 					self.say(Err(fault));
 				}
 			}
-			Command::Devices => {
-				let refreshed = self.devices.refresh(&self.runtime).context("cannot list devices");
-				self.check(refreshed);
-			}
-			Command::Kind(kind) => {
+			Command::Add => {
 				self.page = Page::Studio;
-				self.side = Side::Add;
-				self.rail = true;
-				self.add.kind = kind;
+				self.open_add();
 			}
 			Command::Undo => self.undo(),
 			Command::Redo => self.redo(),

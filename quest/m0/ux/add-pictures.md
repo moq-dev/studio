@@ -16,13 +16,13 @@ reports device changes.
 
 ## Plan
 
-Split from [Adding a source in one click](/quest/m0/ux/add.md) on 2026-11-25
-(maintainer, /quest-run), so Add could land on today's capture listing while
+Split from Add's quest on 2026-11-25 (maintainer, /quest-run), so Add could
+land on today's capture listing
+([moq-dev/studio#262](https://github.com/moq-dev/studio/pull/262)) while
 these wait on moq-video's richer one. Thumbnails come at the low rate that
 listing offers, never from a full-size capture of every device; measure what
 an open Add costs in frame time and CPU with a few cameras and windows listed.
 
 ## Required
 
-- [Adding a source in one click](/quest/m0/ux/add.md) - the modal and its cards
 - [moq-video's capture listing is pinned](/quest/m0/pin-capture-list.md) - icons, live pictures, and change notices for windows and devices

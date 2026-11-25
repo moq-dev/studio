@@ -310,7 +310,7 @@ fn reason(err: &moq_scene::Error, path: &Path) -> String {
 /// Where a picture `size` canvas pixels large lands centered on `at`: at its
 /// own size, shrunk to half of `canvas` at most keeping its shape, and moved
 /// wholly onto the canvas.
-fn land(canvas: Canvas, size: [f32; 2], at: [f32; 2]) -> Rect {
+pub(super) fn land(canvas: Canvas, size: [f32; 2], at: [f32; 2]) -> Rect {
 	let (cw, ch) = (canvas.width as f32, canvas.height as f32);
 	let [mut width, mut height] = size.map(|side| side.max(1.0));
 	let shrink = (cw / 2.0 / width).min(ch / 2.0 / height).min(1.0);
@@ -968,67 +968,6 @@ impl Panels {
 			false => Intent::Add(landing),
 		};
 		self.read(ui.ctx(), Job { name, at, intent }, move || prepare(source, &dir));
-	}
-}
-
-/// What a drop or paste can become, with what makes it, for the Add tab.
-const KINDS: [(Icon, &str, &str); 4] = [
-	(Icon::Image, "Image layer", "from a PNG or JPEG"),
-	(Icon::Media, "Media layer", "from a video or sound file"),
-	(Icon::Color, "Color grade", "from a .cube file, on a layer"),
-	(Icon::Web, "Web page layer", "from a pasted web address"),
-];
-
-impl Panels {
-	/// What can be dropped or pasted onto the picture, the kind a drag over
-	/// the window holds lit, naming its file.
-	pub(super) fn drop_kinds(&mut self, ui: &mut Ui) {
-		let hovered: Option<PathBuf> =
-			ui.input(|input| input.raw.hovered_files.iter().find_map(|file| file.path.clone()));
-		let dragged = hovered.map(|path| {
-			let kind = match self.dropping.guess(&path).source {
-				Ok(Source::Image { .. }) => Some(0),
-				Ok(Source::Media { .. }) => Some(1),
-				Ok(Source::Lut { .. }) => Some(2),
-				_ => None,
-			};
-			(
-				kind,
-				path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
-			)
-		});
-		for (index, (icon, name, from)) in KINDS.into_iter().enumerate() {
-			let lit = dragged
-				.as_ref()
-				.and_then(|(kind, file)| (*kind == Some(index)).then_some(file));
-			let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 42.0), egui::Sense::hover());
-			let painter = ui.painter_at(rect);
-			if lit.is_some() {
-				painter.rect_filled(rect, 6, kit::ACCENT.gamma_multiply(0.14));
-			}
-			let tile = egui::Rect::from_min_size(rect.min + egui::vec2(6.0, 7.0), egui::Vec2::splat(28.0));
-			painter.rect_filled(tile, 7, if lit.is_some() { kit::ACCENT } else { kit::P3 });
-			icon.paint(ui, tile, 15.0, kit::TEXT);
-			let left = tile.right() + 10.0;
-			painter.text(
-				egui::pos2(left, rect.top() + 5.0),
-				egui::Align2::LEFT_TOP,
-				name,
-				kit::ui_medium(13.0),
-				kit::TEXT,
-			);
-			let (below, color) = match lit {
-				Some(file) => (format!("{file}, dropping now"), kit::TEXT),
-				None => (from.to_string(), kit::DIM),
-			};
-			painter.text(
-				egui::pos2(left, rect.top() + 23.0),
-				egui::Align2::LEFT_TOP,
-				below,
-				kit::ui(11.0),
-				color,
-			);
-		}
 	}
 }
 

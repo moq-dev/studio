@@ -15,7 +15,7 @@ const GAP: f32 = 16.0;
 const HEAD: f32 = 120.0;
 
 /// What a text overlay starts as: a lower third to edit in the inspector.
-const TEXT: &str = "<div style=\"position: absolute; left: 64px; bottom: 64px; padding: 16px 28px; \
+pub(super) const TEXT: &str = "<div style=\"position: absolute; left: 64px; bottom: 64px; padding: 16px 28px; \
 	border-radius: 12px; background: rgba(0, 0, 0, 0.6); color: white; \
 	font: 600 48px sans-serif\">Your text</div>";
 
@@ -23,7 +23,7 @@ const TEXT: &str = "<div style=\"position: absolute; left: 64px; bottom: 64px; p
 #[derive(Default)]
 pub(super) struct QuickStart {
 	/// The system's file dialog for a media file, while open.
-	dialog: Option<Task<Option<std::path::PathBuf>>>,
+	pub(super) dialog: Option<Task<Option<std::path::PathBuf>>>,
 	/// The web address typed so far.
 	url: String,
 }
@@ -63,17 +63,8 @@ impl Panels {
 			(layer, own)
 		};
 		self.devices.poll();
-		if self.devices.listing.is_none()
-			&& self.devices.pending.is_none()
-			&& let Err(err) = self.devices.refresh(&self.runtime)
-		{
-			let failed = || Err(format!("cannot list devices: {err}"));
-			self.devices.listing = Some(Listing {
-				cameras: failed(),
-				displays: failed(),
-				windows: failed(),
-				audio: failed(),
-			});
+		if self.devices.listing.is_none() {
+			self.devices.renew(&self.runtime);
 		}
 		if self.devices.pending.is_some() {
 			ui.ctx().request_repaint_after(Duration::from_millis(100));
@@ -180,7 +171,13 @@ impl Panels {
 	fn quick_add_source(&mut self, layer: &Layer, name: &str, source: Source) {
 		let mut state = self.engine.state.lock().unwrap();
 		let name = state.collection().unused_name(name);
-		let result = add(&mut state, Some(layer.clone()), name, source, None);
+		let new = New {
+			name,
+			source,
+			layer: Some(layer.clone()),
+			at: None,
+		};
+		let result = add(&mut state, new);
 		drop(state);
 		match result {
 			Ok(name) => self.added(Ok(name)),
@@ -265,7 +262,7 @@ fn first<'a>(devices: &'a [Pick], own: &[String]) -> Option<&'a Pick> {
 /// The display the Screen card adds: the first listed, or on macOS with
 /// capture, the main display when none is, since listing them needs the
 /// Screen Recording access that only opening one asks for.
-fn display(displays: &Result<Vec<Pick>, String>) -> Option<Pick> {
+pub(super) fn display(displays: &Result<Vec<Pick>, String>) -> Option<Pick> {
 	let listed = displays.as_ref().ok().and_then(|displays| displays.first()).cloned();
 	listed.or_else(|| {
 		cfg!(all(target_os = "macos", feature = "capture")).then(|| Pick {
@@ -276,7 +273,7 @@ fn display(displays: &Result<Vec<Pick>, String>) -> Option<Pick> {
 }
 
 /// The system's dialog for an image or video file.
-fn media_dialog(runtime: &tokio::runtime::Handle) -> Task<Option<std::path::PathBuf>> {
+pub(super) fn media_dialog(runtime: &tokio::runtime::Handle) -> Task<Option<std::path::PathBuf>> {
 	let dialog = Task::spawn(runtime, || async {
 		let picked = rfd::AsyncFileDialog::new()
 			.set_title("Add an image or video")

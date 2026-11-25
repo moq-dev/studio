@@ -18,8 +18,7 @@ const TOOLBAR_GAP: f32 = 8.0;
 pub(super) const OFF_AIR_TOP: &str = "Always on top is drawn on program; go back to live to change it";
 
 impl Panels {
-	/// The Studio page: the layers and Add on the left while the rail is
-	/// open, the live picture, or the scene open off air under its banner, in
+	/// The Studio page: the layers on the left while the rail is open, the live picture, or the scene open off air under its banner, in
 	/// the middle, and the inspector on the right while it has anything to
 	/// show, or among the rail's tabs when the window is narrow.
 	pub(super) fn build(&mut self, ui: &mut Ui, fx: &mut Fx, stage: egui::Rect, snapshot: &Snapshot) {
@@ -95,6 +94,7 @@ impl Panels {
 				keep::legend(ui, at);
 			}
 			self.build_keys(ui);
+			self.add_modal(ui, middle);
 			return;
 		};
 		let (edited, other) = match self.format {
@@ -126,6 +126,7 @@ impl Panels {
 		let tabs = self.format_tabs(ui, under);
 		self.shown_in(ui, under.with_min_x(tabs.right() + 12.0), None);
 		self.build_keys(ui);
+		self.add_modal(ui, middle);
 	}
 
 	/// The portrait picture's canvas while Studio edits a scene drawn in both,
@@ -150,13 +151,13 @@ impl Panels {
 	}
 
 	/// The page's keys, unless a field, a page, or a modal such as Settings
-	/// has the keyboard: A adds a layer, opening the rail, Escape leaves
+	/// has the keyboard: A opens Add, Escape leaves
 	/// cropping, then the selection, and Delete or Backspace removes the
 	/// selected layer unless the picture or the layer is locked.
 	fn build_keys(&mut self, ui: &Ui) {
 		let ctx = ui.ctx();
 		let modal = ctx.memory(|memory| memory.top_modal_layer()).is_some();
-		if modal || ctx.text_edit_focused() || self.interact.has_keyboard() || self.interacting {
+		if modal || self.add_keys(ui) || ctx.text_edit_focused() || self.interact.has_keyboard() || self.interacting {
 			return;
 		}
 		let (add, escape, delete, backspace) = ui.input_mut(|input| {
@@ -168,8 +169,7 @@ impl Panels {
 			)
 		});
 		if add {
-			self.side = Side::Add;
-			self.rail = true;
+			self.open_add();
 		}
 		if escape {
 			match self.cropping {
@@ -297,6 +297,13 @@ impl Panels {
 				frame.show(ui, Some(fx), |ui| kit::named(picture(ui, id, canvas, sense), "Canvas"))
 			})
 			.inner;
+		// A card dragged out of Add, let go here. Taken before a layer's row
+		// dropped on a slot is, since taking a drag's payload of any kind
+		// drops it.
+		let card = match self.locked {
+			true => None,
+			false => self.card_on_picture(ui, &state, &response, canvas),
+		};
 		let (spot, result) = match self.locked {
 			true => {
 				self.drops_on_locked(ui, response.rect);
@@ -337,6 +344,9 @@ impl Panels {
 		drop(state);
 		if let Some(spot) = spot {
 			self.fail(spot, result);
+		}
+		if let Some((card, at)) = card {
+			self.take_card(&card, at);
 		}
 		self.quick_start(ui, response.rect);
 		if let Some(cued) = snapshot.cued.as_ref().filter(|_| off_air.is_none()) {
@@ -817,7 +827,7 @@ impl Panels {
 				ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
 				self.dropping.paste_from_menu();
 			}
-			Some(PictureAction::Add) => self.side = Side::Add,
+			Some(PictureAction::Add) => self.open_add(),
 			None => {}
 		}
 		let action = action?;

@@ -30,6 +30,7 @@ use crate::replay::{self, Of};
 use crate::snap::{self, Grab, Snap};
 use crate::{mix, record};
 
+mod add;
 mod build;
 mod cue;
 mod dark;
@@ -55,6 +56,8 @@ mod slots;
 mod sound;
 mod start;
 
+#[cfg(test)]
+pub(crate) use add::Tab as AddTab;
 use levels::Levels;
 #[cfg(test)]
 pub(crate) use mixer::View as MixView;
@@ -247,12 +250,11 @@ impl Setting {
 	}
 }
 
-/// The Studio page's left column: the layers, or what can be added.
+/// The Studio page's left column: the layers, or the inspector.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Side {
 	#[default]
 	Layers,
-	Add,
 	/// The inspector, a tab of its own when the window is too narrow for
 	/// its column.
 	Inspect,
@@ -260,12 +262,11 @@ pub(crate) enum Side {
 
 impl Side {
 	/// The tabs beside the inspector's own column.
-	const ALL: [Self; 2] = [Self::Layers, Self::Add];
+	const ALL: [Self; 1] = [Self::Layers];
 
 	fn name(self) -> &'static str {
 		match self {
 			Self::Layers => "Layers",
-			Self::Add => "Add",
 			Self::Inspect => "Inspector",
 		}
 	}
@@ -369,7 +370,7 @@ impl Studio {
 			desk: mixer::Desk::default(),
 			canvas: None,
 			sizes: BTreeMap::new(),
-			add: AddSource::default(),
+			adding: add::Adding::default(),
 			devices: Devices::default(),
 			interacting: false,
 			interact: Interact::default(),
@@ -558,10 +559,11 @@ impl Studio {
 	}
 
 	/// List `listing` as this machine's devices, in place of any listing
-	/// under way, as a refresh would.
+	/// under way, and keep it as Add and the palette open.
 	pub(crate) fn seed_devices(&mut self, listing: Listing) {
 		self.panels.devices.listing = Some(listing);
 		self.panels.devices.pending = None;
+		self.panels.devices.fixed = true;
 	}
 
 	/// Open Settings at `setting`, as the gear would.
@@ -656,6 +658,13 @@ impl Studio {
 	/// Whether a layer is selected.
 	pub(crate) fn selected(&self) -> bool {
 		self.panels.selection.is_some()
+	}
+
+	/// Open Add on `tab`, as `A` and a click on its card would.
+	pub(crate) fn open_add(&mut self, tab: add::Tab) {
+		self.panels.page = Page::Studio;
+		self.panels.open_add();
+		self.panels.adding.tab = tab;
 	}
 
 	/// Turn to Studio with `side` and `inspect` shown, and the layer at
@@ -799,6 +808,7 @@ impl Studio {
 		// turning Interact off does.
 		if !panels.staged {
 			panels.let_go();
+			panels.close_add();
 		}
 		// A thumbnail nothing shows is not drawn, until it is again.
 		let bindings = panels.hotkeys.as_ref().map(Hotkeys::bindings).unwrap_or_default();
@@ -992,7 +1002,8 @@ struct Panels {
 	canvas: Option<Canvas>,
 	/// The size each scene's form holds until it is applied, by name.
 	sizes: BTreeMap<String, (u32, u32)>,
-	add: AddSource,
+	/// Add, over the stage while open.
+	adding: add::Adding,
 	devices: Devices,
 	/// Whether the Studio page's picture passes the mouse and keyboard to the
 	/// selected layer's web page, until Escape.
@@ -1103,7 +1114,7 @@ enum Spot {
 	Pad(String),
 	/// The scene's inspector, with no layer selected.
 	Scene,
-	/// The Add tab.
+	/// Add, over the stage.
 	Add,
 	/// The picture, where the last drop or paste landed.
 	Dropped,
@@ -2336,50 +2347,43 @@ fn clone_of(collection: &Collection, name: &str) -> (Source, Option<Video>) {
 	(source, video)
 }
 
-/// Add `source` as `name`, with `video` filters, place it in front of
-/// `layer` if it has a picture, and put its sound in the audio scene on
-/// program if it has sound. Returns the name.
-fn add(
-	state: &mut State,
-	layer: Option<Layer>,
+/// A source to add: its name, what it is, and the layers it joins if it
+/// has a picture, centered on `at` in canvas pixels, or where
+/// [`add::place`] puts it.
+struct New {
 	name: String,
 	source: Source,
-	video: Option<Video>,
-) -> anyhow::Result<String> {
+	layer: Option<Layer>,
+	at: Option<[f32; 2]>,
+}
+
+/// Add `new`, placed among its layers if it has a picture and heard in the
+/// audio scene on program if it has sound. Returns its name.
+fn add(state: &mut State, new: New) -> anyhow::Result<String> {
+	let New {
+		name,
+		source,
+		layer,
+		at,
+	} = new;
 	anyhow::ensure!(!name.is_empty(), "a source needs a name");
 	anyhow::ensure!(
 		!state.collection().sources.contains_key(&name),
 		"there is already a source named `{name}`"
 	);
-	let canvas = layer
-		.as_ref()
-		.and_then(|layer| state.collection().canvas(layer.scene.as_deref()));
-	let canvas = canvas.unwrap_or(state.collection().canvas);
-	let place = source.has_video();
 	let heard = source.has_audio();
-	// A page or overlay, or a clone of one, lands at its own size, pixel for
-	// pixel; anything else fills the canvas.
-	let shown = match &source {
-		Source::Clone { source } => state.collection().sources.get(source),
-		source => Some(source),
-	};
-	let rect = match shown {
-		Some(Source::Browser { width, height, .. } | Source::Overlay { width, height, .. }) => Rect {
-			x: 0.0,
-			y: 0.0,
-			width: *width as f32,
-			height: *height as f32,
-		},
-		_ => Rect::fill(&canvas),
-	};
+	let placed = layer.filter(|_| source.has_video()).map(|layer| {
+		let collection = state.collection();
+		let canvas = collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas);
+		let (index, rect) = add::place(collection, &layer, canvas, &source, at);
+		(layer, index, rect)
+	});
 	edit(state, format!("Add `{name}`"), None, |draft| {
 		draft.set_source(&name, Some(source))?;
-		draft.set_video(&name, video)?;
 		if heard {
 			draft.hear(&name)?;
 		}
-		if place && let Some(layer) = layer {
-			let index = draft.collection().items(&layer).map_or(0, <[Item]>::len);
+		if let Some((layer, index, rect)) = placed {
 			draft.insert_item(&layer, index, Item::new(name.clone(), rect))?;
 		}
 		Ok(())
@@ -2868,278 +2872,13 @@ fn gain_field(db: &mut f32) -> egui::DragValue<'_> {
 		})
 }
 
-/// The form that adds a source by hand.
-struct AddSource {
-	name: String,
-	kind: Kind,
-	/// A path, broadcast path, url, device id, or an overlay's HTML, depending
-	/// on the kind.
-	value: String,
-	color: Color32,
-	/// A browser source's page size, or an overlay's.
-	width: u32,
-	height: u32,
-	/// Whether a media file loops, and whether it or an overlay starts over
-	/// each time it goes on program.
-	looping: bool,
-	restart: bool,
-	/// The scene a scene source draws, or `None` for the program.
-	scene: Option<String>,
-}
-
-impl Default for AddSource {
-	fn default() -> Self {
-		let canvas = moq_scene::Canvas::default();
-		Self {
-			name: String::new(),
-			kind: Kind::default(),
-			value: String::new(),
-			color: Color32::WHITE,
-			width: canvas.width,
-			height: canvas.height,
-			looping: false,
-			restart: true,
-			scene: None,
-		}
-	}
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum Kind {
-	#[default]
-	Color,
-	Image,
-	Media,
-	Broadcast,
-	Camera,
-	Display,
-	Window,
-	PickedDisplay,
-	PickedWindow,
-	Microphone,
-	SystemAudio,
-	Browser,
-	Overlay,
-	Replay,
-	Lut,
-	Scene,
-	Role,
-}
-
-impl Kind {
-	const ALL: [Self; 17] = [
-		Self::Color,
-		Self::Image,
-		Self::Media,
-		Self::Broadcast,
-		Self::Camera,
-		Self::Display,
-		Self::Window,
-		Self::PickedDisplay,
-		Self::PickedWindow,
-		Self::Microphone,
-		Self::SystemAudio,
-		Self::Browser,
-		Self::Overlay,
-		Self::Replay,
-		Self::Lut,
-		Self::Scene,
-		Self::Role,
-	];
-
-	/// The mod that must be on for it to be offered, if any.
-	fn needs(self) -> Option<Mod> {
-		match self {
-			Self::Replay => Some(Mod::Review),
-			Self::Role => Some(Mod::Layout),
-			_ => None,
-		}
-	}
-
-	fn label(self) -> &'static str {
-		match self {
-			Self::Color => "Color",
-			Self::Image => "Image",
-			Self::Media => "Media file",
-			Self::Broadcast => "Broadcast",
-			Self::Camera => "Camera",
-			Self::Display => "Display",
-			Self::Window => "Window",
-			Self::PickedDisplay => "Display (system picker)",
-			Self::PickedWindow => "Window (system picker)",
-			Self::Microphone => "Microphone",
-			Self::SystemAudio => "System audio",
-			Self::Browser => "Browser",
-			Self::Overlay => "Overlay",
-			Self::Replay => "Replay",
-			Self::Lut => "LUT",
-			Self::Scene => "Scene",
-			Self::Role => "Role",
-		}
-	}
-
-	/// What the value field holds, if this kind takes one.
-	fn value(self) -> Option<&'static str> {
-		match self {
-			Self::Color | Self::SystemAudio | Self::Replay | Self::Scene | Self::PickedDisplay | Self::PickedWindow => {
-				None
-			}
-			Self::Image | Self::Media => Some("file"),
-			Self::Lut => Some(".cube file"),
-			Self::Role => Some("source filling it (empty for none)"),
-			Self::Broadcast => Some("path"),
-			Self::Window => Some("window id"),
-			Self::Browser => Some("url"),
-			Self::Overlay => Some("HTML and CSS"),
-			Self::Camera | Self::Display | Self::Microphone => Some("id (empty for the default)"),
-		}
-	}
-}
-
-impl AddSource {
-	/// Draw the form, offering `scenes` to a scene source; the source to add
-	/// once the user asks for it.
-	fn ui(&mut self, ui: &mut Ui, scenes: &[String], mods: &crate::mods::Mods) -> Option<Source> {
-		let on = |kind: &Kind| kind.needs().is_none_or(|needs| mods.on(needs));
-		if !on(&self.kind) {
-			self.kind = Kind::default();
-		}
-		let mut add = false;
-		egui::Grid::new("add source").show(ui, |ui| {
-			let label = ui.label("Name");
-			ui.text_edit_singleline(&mut self.name).labelled_by(label.id);
-			ui.end_row();
-			let label = ui.label("Kind");
-			egui::ComboBox::from_id_salt("kind")
-				.selected_text(self.kind.label())
-				.show_ui(ui, |ui| {
-					// Only Linux has the system picker.
-					let picker = |kind: &Kind| {
-						cfg!(target_os = "linux") || !matches!(kind, Kind::PickedDisplay | Kind::PickedWindow)
-					};
-					for kind in Kind::ALL.into_iter().filter(picker).filter(on) {
-						ui.selectable_value(&mut self.kind, kind, kind.label());
-					}
-				})
-				.response
-				.labelled_by(label.id);
-			ui.end_row();
-			if let Some(label) = self.kind.value() {
-				let label = ui.label(label);
-				let response = if self.kind == Kind::Overlay {
-					ui.add(egui::TextEdit::multiline(&mut self.value).code_editor())
-				} else {
-					ui.text_edit_singleline(&mut self.value)
-				};
-				response.labelled_by(label.id);
-				ui.end_row();
-			}
-			if matches!(self.kind, Kind::Browser | Kind::Overlay) {
-				ui.label("Size");
-				ui.horizontal(|ui| {
-					kit::named(ui.add(egui::DragValue::new(&mut self.width).range(1..=4096)), "Width");
-					ui.label("x");
-					kit::named(ui.add(egui::DragValue::new(&mut self.height).range(1..=4096)), "Height");
-				});
-				ui.end_row();
-			}
-			if self.kind == Kind::Color {
-				let label = ui.label("Color");
-				egui::color_picker::color_edit_button_srgba(ui, &mut self.color, egui::color_picker::Alpha::OnlyBlend)
-					.labelled_by(label.id);
-				ui.end_row();
-			}
-			if self.kind == Kind::Scene {
-				// A pick whose scene was removed or renamed away names no scene.
-				if self.scene.as_ref().is_some_and(|scene| !scenes.contains(scene)) {
-					self.scene = None;
-				}
-				let label = ui.label("Draws");
-				egui::ComboBox::from_id_salt("scene")
-					.selected_text(self.scene.as_deref().unwrap_or("Program"))
-					.show_ui(ui, |ui| {
-						ui.selectable_value(&mut self.scene, None, "Program")
-							.on_hover_text("Whatever is on air, transitions included");
-						for scene in scenes {
-							ui.selectable_value(&mut self.scene, Some(scene.clone()), scene);
-						}
-					})
-					.response
-					.labelled_by(label.id);
-				ui.end_row();
-			}
-			if self.kind == Kind::Overlay {
-				ui.label("Animation");
-				ui.add(kit::Toggle::new(&mut self.restart).label("Restart on program"))
-					.on_hover_text(
-						"Start its animations over each time its scene goes on program, rather than run on, as a clock should",
-					);
-				ui.end_row();
-			}
-			if self.kind == Kind::Media {
-				ui.label("Playback");
-				ui.horizontal(|ui| {
-					ui.add(kit::Toggle::new(&mut self.looping).label("Loop"))
-						.on_hover_text("Start over at the end, rather than hold the last picture");
-					ui.add(kit::Toggle::new(&mut self.restart).label("Restart on program"))
-						.on_hover_text("Play from the start each time it goes on program");
-				});
-				ui.end_row();
-			}
-			add = ui.add(kit::button(Icon::Add, "Add source")).clicked();
-			ui.end_row();
-		});
-		if !add {
-			return None;
-		}
-
-		let value = self.value.trim().to_string();
-		let id = (!value.is_empty()).then(|| value.clone());
-		Some(match self.kind {
-			Kind::Color => Source::Color {
-				color: moq_scene::Rgba(self.color.to_srgba_unmultiplied()),
-			},
-			Kind::Image => Source::Image { path: value.into() },
-			Kind::Media => Source::Media {
-				path: value.into(),
-				looping: self.looping,
-				restart: self.restart,
-			},
-			Kind::Lut => Source::Lut { path: value.into() },
-			Kind::Broadcast => Source::Broadcast { path: value },
-			Kind::Camera => Source::Camera { id },
-			Kind::Display => Source::Display { id },
-			Kind::Window => Source::Window { id: value },
-			Kind::PickedDisplay => Source::PickedDisplay,
-			Kind::PickedWindow => Source::PickedWindow,
-			Kind::Microphone => Source::Microphone { id },
-			Kind::SystemAudio => Source::SystemAudio,
-			Kind::Browser => Source::Browser {
-				url: value,
-				width: self.width,
-				height: self.height,
-			},
-			Kind::Overlay => Source::Overlay {
-				html: value,
-				width: self.width,
-				height: self.height,
-				restart: self.restart,
-			},
-			Kind::Replay => Source::Replay,
-			Kind::Role => Source::Role { source: id },
-			Kind::Scene => match &self.scene {
-				Some(scene) => Source::Scene { scene: scene.clone() },
-				None => Source::Program,
-			},
-		})
-	}
-}
-
 /// The capture devices this machine has, listed in the background.
 #[derive(Default)]
 struct Devices {
 	listing: Option<Listing>,
 	pending: Option<std::sync::mpsc::Receiver<Listing>>,
+	/// A listing a test seeded, which [`Self::renew`] keeps.
+	fixed: bool,
 }
 
 impl Devices {
@@ -3165,52 +2904,21 @@ impl Devices {
 		}
 	}
 
-	/// Draw the listing, leaving out the cameras `own` holds the ids of, the
-	/// studio's own virtual cameras, so what one shows is not fed back into
-	/// itself; the device to add once the user picks one.
-	fn ui(&mut self, ui: &mut Ui, own: &[String]) -> Option<Pick> {
-		if self.pending.is_some() {
-			ui.spinner();
+	/// List afresh unless a listing is under way, reporting why one cannot
+	/// start as the failure of every kind.
+	fn renew(&mut self, runtime: &tokio::runtime::Handle) {
+		if self.pending.is_some() || self.fixed {
+			return;
 		}
-		let Some(listing) = &mut self.listing else {
-			ui.label("Refresh to list this machine's cameras, screens, and inputs.");
-			return None;
-		};
-		let mut picked = None;
-		egui::ScrollArea::vertical()
-			.show(ui, |ui| {
-				for (kind, devices) in listing.kinds() {
-					ui.strong(kind);
-					match devices {
-						Ok(devices) if devices.is_empty() => {
-							ui.weak("none");
-						}
-						Ok(devices) => {
-							for (index, device) in devices.iter().enumerate() {
-								if let Source::Camera { id: Some(id) } = &device.source
-									&& own.contains(id)
-								{
-									continue;
-								}
-								ui.horizontal(|ui| {
-									if ui.small_button("Add").clicked() {
-										picked = Some(index);
-									}
-									ui.label(&device.name);
-								});
-							}
-							if let Some(index) = picked.take() {
-								return Some(devices.remove(index));
-							}
-						}
-						Err(err) => {
-							ui.colored_label(ui.visuals().error_fg_color, err.as_str());
-						}
-					}
-				}
-				None
-			})
-			.inner
+		if let Err(err) = self.refresh(runtime) {
+			let failed = || Err(format!("cannot list devices: {err}"));
+			self.listing = Some(Listing {
+				cameras: failed(),
+				displays: failed(),
+				windows: failed(),
+				audio: failed(),
+			});
+		}
 	}
 }
 

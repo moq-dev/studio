@@ -29,8 +29,8 @@ struct Studio {
 impl Studio {
 	async fn start() -> Self {
 		let dir = tempfile::tempdir().unwrap();
-		let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../moq-scene/src/test_data/tone.webm");
-		std::fs::copy(data, dir.path().join("tone.webm")).unwrap();
+		let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../moq-scene/src/test_data/clip.mkv");
+		std::fs::copy(data, dir.path().join("tone.mkv")).unwrap();
 		std::fs::write(
 			dir.path().join("show.toml"),
 			"version = 1\n\n[canvas]\nwidth = 1280\nheight = 720\nframerate = 30\n\n[[scenes]]\nname = \"Main\"\n",
@@ -175,24 +175,25 @@ async fn an_agent_builds_a_show() {
 	studio.until("/app", "\"studio\"");
 	studio.audit("the studio page");
 
-	// Add a media source, as a user would, from the layers' rail's Add tab.
-	studio.ctl(&["click", "Add"]);
-	studio.audit("the add tab");
-	studio.ctl(&["click", "Name"]);
-	studio.ctl(&["type", "tone"]);
-	studio.ctl(&["click", "Kind"]);
-	studio.ctl(&["click", "Media file"]);
-	// The name, through the run's own clipboard.
-	studio.ctl(&["click", "Name"]);
+	// Add a media file, as a user would paste its path onto the picture: the
+	// path typed into Add's web address and copied through the run's own
+	// clipboard, then Add closed and the path pasted over the picture.
+	studio.ctl(&["click", "Add a layer"]);
+	studio.audit("add");
+	studio.ctl(&["click", "Media & Web"]);
+	studio.audit("add's media");
+	let path = studio.dir.path().join("tone.mkv");
+	studio.ctl(&["click", "Web page URL"]);
+	studio.ctl(&["type", path.to_str().unwrap()]);
 	studio.ctl(&["key", "ctrl+a"]);
 	studio.ctl(&["key", "ctrl+c"]);
-	studio.ctl(&["click", "file"]);
+	studio.ctl(&["click", "Close Add"]);
+	studio.ctl(&["wait", "--gone", "Web page URL"]);
+	studio.ctl(&["hover", "Canvas"]);
 	studio.ctl(&["key", "ctrl+v"]);
-	studio.ctl(&["type", ".webm"]);
-	studio.ctl(&["click", "Add source"]);
 	studio.ctl(&["wait", "--settled", "--timeout", "20s"]);
 	let state = &studio.snapshot()["state"]["studio"];
-	assert_eq!(state["show"]["sources"]["tone"]["path"], "tone.webm", "{state:#}");
+	assert_eq!(state["show"]["sources"]["tone"]["path"], "tone.mkv", "{state:#}");
 	assert_eq!(state["show"]["scenes"][0]["items"][0]["source"], "tone", "{state:#}");
 	assert_eq!(state["sources"]["tone"]["track"], "live", "{state:#}");
 

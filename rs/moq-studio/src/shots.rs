@@ -20,7 +20,7 @@ use moq_scene::Source;
 use moq_scene::source::Status;
 
 use crate::mods::Mod;
-use crate::ui::{Inspect, MixView, Page, Setting, Side};
+use crate::ui::{AddTab, Inspect, MixView, Page, Setting, Side};
 use crate::{App, Window, autosave, devices, engine, fx, hotkeys, recent, show, stream};
 
 /// The window's size, the mock-ups'.
@@ -67,6 +67,8 @@ enum View {
 		inspect: Inspect,
 		index: Option<usize>,
 	},
+	/// Add open on a tab over Studio, listing a few devices.
+	Add(AddTab),
 	/// Studio with the host's layer selected and its row's menu open.
 	Menu,
 	/// Studio with the host's layer selected and the inspector's More open.
@@ -147,8 +149,8 @@ enum View {
 		/// Whether the host's picture stalled.
 		stalled: bool,
 	},
-	/// Studio's Add tab on the drop views' show, with a file dragged or
-	/// dropped on the picture.
+	/// Studio on the drop views' show, with a file dragged or dropped on the
+	/// picture.
 	Drop(Drop),
 	/// On the dual-format show, the layer of the scene on program at
 	/// `index`, front first, selected, Studio editing `format`'s picture, in
@@ -217,7 +219,7 @@ enum Drop {
 	Placed,
 }
 
-/// The studio on the drop views' show, turned to Studio's Add tab with `drop`.
+/// The studio on the drop views' show, turned to Studio with `drop`.
 fn dropping(drop: Drop) -> Open {
 	Open::Studio {
 		view: View::Drop(drop),
@@ -333,9 +335,16 @@ views! {
 	edit_more: Still, on_show(View::More);
 	/// The selected layer's keyframes.
 	build_animate: Still, on_show(View::Build { side: Side::Layers, inspect: Inspect::Animate, index: Some(1) });
-	/// What can be added: sources no layer shows, devices, by hand, and
-	/// guests.
-	build_add: Still, on_show(View::Build { side: Side::Add, inspect: Inspect::Layer, index: None });
+	/// Add over the stage, as `A` opens it: the sources no layer shows, then
+	/// this machine's cameras, screens, and windows, each a card adding it in
+	/// one click.
+	add: Still, on_show(View::Add(AddTab::Devices));
+	/// Add's files, web page, text, color, and the show's own scenes.
+	add_media: Still, on_show(View::Add(AddTab::Media));
+	/// Add's microphones, each with its level.
+	add_audio: Still, on_show(View::Add(AddTab::Audio));
+	/// Add's guests: the invite, and who joined.
+	add_guests: Still, on_show(View::Add(AddTab::Guests));
 	/// A layer row's menu, as a right click opens it.
 	build_menu: Still, on_show(View::Menu);
 	/// A source published independently selected: under its switch in the
@@ -1508,6 +1517,102 @@ fn an_edit_being_typed_saves_on_the_way_out() {
 	quit(&engine, &runtime);
 }
 
+/// Add, opened by its key over a new show, adds a card in one click and
+/// closes: the first picture fills the canvas, a camera over it lands as a
+/// picture-in-picture in the bottom right corner, and a card dragged onto the
+/// picture lands where it is let go. Escape closes it. It draws no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn add_places_a_card_in_one_click() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let text = show::first(moq_scene::Canvas::default(), false)
+		.unwrap()
+		.to_toml()
+		.unwrap();
+	std::fs::write("show.toml", text).unwrap();
+	let app = start(launch(&gpu), stream(None), &runtime);
+	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, recent::Recent::default());
+	harness.step();
+	let engine = started.get().expect("the studio started");
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		panic!("the studio starts on its first frame")
+	};
+	studio.seed_devices(add_devices());
+	harness.run_steps(2);
+	let items = || engine.state.lock().unwrap().collection().scenes[0].items.clone();
+	let canvas = engine.state.lock().unwrap().collection().canvas;
+	let (width, height) = (canvas.width as f32, canvas.height as f32);
+
+	harness.key_press(egui::Key::A);
+	harness.run_steps(2);
+	harness.key_press(egui::Key::Escape);
+	harness.run_steps(2);
+	assert!(harness.query_by_label("Add Display 1").is_none(), "Escape closes Add");
+
+	harness.key_press(egui::Key::A);
+	harness.run_steps(2);
+	harness.get_by_label("Add Display 1").click();
+	harness.run_steps(2);
+	assert!(
+		harness.query_by_label("Add Display 1").is_none(),
+		"Add closes once it adds"
+	);
+	assert_eq!(
+		items()[0].rect,
+		moq_scene::Rect::fill(&canvas),
+		"the first picture fills"
+	);
+
+	harness.key_press(egui::Key::A);
+	harness.run_steps(2);
+	harness.get_by_label("Add Sony A6400").click();
+	harness.run_steps(2);
+	let camera = items()[1].clone();
+	assert_eq!(camera.source, "Sony A6400");
+	assert_eq!(camera.rect.width, (width * 0.3).round(), "a picture-in-picture");
+	assert!(
+		camera.rect.x > width / 2.0 && camera.rect.y > height / 2.0,
+		"in the bottom right corner: {:?}",
+		camera.rect
+	);
+
+	// Dragged onto the top left of the picture, it lands there.
+	harness.key_press(egui::Key::A);
+	harness.run_steps(2);
+	let from = harness.get_by_label("Add Laptop camera").rect().center();
+	let picture = harness.get_by_label("Canvas").rect();
+	let to = picture.lerp_inside(egui::vec2(0.25, 0.25));
+	harness.hover_at(from);
+	harness.run_steps(1);
+	harness.drag_at(from);
+	harness.run_steps(1);
+	for step in 1..=4 {
+		harness.hover_at(from.lerp(to, step as f32 / 4.0));
+		harness.run_steps(1);
+	}
+	harness.input_mut().events.push(egui::Event::PointerButton {
+		pos: to,
+		button: egui::PointerButton::Primary,
+		pressed: false,
+		modifiers: egui::Modifiers::NONE,
+	});
+	harness.run_steps(2);
+	let dropped = items().into_iter().find(|item| item.source == "Laptop camera");
+	let dropped = dropped.expect("the dragged card is added");
+	let center = [
+		dropped.rect.x + dropped.rect.width / 2.0,
+		dropped.rect.y + dropped.rect.height / 2.0,
+	];
+	assert!(
+		center[0] < width / 2.0 && center[1] < height / 2.0,
+		"lands where it was let go: {:?}",
+		dropped.rect
+	);
+	drop(harness);
+	quit(&engine, &runtime);
+}
+
 /// On Studio, the quick start never draws over the program on air, where one
 /// click would put a device straight on the stream: an empty show going live
 /// hides it, and ending the stream brings it back. It draws no view.
@@ -2174,11 +2279,16 @@ fn a_mod_off_holds_its_feature_back() {
 		"a guest waiting to be placed is not left out"
 	);
 
-	// Added from Not in any scene, they are heard on the stream.
+	// Added from Add, where a guest waits for a scene, they are heard on the
+	// stream.
+	let tab = match engine.room() {
+		Some(_) => AddTab::Guests,
+		None => AddTab::Devices,
+	};
 	let App::Studio(studio) = &mut harness.state_mut().app else {
 		unreachable!("the studio is open")
 	};
-	studio.build(Side::Add, Inspect::Layer, None);
+	studio.open_add(tab);
 	harness.run_steps(2);
 	harness.get_by_label("Add waiting").click();
 	harness.run_steps(2);
@@ -2676,6 +2786,10 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		View::Mix(view, opened) => studio.mix(*view, *opened),
 		View::MixMenu => studio.mix(MixView::Strips, None),
 		View::Build { side, inspect, index } => studio.build(*side, *inspect, *index),
+		View::Add(tab) => {
+			studio.seed_devices(add_devices());
+			studio.open_add(*tab);
+		}
 		View::KeepClear { .. } => {
 			studio.build(Side::Layers, Inspect::Layer, Some(0));
 			studio.more();
@@ -2716,7 +2830,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 				studio.cue("Interview");
 			}
 		}
-		View::Drop(_) => studio.build(Side::Add, Inspect::Layer, None),
+		View::Drop(_) => studio.build(Side::Layers, Inspect::Layer, None),
 		View::Dual {
 			format,
 			index,
@@ -3227,6 +3341,34 @@ fn first_devices() -> devices::Listing {
 		displays: Ok(vec![pick("Built-in display", Source::Display { id: Some("1".into()) })]),
 		windows: Ok(Vec::new()),
 		audio: Ok(Vec::new()),
+	}
+}
+
+/// A desk's devices, as Add lists them: two cameras, two displays, two
+/// windows, and two microphones.
+fn add_devices() -> devices::Listing {
+	let pick = |name: &str, source| devices::Pick {
+		name: name.into(),
+		source,
+	};
+	let camera = |id: &str| Source::Camera { id: Some(id.into()) };
+	let display = |id: &str| Source::Display { id: Some(id.into()) };
+	let window = |id: &str| Source::Window { id: id.into() };
+	let mic = |id: &str| Source::Microphone { id: Some(id.into()) };
+	devices::Listing {
+		cameras: Ok(vec![
+			pick("Sony A6400", camera("a6400")),
+			pick("Laptop camera", camera("facetime")),
+		]),
+		displays: Ok(vec![pick("Display 1", display("1")), pick("Display 2", display("2"))]),
+		windows: Ok(vec![
+			pick("Season 4 (Neon Drift)", window("41")),
+			pick("Run of show (Notes)", window("42")),
+		]),
+		audio: Ok(vec![
+			pick("Desk mic (PipeWire)", mic("desk")),
+			pick("Headset (PipeWire)", mic("headset")),
+		]),
 	}
 }
 
