@@ -264,7 +264,8 @@
               # An AMD or Intel GPU, read from the render nodes, gets the
               # flake's Mesa for Vulkan and VA-API instead. NixOS has
               # /run/opengl-driver, and an NVIDIA host its own driver, so both
-              # keep what they have, as does anything the caller already set.
+              # keep what they have, as does anything the caller already set
+              # (`VK_ICD_FILENAMES` too, which `VK_DRIVER_FILES` would outrank).
               if [ ! -e /run/opengl-driver ] && [ ! -d /sys/module/nvidia ]; then
                 icd=
                 for vendor in /sys/class/drm/renderD*/device/vendor; do
@@ -276,7 +277,7 @@
                 if [ -n "$icd" ]; then
                   # shellcheck disable=SC2086 # one glob per ICD, joined below
                   icd=$(printf '%s\n' $icd | sort -u | paste -sd:)
-                  export VK_DRIVER_FILES=''${VK_DRIVER_FILES-$icd}
+                  [ -n "''${VK_ICD_FILENAMES-}" ] || export VK_DRIVER_FILES=''${VK_DRIVER_FILES-$icd}
                   # The host's implicit layers name libraries the Nix loader
                   # cannot open, and log a loader error for each.
                   export VK_IMPLICIT_LAYER_PATH=''${VK_IMPLICIT_LAYER_PATH-${pkgs.mesa}/share/vulkan/implicit_layer.d}
