@@ -393,9 +393,7 @@ pub(crate) fn check(html: &str, dir: &Path) -> Result<Content, Error> {
 		.map_err(|err| Error::Overlay(format!("cannot find the scene file's directory: {err}")))?;
 	let base = Url::from_directory_path(&dir)
 		.map_err(|()| Error::Overlay(format!("cannot name `{}` as a URL", dir.display())))?;
-	// Blitz panics as it parses an element whose `src` or `href` is no URL.
-	let document = std::panic::catch_unwind(|| document(html, 1, 1, &base, None))
-		.map_err(|_| Error::Overlay("an element has a `src` or `href` that is no URL".into()))?;
+	let document = document(html, 1, 1, &base, None);
 	let mut loader = Loader {
 		dir,
 		content: Content {
@@ -1424,7 +1422,7 @@ mod tests {
 				"`image-set()`",
 			),
 			("<img>", "no `src`"),
-			(r#"<img src="http://[">"#, "no URL"),
+			(r#"<img src="http://[">"#, "cannot load `http://[`"),
 		] {
 			let err = refusal(html);
 			assert!(err.contains(named), "{html}: {err}");
