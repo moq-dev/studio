@@ -31,10 +31,11 @@ find it). It replaced the LIVE and BUILD pages. What to try, beside the
   trackpad, whether its taper is fine enough near 0 dB and a double click
   returns there; the meter under it moving with a real microphone; its gear's
   **Monitor in headphones** on real headphones, and its delay and pan.
-- **Real sources:** a camera, a capture card, and a display picked through
-  the system picker, each added from Add, so the row's status dot and the
-  inspector's Source section show a real device starting, failing, and
-  coming back.
+- **Real sources:** a camera, a capture card, and a display already in the
+  show, so the row's status dot and the inspector's Source section show a
+  real device starting, failing, and coming back. Adding them from Add is
+  left to Add's own try, since [Add](/quest/m0/ux/add.md) is being
+  redesigned (decided 2026-11-25, maintainer, /quest-run).
 - **Displays and the frame:** a second monitor, moving the window between
   displays of mixed scales, and the custom frame on each desktop it runs on
   (GNOME, KDE, macOS, and Windows once
