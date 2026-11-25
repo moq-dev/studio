@@ -7,9 +7,10 @@ Clicking `+ Add source` (or pressing `A`) opens a clean modal over the stage
 [`mock/add.html`](/quest/m0/ux/mock/add.html)):
 
 - **Devices & Screens:** cameras, displays, and app windows auto-populate the
-  moment the modal opens (no manual `Refresh` button) with live thumbnails,
-  real app icons, and hotplug updates. Where the OS owns the picker (Wayland),
-  an App Window / Display card opens the system picker directly.
+  moment the modal opens (no manual `Refresh` button), by name. Where the OS
+  owns the picker (Wayland), an App Window / Display card opens the system
+  picker directly. Live thumbnails, app icons, and hotplug updates are
+  [Add shows pictures](/quest/m0/ux/add-pictures.md)'s.
 - **Media & Web:** clickable cards that open the native OS file picker for
   images and videos (no hand-typed file paths and no passive non-clickable
   hint rows), a single-field URL input for web pages, and a Color card.
@@ -31,14 +32,21 @@ paths had to be typed by hand.
 
 Updated 2026-11-22 with the maintainer (/quest-plan):
 
+Decided 2026-11-25 (maintainer, /quest-run): ✅ split the pictures out, so
+Add lands on today's capture listing (rejected: pulling moq's
+`quest/m3/capture-list.md` into an earlier moq milestone so Add lands whole;
+leaving Add blocked on it). Live thumbnails, app icons, and hotplug notices
+need that moq quest, an XL with no PR yet; nothing else here does.
+
 - **Interaction model:** ✅ single click on any card adds the source
   immediately with an auto-generated name and smart placement, closing the
   modal with the new layer selected (rejected: two-click select then press an
   Add button; requiring a manual name before adding). Undo (`Ctrl+Z`) or
   `Delete` removes an accidental pick in one keypress.
 - **Auto-refresh:** ✅ devices, screens, windows, and audio inputs enumerate
-  automatically when the modal opens and refresh on hotplug (rejected: making
-  the user click `Refresh` on an empty list).
+  automatically when the modal opens (rejected: making the user click
+  `Refresh` on an empty list). Refreshing on hotplug comes with
+  [Add shows pictures](/quest/m0/ux/add-pictures.md).
 - **Placement:** ✅ smart default placement: the first visual source fills/fits
   the canvas; a camera or overlay added on top of an existing full-canvas
   layer lands as a sensible corner PiP or centered aspect-fit box instead of
@@ -47,20 +55,29 @@ Updated 2026-11-22 with the maintainer (/quest-plan):
   natively, and Web takes a single pasted URL (rejected: hand-typing paths or
   picking from a 17-item flat dropdown). Drag-and-drop and clipboard paste on
   the canvas continue to work directly.
-- **Live thumbnails & icons:** come from moq-video's capture listing via
-  [its pin](/quest/m0/pin-capture-list.md). Where the OS owns the picker
-  (Wayland), the card invokes `picked_display` / `picked_window` directly and
-  remembers the grant.
+- **System pickers:** where the OS owns the picker (Wayland), the card
+  invokes `picked_display` / `picked_window` directly and remembers the grant.
 - **Errors in place:** a card that cannot be used (missing build feature or
   OS permission) explains why and offers the action to fix it instead of
   failing silently.
 
+Found 2026-11-25 trying the first launch, kept here (✅ wait for this quest,
+rejected: an interim Add tab fix now):
+
+- The "Drop or paste anything" rows look like buttons and do nothing.
+- The quick start's Camera, Screen, Media, and Web cards were the clearest way
+  to add a source, and they vanish once the picture has one; the Add page
+  offers the same cards.
+- A camera plugged in after launch never appeared until **Refresh**.
+
 Human check: real cameras, capture cards, and microphones, OS permission
-prompts, and verifying 1-click placement feels right over a live screen.
-
-## Required
-
-- [moq-video's capture listing is pinned](/quest/m0/pin-capture-list.md) - icons, live pictures, and change notices for windows and devices
+prompts, and verifying 1-click placement feels right over a live screen. The
+PR that lands Add adds a try follow-up for it, which also takes what
+[Try the Studio workspace](/quest/m0/ux/try-studio.md) and
+[Try the first launch](/quest/m0/ux/try-first-run.md) left out on
+2026-11-25 because Add was about to change: adding real cameras, capture
+cards, and displays from Add, and counting the first launch's clicks to a
+live screen.
 
 ## Related
 

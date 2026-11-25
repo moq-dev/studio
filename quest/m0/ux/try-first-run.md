@@ -16,13 +16,13 @@ the [mock-up](/quest/m0/ux/mock/overhaul-first.webp):
 
 - **Cold launch:** move the app's storage aside (`~/.local/share/moq-studio`
   on Linux, `~/Library/Application Support/moq-studio` on macOS), launch with
-  no arguments on a machine with a real camera and microphone, and count the
-  clicks to a live camera and screen. The quick start's Camera card adds the
-  camera in one, and the quick start then gives way to the scene, so the
-  screen comes from **Add** (A, or the Layers rail's Add tab), under the
-  displays; the first-run
-  quest hoped for two clicks in all. Note how long the window shows "Opening
-  My Show…" and whether the canvas came out at 60 fps on a hardware encoder.
+  no arguments on a machine with a real camera and microphone, and check the
+  quick start's Camera card adds a live camera in one click. Note how long
+  the window shows "Opening My Show…" and whether the canvas came out at
+  60 fps on a hardware encoder. Counting the clicks to a live screen, which
+  goes through Add, is left to Add's own try, since
+  [Add](/quest/m0/ux/add.md) is being redesigned (decided 2026-11-25,
+  maintainer, /quest-run).
 - **Permissions:** the camera and microphone prompts macOS raises on that
   launch (run `tccutil reset Camera live.kixel.studio` and `tccutil reset
   Microphone live.kixel.studio` first if you answered them before), the
