@@ -52,6 +52,7 @@ mod settings;
 mod shell;
 mod shows;
 mod slots;
+mod sound;
 mod start;
 
 use levels::Levels;
@@ -66,15 +67,14 @@ pub use shows::Leave;
 pub const MIN_SIZE: egui::Vec2 = layout::MIN;
 
 /// The pages, each the window's middle: the title bar and the strip of
-/// scenes, the panic key, and the sound are around every one.
+/// scenes, the panic key, and the sound are around every one. Studio is the
+/// only one until a mod adds another.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Page {
-	/// The live picture, as large as the window allows.
+	/// The live picture, edited where it shows, with its layers beside it
+	/// and the selected layer's inspector.
 	#[default]
-	Live,
-	/// The live picture with its layers, what can be added, and the
-	/// selected layer's inspector.
-	Build,
+	Studio,
 	/// Every sound and audio scene, with its sends.
 	Mix,
 	/// Replays, clips, and recordings.
@@ -82,12 +82,12 @@ pub(crate) enum Page {
 }
 
 impl Page {
-	const ALL: [Self; 4] = [Self::Live, Self::Build, Self::Mix, Self::Review];
+	const ALL: [Self; 3] = [Self::Studio, Self::Mix, Self::Review];
 
 	/// The mod that must be on for the page to be listed, if any.
 	fn needs(self) -> Option<Mod> {
 		match self {
-			Self::Live | Self::Build => None,
+			Self::Studio => None,
 			Self::Mix => Some(Mod::Audio),
 			Self::Review => Some(Mod::Review),
 		}
@@ -95,8 +95,7 @@ impl Page {
 
 	fn name(self) -> &'static str {
 		match self {
-			Self::Live => "Live",
-			Self::Build => "Build",
+			Self::Studio => "Studio",
 			Self::Mix => "Mix",
 			Self::Review => "Review",
 		}
@@ -104,8 +103,7 @@ impl Page {
 
 	fn icon(self) -> Icon {
 		match self {
-			Self::Live => Icon::Live,
-			Self::Build => Icon::Build,
+			Self::Studio => Icon::Live,
 			Self::Mix => Icon::Mix,
 			Self::Review => Icon::Review,
 		}
@@ -247,7 +245,7 @@ impl Setting {
 	}
 }
 
-/// The BUILD page's left column: the layers, or what can be added.
+/// The Studio page's left column: the layers, or what can be added.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Side {
 	#[default]
@@ -330,6 +328,9 @@ impl Studio {
 			editing: None,
 			framed,
 			page: Page::default(),
+			locked: false,
+			rail: true,
+			sound_options: None,
 			setting: None,
 			details: false,
 			side: Side::default(),
@@ -524,7 +525,24 @@ impl Studio {
 		self.panels.page = page;
 	}
 
-	/// Edit `format`'s picture on BUILD, as its tab under the picture would.
+	/// Lock the picture against edits, or unlock it, as the title bar's
+	/// Editable switch would.
+	pub(crate) fn lock(&mut self, locked: bool) {
+		self.panels.locked = locked;
+	}
+
+	/// Open the layers' rail or close it, as the title bar's Layers switch
+	/// would.
+	pub(crate) fn rail(&mut self, open: bool) {
+		self.panels.rail = open;
+	}
+
+	/// Open the options of the sound called `name`, as its gear would.
+	pub(crate) fn sound_options(&mut self, name: &str) {
+		self.panels.sound_options = Some(name.to_string());
+	}
+
+	/// Edit `format`'s picture on Studio, as its tab under the picture would.
 	pub(crate) fn edit_format(&mut self, format: Format) {
 		self.panels.format = format;
 	}
@@ -626,7 +644,7 @@ impl Studio {
 		state.cue(scene).expect("a scene that can go on air");
 	}
 
-	/// Open the scene called `scene` off air on BUILD, as its pad's menu would.
+	/// Open the scene called `scene` off air on Studio, as its pad's menu would.
 	pub(crate) fn edit_off_air(&mut self, scene: &str) {
 		let result = self.panels.open_off_air(scene);
 		result.expect("a scene to open");
@@ -637,12 +655,12 @@ impl Studio {
 		self.panels.selection.is_some()
 	}
 
-	/// Turn to BUILD with `side` and `inspect` shown, and the layer at
+	/// Turn to Studio with `side` and `inspect` shown, and the layer at
 	/// `index` of the scene on program selected, front first, as a click on
 	/// its row would.
 	pub(crate) fn build(&mut self, side: Side, inspect: Inspect, index: Option<usize>) {
 		let panels = &mut self.panels;
-		panels.page = Page::Build;
+		panels.page = Page::Studio;
 		panels.side = side;
 		panels.inspect = inspect;
 		let state = panels.engine.state.lock().unwrap();
@@ -665,6 +683,8 @@ const SNAPPING: &str = "snapping";
 const HOTKEYS: &str = "hotkeys";
 /// How this operator runs a show, not part of the show.
 const STUDIO_MODE: &str = "studio_mode";
+const LOCKED: &str = "locked";
+const RAIL: &str = "layers_rail";
 const MODS: &str = "mods";
 
 impl Studio {
@@ -679,6 +699,8 @@ impl Studio {
 			bindings = eframe::get_value(storage, HOTKEYS).unwrap_or_default();
 			let mods: Vec<Mod> = eframe::get_value(storage, MODS).unwrap_or_default();
 			panels.controls.mods.load(&mods);
+			panels.locked = eframe::get_value(storage, LOCKED).unwrap_or_default();
+			panels.rail = eframe::get_value(storage, RAIL).unwrap_or(true);
 			let studio = eframe::get_value(storage, STUDIO_MODE).unwrap_or_default();
 			panels.controls.set_studio(studio);
 			let multiview = eframe::get_value(storage, multiview::KEY).unwrap_or_default();
@@ -696,6 +718,8 @@ impl Studio {
 		eframe::set_value(storage, SPEAKER, &panels.speaker);
 		eframe::set_value(storage, SNAPPING, &panels.snapping);
 		eframe::set_value(storage, STUDIO_MODE, &panels.controls.studio());
+		eframe::set_value(storage, LOCKED, &panels.locked);
+		eframe::set_value(storage, RAIL, &panels.rail);
 		eframe::set_value(storage, MODS, &panels.controls.mods.saved());
 		panels.multiview.save(storage);
 		if let Some(hotkeys) = &panels.hotkeys {
@@ -858,20 +882,27 @@ struct Panels {
 	portrait_drawn: Option<Canvas>,
 	/// The preview in portrait, while the show goes out in portrait.
 	portrait_preview: Option<Registered>,
-	/// The picture BUILD edits a scene drawn in both in.
+	/// The picture Studio edits a scene drawn in both in.
 	format: Format,
-	/// The scene open for editing off air on BUILD, while it is the one cued.
+	/// The scene open for editing off air on Studio, while it is the one cued.
 	editing: Option<String>,
 	/// Whether the title bar is the window's frame, which moves, resizes,
 	/// and closes it.
 	framed: bool,
 	/// The page the window shows.
 	page: Page,
+	/// Whether the Studio page's picture is locked against edits, as during
+	/// a broadcast where a stray drag would move a layer on air.
+	locked: bool,
+	/// Whether the Studio page's left rail, the layers and Add, is open.
+	rail: bool,
+	/// The sound whose options popover is open in the strip, by name.
+	sound_options: Option<String>,
 	/// The Settings window's tab, while it is open.
 	setting: Option<Setting>,
 	/// Whether the stream's health shows in detail.
 	details: bool,
-	/// The BUILD page's left column and inspector tabs.
+	/// The Studio page's left column and inspector tabs.
 	side: Side,
 	inspect: Inspect,
 	/// The Go live popover, while open.
@@ -921,9 +952,9 @@ struct Panels {
 	/// The cut point a stinger last had, which the transition picker offers
 	/// again after another kind.
 	cut: Duration,
-	/// The layer a drag on the BUILD page's picture holds.
+	/// The layer a drag on the Studio page's picture holds.
 	drag: Option<Drag>,
-	/// Whether the BUILD page's picture leaves room for the keep-clear
+	/// Whether the Studio page's picture leaves room for the keep-clear
 	/// legend under it, which a drag leaves as it found it, so the picture
 	/// under the pointer neither moves nor resizes mid-gesture.
 	legend: bool,
@@ -952,11 +983,11 @@ struct Panels {
 	sizes: BTreeMap<String, (u32, u32)>,
 	add: AddSource,
 	devices: Devices,
-	/// Whether the BUILD page's picture passes the mouse and keyboard to the
+	/// Whether the Studio page's picture passes the mouse and keyboard to the
 	/// selected layer's web page, until Escape.
 	interacting: bool,
 	interact: Interact,
-	/// Whether this frame drew the BUILD page's picture, which hears input.
+	/// Whether this frame drew the Studio page's picture, which hears input.
 	staged: bool,
 	/// Each thumbnail the compositor drew of those shown last frame.
 	thumbnails: BTreeMap<Thumbnail, Registered>,
@@ -1312,7 +1343,7 @@ impl Panels {
 	/// way, whose index it may have given to another. Called under every lock
 	/// that uses one, since the autosave can reload between two.
 	///
-	/// Let go of a layer of a scene BUILD no longer edits too, which a pad,
+	/// Let go of a layer of a scene Studio no longer edits too, which a pad,
 	/// a hotkey, or opening a scene off air took away from it, so a paste,
 	/// the inspector, and the picture never act on a scene the picture does
 	/// not show. Off air, that includes the always-on-top layers, which are
@@ -1429,7 +1460,7 @@ impl Panels {
 		self.selection = picked;
 	}
 
-	/// The layers BUILD edits, and new sources go in: the scene open off
+	/// The layers Studio edits, and new sources go in: the scene open off
 	/// air's, or else the scene on program's. The always-on-top layers over
 	/// the program are [`Layer::top`].
 	fn scene(&self, state: &State) -> Result<Layer, String> {
@@ -1444,13 +1475,13 @@ impl Panels {
 		state.cued().filter(|cued| self.editing.as_deref() == Some(*cued))
 	}
 
-	/// The scene BUILD edits: the one open off air, or else the one on
+	/// The scene Studio edits: the one open off air, or else the one on
 	/// program.
 	fn edited<'a>(&self, state: &'a State) -> Option<&'a str> {
 		self.edited_since(state).0
 	}
 
-	/// The scene BUILD edits, and how long it had been on as of the last
+	/// The scene Studio edits, and how long it had been on as of the last
 	/// render, the moment of its keyframes the picture shows.
 	fn edited_since<'a>(&self, state: &'a State) -> (Option<&'a str>, Duration) {
 		match self.off_air(state) {
@@ -1459,12 +1490,12 @@ impl Panels {
 		}
 	}
 
-	/// Open the scene called `scene` for editing off air, on BUILD.
+	/// Open the scene called `scene` for editing off air, on Studio.
 	fn open_off_air(&mut self, scene: &str) -> anyhow::Result<()> {
 		let mut state = self.engine.state.lock().unwrap();
 		let scene = state.open_off_air(scene)?;
 		self.editing = state.cued().is_some().then_some(scene);
-		self.page = Page::Build;
+		self.page = Page::Studio;
 		Ok(())
 	}
 
@@ -2492,7 +2523,7 @@ impl Default for Snapping {
 	}
 }
 
-/// A layer a drag on the BUILD page's picture holds.
+/// A layer a drag on the Studio page's picture holds.
 struct Drag {
 	picked: Picked,
 	grab: Grab,
@@ -2522,7 +2553,7 @@ const REACH: f32 = 8.0;
 /// if they are drawn over that scene, show `since` the scene went on, other
 /// than `dragged`: what a dragged layer snaps to. A scene open off air still
 /// snaps to the always-on-top ones: its picture draws them, as the program
-/// will, though BUILD leaves them to the program to edit.
+/// will, though Studio leaves them to the program to edit.
 fn others(state: &State, scene: Option<&str>, dragged: &Picked, since: Duration, format: Format) -> Vec<Rect> {
 	let collection = state.collection();
 	// The top layer goes over a scene of the program's size, as the

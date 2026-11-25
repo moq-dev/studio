@@ -1,4 +1,4 @@
-//! The capture devices this machine has, for BUILD's Add and the quick start.
+//! The capture devices this machine has, for Studio's Add and the quick start.
 
 use moq_scene::Source;
 

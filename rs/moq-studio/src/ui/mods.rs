@@ -166,7 +166,7 @@ impl Panels {
 		}
 		let off = |needs: Option<Mod>| needs.is_some_and(|needs| !self.controls.mods.on(needs));
 		if off(self.page.needs()) {
-			self.page = Page::Live;
+			self.page = Page::Studio;
 		}
 		if self.setting.is_some_and(|setting| off(setting.needs())) {
 			self.setting = Some(Setting::Mods);

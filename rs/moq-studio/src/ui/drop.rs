@@ -53,7 +53,7 @@ impl Arrival {
 struct Landing {
 	/// The layers it joins.
 	layer: Layer,
-	/// The picture it lands in, BUILD's while it edits a scene drawn in both,
+	/// The picture it lands in, Studio's while it edits a scene drawn in both,
 	/// and that picture's canvas.
 	format: Format,
 	canvas: Canvas,
@@ -528,6 +528,28 @@ impl Panels {
 		self.offer(ui, state, &view);
 	}
 
+	/// Refuse the files dropped this frame onto the locked picture at
+	/// `rect`, which a drop elsewhere would otherwise place on the scene,
+	/// keeping a paste and a drop off the picture.
+	pub(super) fn drops_on_locked(&mut self, ui: &Ui, rect: egui::Rect) {
+		let dropped: Vec<std::path::PathBuf> = ui.input(|input| {
+			input
+				.raw
+				.dropped_files
+				.iter()
+				.map(|file| file.path().to_path_buf())
+				.collect()
+		});
+		let before = self.dropping.arrived.len();
+		self.dropping.arrived.retain(|(arrival, at)| {
+			let on = at.is_some_and(|at| rect.contains(at));
+			!(on && matches!(arrival, Arrival::File(path) if dropped.contains(path)))
+		});
+		if self.dropping.arrived.len() < before {
+			self.say(Err("the picture is locked: unlock it to drop onto it".into()));
+		}
+	}
+
 	/// Place what arrived on no picture at the edited scene's center.
 	pub(super) fn drops_elsewhere(&mut self, ctx: &egui::Context) {
 		if self.dropping.arrived.is_empty() {
@@ -701,7 +723,7 @@ impl Panels {
 	/// Show a failure at a drop at `at` in canvas pixels, on the picture if
 	/// it shows, or else as the window's message.
 	fn dropped_failed(&mut self, at: [f32; 2], result: anyhow::Result<()>) {
-		if self.page != Page::Build {
+		if self.page != Page::Studio {
 			self.check(result);
 			return;
 		}

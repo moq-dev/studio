@@ -250,6 +250,8 @@ pub async fn speakers() -> Result<Vec<Speaker>, String> {
 pub struct Monitor {
 	/// The mix it plays, by name.
 	name: String,
+	/// The source it plays alone in place of that mix, by name, if any.
+	solo: Option<String>,
 	/// The [`Speaker::id`] it plays on, or `None` for the system default.
 	speaker: tokio::sync::watch::Sender<Option<String>>,
 	pick: Pick,
@@ -276,6 +278,7 @@ impl Monitor {
 		});
 		Ok(Self {
 			name: name.to_string(),
+			solo: None,
 			speaker,
 			pick,
 			failed,
@@ -301,6 +304,17 @@ impl Monitor {
 	/// Play the mix called `name` once it is given.
 	pub fn set_name(&mut self, name: &str) {
 		self.name = name.to_string();
+	}
+
+	/// The source it plays alone, by name, in place of its named mix.
+	pub fn solo(&self) -> Option<&str> {
+		self.solo.as_deref()
+	}
+
+	/// Play the source called `solo` alone once its mix is given, or with
+	/// `None`, the named mix again.
+	pub fn set_solo(&mut self, solo: Option<&str>) {
+		self.solo = solo.map(str::to_string);
 	}
 
 	/// Play `mix`, the one [named](Self::name), from its next block on.

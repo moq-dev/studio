@@ -173,10 +173,9 @@ fn find<'a>(node: &'a Value, label: &str) -> Option<&'a Value> {
 async fn an_agent_builds_a_show() {
 	let studio = Studio::start().await;
 	studio.until("/app", "\"studio\"");
-	studio.audit("the live page");
+	studio.audit("the studio page");
 
-	// Add a media source, as a user would, from the Build page's Add tab.
-	studio.ctl(&["click", "Build"]);
+	// Add a media source, as a user would, from the layers' rail's Add tab.
 	studio.ctl(&["click", "Add"]);
 	studio.audit("the add tab");
 	studio.ctl(&["click", "Name"]);
