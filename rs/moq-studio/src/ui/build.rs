@@ -459,13 +459,28 @@ impl Panels {
 			// A double-click starts or ends cropping what its first click
 			// selected, as the toolbar's Crop does, without hitting again:
 			// that selection may have opened the inspector, moving the
-			// picture under the pointer.
-			let twice = response.double_clicked() && self.selection.is_some();
-			if !held && !twice {
+			// picture under the pointer. A slow frame holding both clicks
+			// selected nothing first, so it hits once for them.
+			let twice = response.double_clicked();
+			let together = twice
+				&& ui.input(|input| {
+					let released = |event: &&egui::Event| {
+						matches!(
+							event,
+							egui::Event::PointerButton {
+								button: egui::PointerButton::Primary,
+								pressed: false,
+								..
+							}
+						)
+					};
+					input.events.iter().filter(released).count() >= 2
+				});
+			if !held && (!twice || together) {
 				let picked = response.interact_pointer_pos().and_then(hit);
 				self.select(picked.map(|(index, _)| shown[index].0.clone()));
 			}
-			if twice {
+			if twice && self.selection.is_some() {
 				self.cropping = !self.cropping;
 			}
 		}

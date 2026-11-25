@@ -2071,31 +2071,33 @@ fn the_studio_locks_adds_and_mutes() {
 		studio.selected()
 	};
 
-	// At `at` across the picture, a click a frame, a twentieth of a second
-	// apart where the harness would step a quarter second, past egui's
-	// double-click delay. The steps after it outlast a triple-click's, so the
-	// next double-click is not one.
-	let double_click = |harness: &mut Harness<'_, Window>, at: egui::Vec2| {
+	// At `at` across the picture, a click a frame a twentieth of a second
+	// apart, or both in one slow frame, a second after any earlier click so
+	// neither is its double- or triple-click.
+	let double_click = |harness: &mut Harness<'_, Window>, at: egui::Vec2, frames: u32| {
 		let picture = harness.get_by_label("Canvas").rect();
 		let pos = picture.min + at * picture.size();
-		let start = harness.ctx.input(|input| input.time);
-		for click in 1..=2 {
+		let start = harness.ctx.input(|input| input.time) + 1.0;
+		for frame in 1..=frames {
 			let input = harness.input_mut();
-			input.time = Some(start + 0.05 * f64::from(click));
+			input.time = Some(start + 0.05 * f64::from(frame));
 			input.events.push(egui::Event::PointerMoved(pos));
-			for pressed in [true, false] {
-				input.events.push(egui::Event::PointerButton {
-					pos,
-					button: egui::PointerButton::Primary,
-					pressed,
-					modifiers: egui::Modifiers::NONE,
-				});
+			// Two clicks in all, whatever the frames.
+			for _ in 0..2 / frames {
+				for pressed in [true, false] {
+					input.events.push(egui::Event::PointerButton {
+						pos,
+						button: egui::PointerButton::Primary,
+						pressed,
+						modifiers: egui::Modifiers::NONE,
+					});
+				}
 			}
 			harness.step();
 		}
 		// The harness's input keeps a time it is given, which would stop the clock.
 		harness.input_mut().time = None;
-		harness.run_steps(3);
+		harness.run_steps(2);
 	};
 	let cropping = |harness: &Harness<'_, Window>| harness.query_by_label("Crop the layer from the top").is_some();
 	let center = egui::vec2(0.5, 0.5);
@@ -2107,7 +2109,7 @@ fn the_studio_locks_adds_and_mutes() {
 	harness.get_by_label("Canvas").click();
 	harness.run_steps(2);
 	assert!(!selected(&mut harness), "locked, the picture selects nothing");
-	double_click(&mut harness, center);
+	double_click(&mut harness, center, 2);
 	assert!(
 		!selected(&mut harness) && !cropping(&harness),
 		"locked, a double-click crops nothing"
@@ -2130,7 +2132,7 @@ fn the_studio_locks_adds_and_mutes() {
 	assert!(!selected(&mut harness));
 	// Its first click selects the bar, opening the inspector beside the
 	// picture, which moves it out from under the pointer before the second.
-	double_click(&mut harness, bar);
+	double_click(&mut harness, bar, 2);
 	assert!(
 		cropping(&harness) && selected(&mut harness),
 		"a double-click starts cropping the layer"
@@ -2147,11 +2149,21 @@ fn the_studio_locks_adds_and_mutes() {
 		!cropping(&harness) && selected(&mut harness),
 		"Escape ends the crop first"
 	);
-	double_click(&mut harness, bar);
-	double_click(&mut harness, bar);
+	double_click(&mut harness, bar, 2);
+	double_click(&mut harness, bar, 2);
 	assert!(
 		!cropping(&harness) && selected(&mut harness),
 		"a second double-click ends it"
+	);
+	// With the host selected, a slow frame holding both clicks on the bar.
+	harness.get_by_label("Canvas").click();
+	harness.run_steps(3);
+	double_click(&mut harness, bar, 1);
+	let picture = harness.get_by_label("Canvas").rect();
+	let top = harness.get_by_label("Crop the layer from the top").rect().center().y;
+	assert!(
+		top > picture.center().y,
+		"one frame's double-click crops the bar it is on"
 	);
 
 	assert!(harness.query_by_label("Panic").is_none(), "no safe scene off air");
