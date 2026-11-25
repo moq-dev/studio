@@ -732,7 +732,12 @@ impl Panels {
 	/// A pad for each scene, then one that adds a scene: in a row, or two to
 	/// a row down a `column`.
 	fn scenes_strip(&mut self, ui: &mut Ui, snapshot: &Snapshot, rect: Rect, column: bool) {
-		let room = rect.shrink(MARGIN);
+		// A row keeps little room above and below, so its pads stay large in
+		// the slim strip.
+		let room = match column {
+			true => rect.shrink(MARGIN),
+			false => rect.shrink2(vec2(MARGIN, 8.0)),
+		};
 		// Studio mode's switch at the strip's end, while its mod is on: right
 		// of a row, under a column.
 		let (room, switch) = match (self.controls.mods.on(Mod::Studio), column) {

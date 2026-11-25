@@ -110,7 +110,7 @@ reference mock-ups live in [`mock/overhaul.html`](/quest/m0/ux/mock/overhaul.htm
   collapsible Layers rail, inline audio volume sliders in a slimmer bottom
   dock, and MIX / REVIEW hidden unless their Mods are enabled (rejected:
   two-page Studio + Mix layout; keeping all four top-level tabs LIVE, BUILD,
-  MIX, REVIEW). See [Unified Studio shell](/quest/m0/ux/unified-shell.md).
+  MIX, REVIEW). Done: the Studio page (`just shots studio`).
 - **Startup & shows:** ✅ zero-gate startup that auto-creates or reopens the
   last show in app data immediately with a clean empty-canvas one-click
   quick-start prompt, moving show switching, creation, and export into the
@@ -132,7 +132,8 @@ reference mock-ups live in [`mock/overhaul.html`](/quest/m0/ux/mock/overhaul.htm
   Smart Layout (Slots + Keep out of the way) move behind Settings > Mods;
   off-air Panic/Clip/Marker chrome stays hidden when unused (rejected: keeping
   a dedicated simplified Mix page always visible; keeping Audio Scenes on by
-  default). See [Unified Studio shell](/quest/m0/ux/unified-shell.md).
+  default). Done: the strip's sound rows and options (`just shots
+  audio_popover`).
 - **Go Live, Settings & Palette:** ✅ background encoder/uplink health checks,
   one-click Go Live once configured, inline destination URL/key setup on first
   use, click-to-confirm End Stream popover replacing the hidden 1.2s hold,
@@ -195,7 +196,7 @@ quest links its own.
 An agent can prove a page matches its mock-up's layout, that nothing clips at
 any window size, and what a frame costs. It cannot judge these, so each child's
 PR adds a follow-up quest for the maintainer to try the page, such as
-[Try the LIVE page](/quest/m0/ux/try-live.md), with a `Maintainer:` item saying
+[Try the Studio workspace](/quest/m0/ux/try-studio.md), with a `Maintainer:` item saying
 what to look at, rather than waiting on it:
 
 - **Taste:** whether the page reads as bold and calm at once. The PR shows its

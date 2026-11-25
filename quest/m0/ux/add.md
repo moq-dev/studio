@@ -64,5 +64,4 @@ prompts, and verifying 1-click placement feels right over a live screen.
 
 ## Related
 
-- [Unified Studio shell](/quest/m0/ux/unified-shell.md) - the `+ Add source` trigger and unified workspace
 - The quick start on an empty picture (`rs/moq-studio/src/ui/start.rs`) adds a camera, a screen, a media file, or a web page or text in one click; the Add modal shares its device picks

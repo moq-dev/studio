@@ -60,16 +60,16 @@ enum View {
 	Mix(MixView, Option<&'static str>),
 	/// MIX with Headphones' menu open, as a right click on its strip opens it.
 	MixMenu,
-	/// The BUILD page with `side` and `inspect` shown, and the layer of the
+	/// The Studio page with `side` and `inspect` shown, and the layer of the
 	/// scene on program at `index`, front first, selected.
 	Build {
 		side: Side,
 		inspect: Inspect,
 		index: Option<usize>,
 	},
-	/// BUILD with the host's layer selected and its row's menu open.
+	/// Studio with the host's layer selected and its row's menu open.
 	Menu,
-	/// BUILD with the host's layer selected, its inspector scrolled to how
+	/// Studio with the host's layer selected, its inspector scrolled to how
 	/// viewers may treat it, published independently.
 	Published,
 	/// The edit history, under the title bar's undo, after an edit.
@@ -122,19 +122,19 @@ enum View {
 	Cued,
 	/// A scene, by name, open for editing off air.
 	OffAir(&'static str),
-	/// BUILD with the front layer selected, once it kept out of the way:
+	/// Studio with the front layer selected, once it kept out of the way:
 	/// moved off what mattered and landed. If `dual`, with the show going
 	/// out in both formats.
 	KeepClear {
 		dual: bool,
 	},
-	/// BUILD with the game's window gone dark selected, and what to do about
+	/// Studio with the game's window gone dark selected, and what to do about
 	/// it open from its badge.
 	Dark,
-	/// BUILD with the host's camera stalled selected, and what to do about it
+	/// Studio with the host's camera stalled selected, and what to do about it
 	/// open from its badge.
 	Stalled,
-	/// BUILD with no layer selected, after the guest `Ibis` appears on their
+	/// Studio with no layer selected, after the guest `Ibis` appears on their
 	/// own in the scene on program.
 	Joined,
 	/// The multiview, as its own window draws it, with the host and the
@@ -145,7 +145,7 @@ enum View {
 		/// Whether the host's picture stalled.
 		stalled: bool,
 	},
-	/// BUILD's Add tab on the drop views' show, with a file dragged or
+	/// Studio's Add tab on the drop views' show, with a file dragged or
 	/// dropped on the picture.
 	Drop(Drop),
 	/// On the dual-format show, the layer of the scene on program at
@@ -215,7 +215,7 @@ enum Drop {
 	Placed,
 }
 
-/// The studio on the drop views' show, turned to BUILD's Add tab with `drop`.
+/// The studio on the drop views' show, turned to Studio's Add tab with `drop`.
 fn dropping(drop: Drop) -> Open {
 	Open::Studio {
 		view: View::Drop(drop),
@@ -225,7 +225,7 @@ fn dropping(drop: Drop) -> Open {
 	}
 }
 
-/// BUILD with the host's layer, the middle of the scene on program's three,
+/// Studio with the host's layer, the middle of the scene on program's three,
 /// selected, as the mock-up's.
 const BUILD: View = View::Build {
 	side: Side::Layers,
@@ -322,10 +322,10 @@ views! {
 	/// A window snapped beside a game stacks the picture, the scenes, and the
 	/// sound.
 	studio_compact: Still, Open::Studio { view: View::Page(Page::Studio), size: HALF, show: "show.toml", relay: false };
-	/// BUILD with the host's layer selected: its row in Layers, its handles
+	/// Studio with the host's layer selected: its row in Layers, its handles
 	/// and toolbar on the picture, and its inspector.
 	build: Still, on_show(BUILD);
-	/// BUILD with no layer selected: the inspector shows the scene.
+	/// Studio with no layer selected: the inspector shows the scene.
 	build_scene: Still, on_show(View::Build { side: Side::Layers, inspect: Inspect::Layer, index: None });
 	/// The selected layer's keyframes.
 	build_animate: Still, on_show(View::Build { side: Side::Layers, inspect: Inspect::Animate, index: Some(1) });
@@ -337,7 +337,7 @@ views! {
 	/// A source published independently selected: under its switch in the
 	/// inspector, whether viewers may switch it off and its priority for them.
 	build_published: Still, Open::Studio { view: View::Published, size: SIZE, show: "published.toml", relay: false };
-	/// BUILD in a window snapped beside a game: the inspector is a tab beside
+	/// Studio in a window snapped beside a game: the inspector is a tab beside
 	/// Layers and Add.
 	build_compact: Still, Open::Studio { view: BUILD, size: HALF, show: "show.toml", relay: false };
 	/// A scene laid out by slots: each slot outlined with the role or guest
@@ -356,7 +356,7 @@ views! {
 	build_studio: Still, on_show(View::Cued);
 	/// A scene open off air: the frame turns amber, and the live picture
 	/// shrinks to a corner beside the banner that takes it live or goes back.
-	/// Layers lists the scene's own, as always on top is drawn on program.
+	/// Layers lists the scene's own alone.
 	build_off_air: Still, on_show(View::OffAir("Break"));
 	/// A scene that cannot go on air opens off air too, its Take it live
 	/// dimmed, saying why under the pointer.
@@ -1019,7 +1019,7 @@ fn a_marker_is_clipped_around() {
 	quit(&engine, &runtime);
 }
 
-/// The command palette as a person uses it: its key opens it from LIVE,
+/// The command palette as a person uses it: its key opens it from Studio,
 /// what is typed finds a scene, a sound, and a setting, and Enter runs the
 /// one picked, taking the scene, muting the sound, and opening Settings at
 /// the setting. An action that cannot run now says why and stays open.
@@ -1482,7 +1482,7 @@ fn an_edit_being_typed_saves_on_the_way_out() {
 	quit(&engine, &runtime);
 }
 
-/// On LIVE, the quick start never draws over the program on air, where one
+/// On Studio, the quick start never draws over the program on air, where one
 /// click would put a device straight on the stream: an empty show going live
 /// hides it, and ending the stream brings it back. It draws no view.
 #[test]
@@ -1670,7 +1670,7 @@ fn the_show_menu_switches_shows() {
 	quit(&engine, &runtime);
 }
 
-/// On BUILD, a layer row's menu hides, locks, reorders, and duplicates its
+/// On Studio, a layer row's menu hides, locks, reorders, and duplicates its
 /// layer, a scene's pad's duplicates the scene with its own copies, and
 /// undo takes each back, and a take lets go of a layer of the scene it
 /// leaves. It draws no view.
@@ -1756,7 +1756,7 @@ fn a_layer_menu_edits_its_layer() {
 			.is_none()
 	);
 
-	// A take moves BUILD to another scene, letting go of a layer of this one.
+	// A take moves Studio to another scene, letting go of a layer of this one.
 	let selected = |harness: &mut Harness<'_, Window>| {
 		let App::Studio(studio) = &mut harness.state_mut().app else {
 			unreachable!()
@@ -1825,7 +1825,7 @@ fn a_row_dropped_on_a_slot_after_a_guest_appears_moves_nothing() {
 		harness.run_steps(2);
 	};
 	// The logo's row, and the main slot on the picture.
-	let row = egui::pos2(160.0, 217.0);
+	let row = egui::pos2(160.0, 147.0);
 	let main = egui::pos2(574.0, 400.0);
 	let grab = |harness: &mut Harness<'_, Window>| {
 		pointer(harness, row, None);
@@ -1889,9 +1889,9 @@ fn a_row_dropped_on_a_slot_after_a_guest_appears_moves_nothing() {
 
 /// Studio mode, driven as a person does: its switch turns it on, a pad then
 /// cues its scene rather than taking it, and TAKE puts it on air. NEXT's Edit
-/// opens the cued scene off air on BUILD, Back to live keeps it cued, and
+/// opens the cued scene off air on Studio, Back to live keeps it cued, and
 /// the card's close clears it. Off again, a pad's menu opens a scene off air,
-/// whose own layers BUILD lists and selects, and the banner's Take it live
+/// whose own layers Studio lists and selects, and the banner's Take it live
 /// takes it, keeping the selection on the scene now live. It draws no view.
 #[test]
 #[ignore = "draws on a GPU; run with `just shots`"]
@@ -1955,9 +1955,7 @@ fn studio_mode_cues_and_takes() {
 	harness.get_by_label("Edit off air").click();
 	harness.run_steps(2);
 	assert_eq!(staged(), scenes("Interview", Some("Main")), "open off air, not taken");
-	// BUILD lists the layers of the scene open off air, and
-	// leaves always on top to the program.
-	harness.get_by_label_contains("Always on top is drawn on program");
+	// Studio lists the layers of the scene open off air.
 	harness.get_all_by_label("bar").next().unwrap().click();
 	harness.run_steps(2);
 	assert!(selected(&mut harness), "the click selected Main's bar off air");

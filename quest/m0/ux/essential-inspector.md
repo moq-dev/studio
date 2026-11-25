@@ -48,10 +48,6 @@ Decided 2026-11-22 with the maintainer (/quest-plan):
 - **Shots & docs:** update `just shots` (`edit`, `edit_more`) and update
   `README.md`.
 
-## Required
-
-- [Unified Studio shell](/quest/m0/ux/unified-shell.md) - the directly editable canvas and collapsible Layers rail
-
 ## Related
 
 - [Adding a source in one click](/quest/m0/ux/add.md) - adds and selects new layers directly into this flow
