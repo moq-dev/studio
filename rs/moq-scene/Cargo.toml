@@ -44,11 +44,11 @@ required-features = ["cef"]
 # wgpu match moq-video's: the stable 0.2 line is on wgpu 26, which cannot share
 # the device. System fonts and network access are left off, so an overlay loads
 # only its own assets; `woff` decodes the WOFF and WOFF2 fonts it loads.
-anyrender_vello = "0.15"
-blitz-dom = { version = "=0.3.0-beta.4", default-features = false, features = ["woff"] }
-blitz-html = "=0.3.0-beta.4"
-blitz-paint = { version = "=0.3.0-beta.4", default-features = false }
-blitz-traits = "=0.3.0-beta.4"
+anyrender_vello = "0.16"
+blitz-dom = { version = "=0.3.0-beta.5", default-features = false, features = ["woff"] }
+blitz-html = "=0.3.0-beta.5"
+blitz-paint = { version = "=0.3.0-beta.5", default-features = false }
+blitz-traits = "=0.3.0-beta.5"
 # Decodes an overlay's base64 `data:` URLs.
 base64 = "0.23"
 bytemuck = { version = "1", features = ["derive"] }
@@ -58,7 +58,7 @@ cssparser = "0.38"
 # The faces every overlay's text is set in: Noto Sans, regular, bold, and italic.
 notosans = "0.1"
 # Blitz's text layout, to register those faces as every family's.
-parley = { version = "0.12", default-features = false, features = ["std"] }
+parley = { version = "0.13", default-features = false, features = ["std"] }
 # The catalog's rendition configs, which a broadcast source follows.
 hang = { workspace = true }
 humantime-serde = { workspace = true }
@@ -78,7 +78,7 @@ percent-encoding = "2"
 serde = { workspace = true }
 serde_with = { workspace = true }
 # Stylo, Blitz's style engine, which parses an overlay's CSS to check it.
-style = { package = "stylo", version = "0.22" }
+style = { package = "stylo", version = "0.24" }
 # Replaces the grants file whole, created readable by its owner alone; also
 # the browser helper's CEF profile, removed once the helper has exited.
 tempfile = { workspace = true }
@@ -92,7 +92,7 @@ tract-onnx = { version = "0.23.10", default-features = false }
 url = { workspace = true }
 # The compositor's device; moq-video's release, so its decoded textures share it.
 wgpu = { workspace = true }
-vello = "0.11"
+vello = "0.12"
 # Decompresses an overlay's WOFF and WOFF2 fonts to check them. Already in the
 # graph through Blitz's `woff` feature.
 wuff = "0.2"
