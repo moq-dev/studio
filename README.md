@@ -169,7 +169,7 @@ using or moves a file onto one of the other's.
 The studio opens to one **Studio** workspace: the program, in a neutral frame
 tagged **OFF AIR** until you go live, then a blue one tagged **ON AIR**, which
 you edit where it shows (see [Studio](#studio)), with its layers in a rail on
-the left and the selected layer's inspector on the right. The title bar and
+the left and, while a layer is selected, its inspector on the right. The title bar and
 the slim strip along the bottom stay on every page, so the scenes and the
 sound never leave the window while you are on air. There are no other pages
 until a [mod](#mods) adds one: **MIX** with Audio scenes & routes, and
@@ -245,7 +245,7 @@ The **strip** holds:
   every always-on-top layer, whatever it shows, in one edit undo takes back,
   and cuts at once to the scene marked safe, if one is. Other remote feeds and
   media stay on. Its key works whether it shows or not. Mark one from its
-  pad's menu, the inspector with no layer selected, or the scene graph. With
+  pad's menu, or the scene graph. With
   Replay & review on, the scissors beside it save a replay clip (see
   [Replay](#replay)), and the flag drops a marker (see [Markers](#markers)).
 - A row for each sound the stream carries: its mute, its name, its volume as
@@ -258,7 +258,7 @@ The **strip** holds:
 
 | Page | Use it to |
 | --- | --- |
-| STUDIO | Edit the scene on program, or the one open off air, shown in the middle, with its layers and what can be added on the left and the inspector on the right, and TAKE or AUTO a cued scene (see [Studio](#studio)). |
+| STUDIO | Edit the scene on program, or the one open off air, shown in the middle, with its layers and what can be added on the left and the selected layer's inspector on the right, and TAKE or AUTO a cued scene (see [Studio](#studio)). |
 | MIX | Ride each sound's fader and mute it, open its strip for its pan and delay, and send each sound and audio scene into audio scenes, from dots under the strips or as a matrix under **Routes**. Add, rename, reorder, and remove audio scenes, put one on the stream, and listen to one on the output you pick (see [Audio scenes](#audio-scenes)). The program shows small in the strip's place for the sound. |
 | REVIEW | Pick a stretch of the last 30 seconds of the program or a source from a strip of its pictures, and replay it in a replay source, slowed down if you like, or save it as a clip (see [Replay](#replay)). Beside it, this session's markers, with a clip around each (see [Markers](#markers)), over this show's recordings and clips as cards with their length and size, one repaired after a crash marked so, and **Open the folder**. The program's card is the live picture. |
 
@@ -296,10 +296,11 @@ hover, and an error on the layer replaces what it shows, in red. A capture
 [stalled](#a-picture-that-stalls), has an amber badge instead, which opens
 what happened and the fix. Click a row
 to select its layer, drag it up or down its group to restack it, and
-right-click it for its menu: hide or show, lock or unlock, interact with a web
-page, bring it to the front or forward or send it backward or to the back,
-keep it always on top or move it into this scene, duplicate it (linked, or as
-its own copy), make it independent, copy it, or remove it. **Add a layer**
+right-click it for its menu: hide or show, lock or unlock, bring it forward
+or send it backward, keep it always on top or move it into this scene,
+duplicate it, or remove it. With **Linked layers** on in Settings,
+[Mods](#mods), it also duplicates a layer as its own copy and makes one
+independent, and with Smart layout on, it puts one in a slot. **Add a layer**
 (A) turns to Add.
 
 **Add** lists what can be placed: what a drop or paste makes (see
@@ -315,16 +316,16 @@ is placed in front of the edited scene, and selected.
 On the **picture**, click a layer to select it, drag it to move it, and drag
 its edges or corners to resize it (see [Placing layers](#placing-layers)). A
 locked layer stays put: clicks pass through it to what is under it. A small
-toolbar beside the selected layer offers **Crop**, after which dragging an edge
-trims the picture without scaling it and dragging inside moves the picture
-under the frame, with the whole picture outlined; **Fit**, as large as fits on
-the canvas, keeping its shape; **Fill**, covering the canvas, keeping its shape
-and cropping the rest evenly; **Shape**, square, rounded, circle, or arch;
-**Cut out**, removing the background of a source that can lose it;
-**Interact**, on a web page; and **...**, the row's menu. Right-click a layer
-for the same menu, or the picture elsewhere to add a layer, paste, or set
-**Snap**, **Grid**, and the grid's spacing. Escape ends cropping, then the
-selection.
+toolbar beside the selected layer offers what acts on the picture:
+**Crop**, after which dragging an edge trims the picture without scaling it
+and dragging inside moves the picture under the frame, with the whole
+picture outlined; **Fit**, as large as fits on the canvas, keeping its shape;
+**Fill**, covering the canvas, keeping its shape and cropping the rest
+evenly; **Interact**, on a web page; **Lock**; and **Remove**. Right-click a
+layer for its row's menu, or the picture elsewhere to add a layer, paste, or
+set **Snap**, **Grid**, and the grid's spacing. Escape ends cropping, then the
+selection, and Delete or Backspace removes the selected layer, unless it or
+the picture is locked; undo brings it back.
 
 A layer in a [slot](#slots-and-roles) is outlined on the picture, dashed, with
 a chip naming its role, or **Guest** or its slot, and a tag naming the source
@@ -338,27 +339,39 @@ free where it is drawn.
 alone, even where another layer is over it, while the picture says so; Escape
 or **Stop** ends it.
 
-The **inspector**, on the right, follows the selection. For a layer, its tab
-is named for it, with these sections:
+The **inspector** opens on the right while a layer is selected, and closes
+with its ×, Escape, or a click on the picture away from every layer, giving
+the picture the room again. Its tab is named for the layer, and shows the
+essentials first:
+
+| Control | Use it to |
+| --- | --- |
+| Source | Show another of the show's sources in the layer's place, keeping its place, shape, and look, from a dropdown of each with its kind's icon. Under it, whether the source is live: a camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled; a broadcast says how far behind it plays, and a web page whether it is copied on the GPU or, as a fallback, uploaded from memory, saying why. A media file reads as ended once it plays to its end without looping: **Play** plays it from its start, **Stop** stops it at once, blank and silent, until played again, and **Reload** reads the file again; **Reload** restarts a web page, and opens a picked display or window again, as after the picker was cancelled or sharing stopped. For a role, pick the source filling it. |
+| Shape | Pick its outline, square, rounded, circle, or arch, give it a **Border** inside that outline and the border's color, and give it a soft **Shadow**, which follows the outline and is the layer's first drop shadow filter. |
+| Remove background | Cut the person out of a source that can lose its background, on every layer showing the source. |
+| Opacity | Fade the layer, as its first opacity filter. |
+
+**More**, closed until you open it, holds the rest, and stays as you left it
+from layer to layer:
 
 | Section | Use it to |
 | --- | --- |
-| Place | Pick its [slot](#slots-and-roles), or none; type or drag its position and size, and its crop, in percent off each edge, fit or fill it, lock it, and switch on **Keep out of the way** (see [Keeping out of the way](#keeping-out-of-the-way)). A layer in a slot has no position or size of its own to type, and keeps out of the way only when set free. |
-| Shape | Pick its outline, square, rounded, circle, or arch, give it a border inside that outline and the border's color, and give it a soft shadow, which follows the outline and is the layer's first drop shadow filter. |
-| Look | Remove its source's background, which every layer showing the source loses (make it independent to cut out here alone); grade its color through a LUT source; add, order, set, and remove its filters, copy them, or paste copied filters after its own; and set its blend mode. |
-| Shown in | See how many places show its source, **Linked in 3 scenes**, and **Make independent**, which points this layer at a copy of the source of its own, keeping its look, so editing that look no longer edits the others. A copy says what it copies. |
-| Source | See what the source is and whether it and its own track are live. A camera or broadcast without a new picture, or a microphone or system audio without new sound, for a second reads as stalled; a broadcast says how far behind it plays, and a web page whether it is copied on the GPU or, as a fallback, uploaded from memory, saying why. A media file reads as ended once it plays to its end without looping: **Play** plays it from its start, **Stop** stops it at once, blank and silent, until played again, and **Reload** reads the file again; **Reload** restarts a web page, and opens a picked display or window again, as after the picker was cancelled or sharing stopped. Publish it independently, then whether viewers may switch it off and its priority for them (see [Published independently](#published-independently)), and set its own crop and filters, before the layer's, on every layer showing it. **Warn when it goes dark**, on by default for a camera, display, or window, watches it for [going dark](#a-capture-gone-dark). For a role, pick the source filling it. |
+| Position | Type or drag its position and size (**X**, **Y**, **W**, **H**). With Smart layout on, pick its [slot](#slots-and-roles), or none, and switch on **Keep out of the way** (see [Keeping out of the way](#keeping-out-of-the-way)); a layer in a slot has no position or size of its own to type, and keeps out of the way only when set free. |
+| Crop | Trim it, in percent off the top, right, bottom, and left (**T**, **R**, **B**, **L**). |
+| Blend and filters | Grade its color through a LUT source, offered once the show has one; add, order, set, and remove its filters, copy them, or paste copied filters after its own; and set its blend mode. |
+| Its source | See what the source is; **Warn when it goes dark**, on by default for a camera, display, or window, watches it for [going dark](#a-capture-gone-dark); and set its own crop and filters, before the layer's, on every layer showing it. With Linked layers on, see how many places show it, **Linked in 3 scenes**, and **Make independent**, which points this layer at a copy of the source of its own, keeping its look, so editing that look no longer edits the others; a copy says what it copies. With Published scenes on, publish it independently, then whether viewers may switch it off and its priority for them (see [Published independently](#published-independently)). |
 
 Its **Animate** tab holds the layer's keyframes (see [Keyframes](#keyframes)).
-With no layer selected, the inspector shows the edited scene: rename it,
-see its size, mark it **Safe**, switch on **Publish** and pick the audio scene
-it carries (see [Published scenes](#published-scenes)), arrange its slots and
-fill their roles (see [Slots and roles](#slots-and-roles)), and pick the show's
-transition and how long it takes, or for a stinger its media source and cut
-point (see [Transitions](#transitions)). A scene on program, or still leaving
-it in a transition, cannot be removed, even by an undo, until program cuts
-away from it. In a narrow window, the inspector is a tab beside Layers and
-Add.
+A scene's own settings are on its pad's menu: take or cue it, edit it off
+air, mark it **Safe**, pick the show's **Transition**, also in Settings, Show
+(see [Transitions](#transitions)), rename, duplicate, move, or remove it. With
+Published scenes or Smart layout on, the inspector with no layer selected
+shows the edited scene's size and **Publish** with the audio scene it carries
+(see [Published scenes](#published-scenes)), or its slots and their roles
+(see [Slots and roles](#slots-and-roles)). A scene on program, or still
+leaving it in a transition, cannot be removed, even by an undo, until program
+cuts away from it. In a narrow window, the inspector is a tab beside Layers
+and Add while it has anything to show.
 
 ### Off air and Studio mode
 
@@ -555,6 +568,7 @@ left to other programs. Switching it on shows its UI at once:
 | Multiview | **Open the multiview**, in the show's menu and the palette (see [Multiview](#multiview)). |
 | Phone remote | Settings, Remote (see [Phone remote](#phone-remote)). Off, phones paired stay paired, but their presses do nothing. |
 | Published scenes | Publishing a scene or a source on its own, a scene's own size, and each published scene's virtual camera, listed under the switch (see [Published scenes](#published-scenes)). |
+| Linked layers | Where a layer's source shows elsewhere, **Make independent**, and **Duplicate as its own copy**, in the inspector's More and a layer's menu (see [Studio](#studio)). Every layer showing one source shares its look either way. |
 | Scene graph | **Open**, beside the switch, and in the palette (see [Scene graph](#scene-graph)). |
 
 Switching one off turns its feature off: the show then sends what it would
@@ -851,7 +865,7 @@ a new link. Since an appearance is your edit, it drops what you could redo.
 Off, every guest waits under Add, as before.
 ### Keeping out of the way
 
-Switch on **Smart layout** in Settings, [Mods](#mods), first. A scene's layer with **Keep out of the way** on, in the inspector's Place
+Switch on **Smart layout** in Settings, [Mods](#mods), first. A scene's layer with **Keep out of the way** on, in the inspector's More
 section, moves itself off what matters in the picture under it, such as a
 facecam off a game's minimap or a slide's text. A few times a second the
 studio draws the layers under it, scaled far down, and reduces them on the
@@ -1755,8 +1769,8 @@ and software otherwise.
 ### Published independently
 
 A broadcast source, such as a guest's camera, or a source with a track of its
-own can be **Published independently**, a switch in the inspector's Source
-section while **Published scenes** is on in Settings, [Mods](#mods), off by default and kept in the scene file's `[published.<name>]`
+own can be **Published independently**, a switch in the inspector's More,
+under Its source, while **Published scenes** is on in Settings, [Mods](#mods), off by default and kept in the scene file's `[published.<name>]`
 table. Viewers then fetch it as a broadcast of its own and place it over the
 program themselves, as the [composition](#composition) says:
 
@@ -2185,7 +2199,7 @@ not show. Where only you can fix it, such as
 a permission macOS took away or a game that refuses capture, it says what to
 do and where. **It is meant to go dark** stops watching it, as
 `expect_dark` in its `[video]` table, and **Warn when it goes dark** in the
-inspector's Source section watches it again.
+inspector's More, under Its source, watches it again.
 
 A source published independently reaches viewers on its own track, which
 shows the dark at once.

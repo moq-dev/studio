@@ -20,13 +20,19 @@ pub(super) const OFF_AIR_TOP: &str = "Always on top is drawn on program; go back
 impl Panels {
 	/// The Studio page: the layers and Add on the left while the rail is
 	/// open, the live picture, or the scene open off air under its banner, in
-	/// the middle, and the inspector on the right, or among the rail's tabs
-	/// when the window is narrow.
+	/// the middle, and the inspector on the right while it has anything to
+	/// show, or among the rail's tabs when the window is narrow.
 	pub(super) fn build(&mut self, ui: &mut Ui, fx: &mut Fx, stage: egui::Rect, snapshot: &Snapshot) {
+		// A drag leaves the picture as it found it, so the pointer stays over
+		// what it moves even once the drag selects a layer.
+		if self.drag.is_none() {
+			let state = self.engine.state.lock().unwrap();
+			self.inspecting = self.inspects(&state);
+		}
 		let side = (stage.width() * 0.22).clamp(*SIDE.start(), *SIDE.end());
 		let wide = stage.width() >= side * 2.0 + 360.0;
 		let left = self.rail.then(|| stage.with_max_x(stage.left() + side));
-		let right = wide.then(|| stage.with_min_x(stage.right() - side));
+		let right = (wide && self.inspecting).then(|| stage.with_min_x(stage.right() - side));
 		let middle = stage
 			.with_min_x(left.map_or(stage.left(), |left| left.right()))
 			.with_max_x(right.map_or(stage.right(), |right| right.left()));
@@ -132,19 +138,33 @@ impl Panels {
 			.filter(|_| collection.dual(&Layer::scene(scene)))
 	}
 
+	/// Whether the inspector has anything to show: the selected layer, or
+	/// with none, the scene's settings a mod adds.
+	pub(super) fn inspects(&self, state: &State) -> bool {
+		let selected = self
+			.selection
+			.as_ref()
+			.is_some_and(|picked| picked.item(state.collection()).is_some());
+		let mods = &self.controls.mods;
+		selected || mods.on(crate::mods::Mod::Layout) || mods.on(crate::mods::Mod::Published)
+	}
+
 	/// The page's keys, unless a field, a page, or a modal such as Settings
-	/// has the keyboard: A adds a layer, opening the rail, and Escape leaves
-	/// cropping, then the selection.
+	/// has the keyboard: A adds a layer, opening the rail, Escape leaves
+	/// cropping, then the selection, and Delete or Backspace removes the
+	/// selected layer unless the picture or the layer is locked.
 	fn build_keys(&mut self, ui: &Ui) {
 		let ctx = ui.ctx();
 		let modal = ctx.memory(|memory| memory.top_modal_layer()).is_some();
 		if modal || ctx.text_edit_focused() || self.interact.has_keyboard() || self.interacting {
 			return;
 		}
-		let (add, escape) = ui.input_mut(|input| {
+		let (add, escape, delete, backspace) = ui.input_mut(|input| {
 			(
 				input.consume_key(egui::Modifiers::NONE, egui::Key::A),
 				input.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+				input.consume_key(egui::Modifiers::NONE, egui::Key::Delete),
+				input.consume_key(egui::Modifiers::NONE, egui::Key::Backspace),
 			)
 		});
 		if add {
@@ -155,6 +175,31 @@ impl Panels {
 			match self.cropping {
 				true => self.cropping = false,
 				false => self.select(None),
+			}
+		}
+		if (delete || backspace) && !self.locked {
+			let engine = self.engine.clone();
+			let mut state = engine.state.lock().unwrap();
+			// A guest appearing since the picture drew may have moved the
+			// selection's index, which this lets go of.
+			self.follow_reloads(&state);
+			let Some(picked) = self.selection.clone() else { return };
+			// Removing it shifts the layers after it, which a drag, a row's
+			// drag, or a crop under way would then hold the wrong one of.
+			self.drag = None;
+			self.moving = None;
+			self.cropping = false;
+			let (spot, result) = match picked.item(state.collection()) {
+				None => (None, Ok(())),
+				Some(item) if item.locked => (
+					Some(Spot::Layer(picked.layer.clone(), item.source.clone())),
+					Err(anyhow::anyhow!("`{}` is locked; unlock it to remove it", item.source)),
+				),
+				Some(_) => self.act(&mut state, &picked, LayerAction::Remove),
+			};
+			drop(state);
+			if let Some(spot) = spot {
+				self.fail(spot, result);
 			}
 		}
 	}
@@ -204,7 +249,11 @@ impl Panels {
 			(None, Some((canvas, id))) => (canvas, id, self.program_frame()),
 			(None, None) => (self.program_drawn, self.program.id, self.program_frame()),
 		};
-		let builder = egui::UiBuilder::new().max_rect(at.expand(10.0));
+		// Its own id, so the inspector opening beside it keeps the picture's
+		// menu and keyboard focus, which egui keys by id.
+		let builder = egui::UiBuilder::new()
+			.id(ui.id().with("canvas"))
+			.max_rect(at.expand(10.0));
 		if self.interacting {
 			let page = self.interacted(&state);
 			let escape = ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
@@ -773,7 +822,7 @@ impl Panels {
 		}
 		let action = action?;
 		let picked = self.selection.clone()?;
-		Some(self.act(ui.ctx(), state, &picked, action))
+		Some(self.act(state, &picked, action))
 	}
 
 	/// What a right click on the picture away from every layer offers.
@@ -812,7 +861,6 @@ impl Panels {
 	/// failure shows, and the result.
 	pub(super) fn act(
 		&mut self,
-		ctx: &egui::Context,
 		state: &mut State,
 		picked: &Picked,
 		action: LayerAction,
@@ -1026,9 +1074,6 @@ impl Panels {
 					Mend::Expected => super::dark::expect(state, &capture, true),
 				}
 			}
-			// The caller holds the state, so this copies from it rather than
-			// through `copy`, which takes the lock.
-			LayerAction::Copy => clip(ctx, state, &item).map(|said| self.say(Ok(said))),
 			LayerAction::Remove => {
 				let label = format!("Remove `{name}` {}", place(layer));
 				let result = edit(state, label, None, |draft| draft.remove_item(layer, index).map(drop));
@@ -1086,7 +1131,6 @@ pub(super) enum LayerAction {
 	Independent,
 	/// Fix what it shows, which went dark or stalled.
 	Mend(Mend),
-	Copy,
 	Remove,
 }
 
@@ -1110,8 +1154,6 @@ pub(super) struct Menu {
 	top: bool,
 	/// Whether its source shows a web page, which it can be interacted with.
 	web: bool,
-	/// Whether its source can have its background removed, and whether it is.
-	cut: Option<bool>,
 	/// How many lists of layers show its source.
 	linked: usize,
 	/// Whether it can show a copy of its own: not a role nothing fills.
@@ -1121,45 +1163,54 @@ pub(super) struct Menu {
 	off_air: bool,
 	/// Whether it can go in a slot, with Smart layout on.
 	slots: bool,
+	/// Whether it offers a copy of its own, with Linked layers on.
+	linking: bool,
+	/// Whether the picture Studio edits shows it, so it can fit or fill it.
+	placeable: bool,
 }
 
 impl Panels {
 	/// What `picked` offers, if it is still there.
 	pub(super) fn menu(&self, state: &State, picked: &Picked) -> Option<Menu> {
 		let off_air = self.off_air(state).is_some();
-		let slots = self.controls.mods.on(crate::mods::Mod::Layout);
-		Menu::of(state, picked, off_air).map(|menu| Menu { slots, ..menu })
+		let mods = &self.controls.mods;
+		let slots = mods.on(crate::mods::Mod::Layout);
+		let linking = mods.on(crate::mods::Mod::Linked);
+		let collection = state.collection();
+		let format = collection.format_of(&picked.layer, self.format);
+		Menu::of(state, picked, off_air).map(|menu| Menu {
+			slots,
+			linking,
+			placeable: menu.item.shown_in(format),
+			..menu
+		})
 	}
 }
 
 impl Menu {
-	/// What `picked` offers, if it is still there, `off_air` or not, with no slots.
+	/// What `picked` offers, if it is still there, `off_air` or not, with no mods.
 	fn of(state: &State, picked: &Picked, off_air: bool) -> Option<Self> {
 		let collection = state.collection();
 		let item = picked.item(collection)?.clone();
 		let capture = collection.sources.get(collection.capture(&item.source));
-		let source = collection.sources.get(&item.source);
-		let background = collection.video.get(&item.source).map(|video| video.background);
-		let cut = source
-			.filter(|source| source.removes_background())
-			.map(|_| background == Some(Background::Remove));
 		Some(Self {
 			index: picked.index,
 			count: collection.items(&picked.layer).map_or(0, <[Item]>::len),
 			top: picked.layer.scene.is_none(),
 			web: matches!(capture, Some(Source::Browser { .. })),
-			cut,
 			linked: shown_in(collection, &item.source).len(),
 			copyable: !collection.unfilled(&item.source),
 			off_air,
 			slots: false,
+			linking: false,
+			placeable: true,
 			item,
 		})
 	}
 }
 
-/// A layer's actions, as its toolbar's ⋯, a right click on it, and its
-/// row's menu offer them; the one chosen.
+/// A layer's core actions, as a right click on it and its row's menu offer
+/// them, with those of the mods on; the one chosen.
 pub(super) fn layer_menu(ui: &mut Ui, menu: &Menu) -> Option<LayerAction> {
 	let mut action = None;
 	let item = &menu.item;
@@ -1181,16 +1232,28 @@ pub(super) fn layer_menu(ui: &mut Ui, menu: &Menu) -> Option<LayerAction> {
 	{
 		action = Some(LayerAction::Lock(locked));
 	}
-	if menu.web && item.visible && ui.add(kit::button(Icon::Interact, "Interact")).clicked() {
-		action = Some(LayerAction::Interact);
+	// The toolbar offers them on the picture, which a hidden layer is not on.
+	if !item.visible && item.slot.is_none() && menu.placeable {
+		if ui
+			.button("Fit")
+			.on_hover_text("As large as fits on the canvas, keeping its shape")
+			.clicked()
+		{
+			action = Some(LayerAction::Fit);
+		}
+		if ui
+			.button("Fill")
+			.on_hover_text("Cover the canvas, keeping its shape and cropping the rest")
+			.clicked()
+		{
+			action = Some(LayerAction::Fill);
+		}
 	}
 	ui.separator();
 	let front = menu.count.saturating_sub(1);
 	let moves = [
-		("Bring to front", menu.index < front, front),
 		("Bring forward", menu.index < front, (menu.index + 1).min(front)),
 		("Send backward", menu.index > 0, menu.index.saturating_sub(1)),
-		("Send to back", menu.index > 0, 0),
 	];
 	for (name, enabled, to) in moves {
 		if ui.add_enabled(enabled, egui::Button::new(name)).clicked() {
@@ -1242,27 +1305,26 @@ pub(super) fn layer_menu(ui: &mut Ui, menu: &Menu) -> Option<LayerAction> {
 	{
 		action = Some(LayerAction::Duplicate { independent: false });
 	}
-	if ui
-		.add_enabled(menu.copyable, egui::Button::new("Duplicate as its own copy"))
-		.on_hover_text("Another layer showing a copy of the source with a look of its own")
-		.on_disabled_hover_text(NOTHING_TO_COPY)
-		.clicked()
-	{
-		action = Some(LayerAction::Duplicate { independent: true });
-	}
-	if menu.linked > 1
-		&& ui
-			.add_enabled(menu.copyable, egui::Button::new("Make independent"))
-			.on_hover_text(linked_note(menu.linked))
+	if menu.linking {
+		if ui
+			.add_enabled(menu.copyable, egui::Button::new("Duplicate as its own copy"))
+			.on_hover_text("Another layer showing a copy of the source with a look of its own")
 			.on_disabled_hover_text(NOTHING_TO_COPY)
 			.clicked()
-	{
-		action = Some(LayerAction::Independent);
+		{
+			action = Some(LayerAction::Duplicate { independent: true });
+		}
+		if menu.linked > 1
+			&& ui
+				.add_enabled(menu.copyable, egui::Button::new("Make independent"))
+				.on_hover_text(linked_note(menu.linked))
+				.on_disabled_hover_text(NOTHING_TO_COPY)
+				.clicked()
+		{
+			action = Some(LayerAction::Independent);
+		}
 	}
 	ui.separator();
-	if ui.add(kit::button(Icon::Copy, "Copy")).clicked() {
-		action = Some(LayerAction::Copy);
-	}
 	if ui
 		.add(kit::button(Icon::Remove, "Remove"))
 		.on_hover_text("Take it out of this list; its source stays, under Add while nothing shows it")
@@ -1282,7 +1344,8 @@ pub(super) fn linked_note(linked: usize) -> String {
 }
 
 /// The selected layer's toolbar, over the picture at `at` within `picture`:
-/// crop, fit, fill, shape, cut out or interact, and the rest of its actions.
+/// what acts on the picture alone, crop, fit, fill, interact with a page,
+/// lock, and remove; the inspector holds the rest.
 fn toolbar(ui: &mut Ui, picture: egui::Rect, at: egui::Rect, menu: &Menu, cropping: bool) -> Option<LayerAction> {
 	let height = 32.0;
 	// Over the layer, or under it, or inside its top, wherever there is room.
@@ -1342,44 +1405,37 @@ fn toolbar(ui: &mut Ui, picture: egui::Rect, at: egui::Rect, menu: &Menu, croppi
 								action = Some(LayerAction::Fill);
 							}
 						}
-						let shape = ui.add(egui::Button::selectable(!menu.item.shape.is_square(), "Shape"));
-						egui::Popup::menu(&shape).show(|ui| {
-							if let Some(corners) = shapes(ui, menu.item.shape.corners) {
-								action = Some(LayerAction::Shape(corners));
+						// A page takes the pointer and keyboard; nothing else offers it.
+						if menu.web {
+							let interact = egui::Button::new((Icon::Interact.image(13.0, kit::TEXT), "Interact"));
+							let interact = ui
+								.add(interact)
+								.on_hover_text("Pass the mouse and keyboard to the page; Escape stops");
+							if interact.clicked() {
+								action = Some(LayerAction::Interact);
 							}
-						});
-						match (menu.web, menu.cut) {
-							(true, _) => {
-								let interact = egui::Button::new((Icon::Interact.image(13.0, kit::TEXT), "Interact"));
-								let interact = ui
-									.add(interact)
-									.on_hover_text("Pass the mouse and keyboard to the page; Escape stops");
-								if interact.clicked() {
-									action = Some(LayerAction::Interact);
-								}
-							}
-							(false, Some(cut)) => {
-								let button =
-									egui::Button::selectable(cut, (Icon::CutOut.image(13.0, kit::TEXT), "Cut out"));
-								let note = match menu.linked {
-									1 => "Remove the background behind a person".to_string(),
-									n => format!(
-										"Remove the background behind a person, on all {n} layers showing this source"
-									),
-								};
-								if ui.add(button).on_hover_text(note).clicked() {
-									action = Some(LayerAction::CutOut(!cut));
-								}
-							}
-							(false, None) => {}
 						}
-						let more = ui.add(IconButton::new(Icon::More, "More").small());
-						egui::Popup::menu(&more).show(|ui| {
-							if let Some(chosen) = layer_menu(ui, menu) {
-								action = Some(chosen);
-								ui.close();
+						let (icon, name, lock) = match locked {
+							true => (Icon::Unlock, "Unlock", false),
+							false => (Icon::Lock, "Lock", true),
+						};
+						let button = IconButton::new(icon, name)
+							.small()
+							.note(Some("A locked layer stays put: clicks on the picture pass through it"));
+						if ui.add(button).clicked() {
+							action = Some(LayerAction::Lock(lock));
+						}
+						let note = match locked {
+							true => "Locked; unlock it to remove it",
+							false => {
+								"Remove it; its source stays, under Add while nothing shows it. Delete or Backspace too"
 							}
-						});
+						};
+						let remove = IconButton::new(Icon::Remove, "Remove").small().note(Some(note));
+						let remove = ui.add_enabled(!locked, remove);
+						if remove.clicked() {
+							action = Some(LayerAction::Remove);
+						}
 					});
 				});
 		});

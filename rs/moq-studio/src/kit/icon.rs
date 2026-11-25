@@ -32,8 +32,6 @@ pub enum Icon {
 	Stop,
 	Reload,
 	Link,
-	/// The rest of a layer's actions.
-	More,
 	MicMuted,
 	Minimize,
 	Maximize,
@@ -44,8 +42,6 @@ pub enum Icon {
 	Lock,
 	Unlock,
 	Crop,
-	/// Removing a picture's background.
-	CutOut,
 	/// Passing the pointer and keyboard to a web page.
 	Interact,
 	History,
@@ -88,7 +84,7 @@ pub enum Icon {
 impl Icon {
 	/// Every icon, for the gallery.
 	#[cfg(test)]
-	pub const ALL: [Self; 68] = [
+	pub const ALL: [Self; 66] = [
 		Self::Undo,
 		Self::Redo,
 		Self::Settings,
@@ -114,7 +110,6 @@ impl Icon {
 		Self::Stop,
 		Self::Reload,
 		Self::Link,
-		Self::More,
 		Self::MicMuted,
 		Self::Minimize,
 		Self::Maximize,
@@ -125,7 +120,6 @@ impl Icon {
 		Self::Lock,
 		Self::Unlock,
 		Self::Crop,
-		Self::CutOut,
 		Self::Interact,
 		Self::History,
 		Self::Camera,
@@ -186,7 +180,6 @@ impl Icon {
 			Self::Stop => include_image!("../../assets/icons/square.svg"),
 			Self::Reload => include_image!("../../assets/icons/rotate-ccw.svg"),
 			Self::Link => include_image!("../../assets/icons/link.svg"),
-			Self::More => include_image!("../../assets/icons/ellipsis.svg"),
 			Self::MicMuted => include_image!("../../assets/icons/mic-off.svg"),
 			Self::Minimize => include_image!("../../assets/icons/minus.svg"),
 			Self::Maximize => include_image!("../../assets/icons/square.svg"),
@@ -197,7 +190,6 @@ impl Icon {
 			Self::Lock => include_image!("../../assets/icons/lock.svg"),
 			Self::Unlock => include_image!("../../assets/icons/lock-open.svg"),
 			Self::Crop => include_image!("../../assets/icons/crop.svg"),
-			Self::CutOut => include_image!("../../assets/icons/wand-sparkles.svg"),
 			Self::Interact => include_image!("../../assets/icons/mouse-pointer-click.svg"),
 			Self::History => include_image!("../../assets/icons/history.svg"),
 			Self::Camera => include_image!("../../assets/icons/video.svg"),

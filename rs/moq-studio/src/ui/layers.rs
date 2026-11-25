@@ -30,10 +30,11 @@ pub(super) fn unplaced(collection: &Collection, name: &str) -> bool {
 }
 
 impl Panels {
-	/// The left column in `rect`: Layers and Add, and the inspector too when
-	/// `narrow` leaves no room for its own column.
+	/// The left column in `rect`: Layers and Add, and the inspector too while
+	/// it has anything to show when `narrow` leaves no room for its own
+	/// column.
 	pub(super) fn side_column(&mut self, ui: &mut Ui, rect: egui::Rect, narrow: bool) {
-		let tabs: &[Side] = match narrow {
+		let tabs: &[Side] = match narrow && self.inspecting {
 			true => &[Side::Layers, Side::Add, Side::Inspect],
 			false => &Side::ALL,
 		};
@@ -116,7 +117,7 @@ impl Panels {
 			self.side = Side::Add;
 		}
 		let Some((picked, action)) = acted else { return };
-		let (spot, result) = self.act(ui.ctx(), &mut state, &picked, action);
+		let (spot, result) = self.act(&mut state, &picked, action);
 		drop(state);
 		if let Some(spot) = spot {
 			self.fail(spot, result);

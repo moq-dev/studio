@@ -113,7 +113,8 @@ impl Page {
 /// The Settings window's panes: what a broadcaster sets once.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Setting {
-	/// The format, the canvas size and frame rate, and each scene's size.
+	/// The format, the canvas size and frame rate, the transition, and each
+	/// scene's size.
 	#[default]
 	Show,
 	/// Where the show streams: its relays, their tokens, and the broadcast.
@@ -182,6 +183,7 @@ impl Setting {
 				("Both at once", &["dual", "portrait", "phones"], Some(Mod::Formats)),
 				("Canvas size", &["resolution", "1080p", "720p"], None),
 				("Frame rate", &["fps"], None),
+				("Transition", &["fade", "slide", "wipe", "stinger", "cut"], None),
 				(settings::SCENE_SIZES, &[], Some(Mod::Published)),
 			],
 			Self::Destinations => &[
@@ -225,7 +227,7 @@ impl Setting {
 	/// The line under the pane's title.
 	fn lead(self) -> &'static str {
 		match self {
-			Self::Show => "The shape of the picture. It is saved in the show file.",
+			Self::Show => "The shape of the picture, and how scenes go on air. It is saved in the show file.",
 			Self::Destinations => {
 				"Where the stream goes, saved as you change it. Tokens stay in the system's credential store, never in a \
 				 file."
@@ -335,6 +337,8 @@ impl Studio {
 			details: false,
 			side: Side::default(),
 			inspect: Inspect::default(),
+			more: false,
+			inspecting: false,
 			going: None,
 			confirm_end: false,
 			ready: None,
@@ -357,7 +361,6 @@ impl Studio {
 			cut: STINGER_CUT,
 			drag: None,
 			legend: false,
-			renaming: None,
 			title_needs: 0.0,
 			renaming_audio: None,
 			renaming_pad: None,
@@ -674,6 +677,11 @@ impl Studio {
 			index: count - 1 - index,
 		});
 	}
+
+	/// Open the inspector's More, as a click on it would.
+	pub(crate) fn more(&mut self) {
+		self.panels.more = true;
+	}
 }
 
 /// Where this user's picks are kept, in the app's settings rather than the
@@ -905,6 +913,11 @@ struct Panels {
 	/// The Studio page's left column and inspector tabs.
 	side: Side,
 	inspect: Inspect,
+	/// Whether the inspector's More is open, for every layer alike.
+	more: bool,
+	/// Whether the Studio page draws the inspector, which a drag leaves as it
+	/// found it, as it does the legend.
+	inspecting: bool,
 	/// The Go live popover, while open.
 	going: Option<live::Going>,
 	/// Whether the clock's End stream popover opens on the next frame, as the
@@ -960,8 +973,6 @@ struct Panels {
 	legend: bool,
 	/// The layer row being dragged to a new place, by its index.
 	moving: Option<usize>,
-	/// The scene being renamed, by index, and the name typed so far.
-	renaming: Option<(usize, String)>,
 	/// The width the title bar's full controls took when last drawn, past
 	/// which it draws them compact.
 	title_needs: f32,
@@ -1443,13 +1454,12 @@ impl Panels {
 	}
 
 	/// Deselect the layer, after an edit that may have moved any of them, and
-	/// let go of any drag, crop, and scene rename under way.
+	/// let go of any drag and crop under way.
 	fn deselect_item(&mut self) {
 		self.selection = None;
 		self.drag = None;
 		self.moving = None;
 		self.cropping = false;
-		self.renaming = None;
 	}
 
 	/// Select `picked`, leaving cropping and interacting with the last one.

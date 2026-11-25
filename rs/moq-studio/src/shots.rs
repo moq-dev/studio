@@ -69,6 +69,8 @@ enum View {
 	},
 	/// Studio with the host's layer selected and its row's menu open.
 	Menu,
+	/// Studio with the host's layer selected and the inspector's More open.
+	More,
 	/// Studio with the host's layer selected, its inspector scrolled to how
 	/// viewers may treat it, published independently.
 	Published,
@@ -322,11 +324,13 @@ views! {
 	/// A window snapped beside a game stacks the picture, the scenes, and the
 	/// sound.
 	studio_compact: Still, Open::Studio { view: View::Page(Page::Studio), size: HALF, show: "show.toml", relay: false };
-	/// Studio with the host's layer selected: its row in Layers, its handles
-	/// and toolbar on the picture, and its inspector.
-	build: Still, on_show(BUILD);
-	/// Studio with no layer selected: the inspector shows the scene.
-	build_scene: Still, on_show(View::Build { side: Side::Layers, inspect: Inspect::Layer, index: None });
+	/// Studio with the host's layer selected, as the `overhaul-edit` mock-up
+	/// frame has it: its row in Layers, its handles and the toolbar of what
+	/// acts on the picture, and the inspector's essentials with More closed.
+	edit: Still, on_show(BUILD);
+	/// The same with the inspector's More open: its place, crop, blend,
+	/// filters, and its source's own.
+	edit_more: Still, on_show(View::More);
 	/// The selected layer's keyframes.
 	build_animate: Still, on_show(View::Build { side: Side::Layers, inspect: Inspect::Animate, index: Some(1) });
 	/// What can be added: sources no layer shows, devices, by hand, and
@@ -348,8 +352,8 @@ views! {
 	/// shrinks to take them and the main picture grows, as the `autolayout`
 	/// mock-up frame has it.
 	build_slots_joined: Still, slotted(View::Joined);
-	/// The camera's layer selected in its slot: no handles to resize it, its
-	/// slot in the inspector, and the source filling its role.
+	/// The camera's layer selected in its slot: no handles to resize it, and
+	/// the source filling its role in the inspector.
 	build_slots_layer: Still, slotted(View::Build { side: Side::Layers, inspect: Inspect::Layer, index: Some(2) });
 	/// Studio mode: the cued scene's pad turns amber, and NEXT docks on the
 	/// picture, edited on air, with TAKE and AUTO.
@@ -365,7 +369,8 @@ views! {
 	build_off_air_compact: Still, Open::Studio { view: View::OffAir("Break"), size: HALF, show: "show.toml", relay: false };
 	/// A facecam keeping out of the way of a game: what matters glowing on the
 	/// picture, the places it may go, where it was and the glide to where it
-	/// went, the legend under the picture, and its settings in the inspector.
+	/// went, the legend under the picture, and its settings in the
+	/// inspector's More.
 	build_keep_clear: Live, Open::Studio { view: View::KeepClear { dual: false }, size: SIZE, show: "keep.toml", relay: false };
 	/// The same in the smallest window: the legend's labels shortened to fit
 	/// beside the note, or the note left out.
@@ -1692,9 +1697,12 @@ fn the_show_menu_switches_shows() {
 }
 
 /// On Studio, a layer row's menu hides, locks, reorders, and duplicates its
-/// layer, a scene's pad's duplicates the scene with its own copies, and
-/// undo takes each back, and a take lets go of a layer of the scene it
-/// leaves. It draws no view.
+/// layer, offering a copy of its own only with Linked layers on; Delete
+/// removes the selected layer but not a locked one, and Escape lets go of
+/// it; a scene's pad's menu sets the transition and duplicates the scene
+/// with its own copies; undo
+/// takes each back; and a take lets go of a layer of the scene it leaves.
+/// It draws no view.
 #[test]
 #[ignore = "draws on a GPU; run with `just shots`"]
 fn a_layer_menu_edits_its_layer() {
@@ -1726,26 +1734,71 @@ fn a_layer_menu_edits_its_layer() {
 		harness.get_all_by_label(row).next().unwrap().click_secondary();
 		harness.run_steps(2);
 		// The menu's, which comes after the row's own eye and lock and the
-		// inspector's buttons of the same names.
+		// toolbar's buttons of the same names.
 		harness.get_all_by_label(button).last().unwrap().click();
 		harness.run_steps(2);
+	};
+	let selected = |harness: &mut Harness<'_, Window>| {
+		let App::Studio(studio) = &mut harness.state_mut().app else {
+			unreachable!()
+		};
+		studio.selected()
 	};
 
 	menu(&mut harness, "bar", "Hide");
 	assert!(!main()[2].visible, "the menu hid the bar");
 	menu(&mut harness, "bar", "Lock");
 	assert!(main()[2].locked, "and locked it");
-	menu(&mut harness, "bar", "Send to back");
-	assert_eq!(main()[0].source, "bar", "it went to the back");
+	menu(&mut harness, "bar", "Send backward");
+	assert_eq!(main()[1].source, "bar", "it went back one");
+	harness.get_all_by_label("host").next().unwrap().click_secondary();
+	harness.run_steps(2);
+	assert!(
+		harness.query_by_label("Duplicate as its own copy").is_none(),
+		"a copy of its own waits for Linked layers"
+	);
+	harness.key_press(egui::Key::Escape);
+	harness.run_steps(2);
+	enable(&mut harness, &[Mod::Linked]);
 	menu(&mut harness, "host", "Duplicate as its own copy");
 	let items = main();
 	assert_eq!(items.len(), 4);
 	assert_eq!(items[3].source, "host copy", "the copy went in front of the host");
 	let cloned = engine.state.lock().unwrap().collection().sources["host copy"].clone();
 	assert_eq!(cloned, moq_scene::Source::Clone { source: "host".into() });
-	// The menu acts while it holds the engine's state, which copying reads.
-	menu(&mut harness, "bar", "Copy");
-	harness.get_by_label("copied `bar`");
+
+	harness.get_all_by_label("host copy").next().unwrap().click();
+	harness.run_steps(2);
+	harness.key_press(egui::Key::Delete);
+	harness.run_steps(2);
+	let shown: Vec<String> = main().into_iter().map(|item| item.source).collect();
+	assert_eq!(shown, ["backdrop", "bar", "host"], "Delete removed the selected copy");
+	harness.get_all_by_label("bar").next().unwrap().click();
+	harness.run_steps(2);
+	harness.key_press(egui::Key::Backspace);
+	harness.run_steps(2);
+	assert_eq!(main().len(), 3, "a locked layer stays");
+	harness.get_by_label("`bar` is locked; unlock it to remove it");
+	assert!(selected(&mut harness));
+	harness.key_press(egui::Key::Escape);
+	harness.run_steps(2);
+	assert!(!selected(&mut harness), "Escape let go of it");
+
+	// A pad's menu sets the show's transition.
+	harness.get_by_label("Interview").click_secondary();
+	harness.run_steps(2);
+	// A submenu's button is named with its arrow.
+	harness.get_by_label_contains("Transition").click();
+	harness.run_steps(4);
+	harness.get_by_label("wipe").click();
+	harness.run_steps(2);
+	let transition = engine.state.lock().unwrap().collection().transition.clone();
+	assert!(
+		matches!(transition, moq_scene::Transition::Wipe { .. }),
+		"{transition:?}"
+	);
+	harness.key_press(egui::Key::Escape);
+	harness.run_steps(2);
 
 	harness.get_by_label("Interview").click_secondary();
 	harness.run_steps(2);
@@ -1759,7 +1812,7 @@ fn a_layer_menu_edits_its_layer() {
 		assert_eq!(shown, ["backdrop copy", "host copy 2", "guest copy"]);
 	}
 
-	for _ in 0..5 {
+	for _ in 0..7 {
 		harness.get_by_label_contains("Undo: ").click();
 		harness.run_steps(2);
 	}
@@ -1778,12 +1831,6 @@ fn a_layer_menu_edits_its_layer() {
 	);
 
 	// A take moves Studio to another scene, letting go of a layer of this one.
-	let selected = |harness: &mut Harness<'_, Window>| {
-		let App::Studio(studio) = &mut harness.state_mut().app else {
-			unreachable!()
-		};
-		studio.selected()
-	};
 	harness.get_all_by_label("bar").next().unwrap().click();
 	harness.run_steps(2);
 	assert!(selected(&mut harness), "the click selected the bar");
@@ -2629,8 +2676,15 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		View::Mix(view, opened) => studio.mix(*view, *opened),
 		View::MixMenu => studio.mix(MixView::Strips, None),
 		View::Build { side, inspect, index } => studio.build(*side, *inspect, *index),
-		View::KeepClear { .. } => studio.build(Side::Layers, Inspect::Layer, Some(0)),
-		View::Menu | View::Published => studio.build(Side::Layers, Inspect::Layer, Some(1)),
+		View::KeepClear { .. } => {
+			studio.build(Side::Layers, Inspect::Layer, Some(0));
+			studio.more();
+		}
+		View::Menu => studio.build(Side::Layers, Inspect::Layer, Some(1)),
+		View::More | View::Published => {
+			studio.build(Side::Layers, Inspect::Layer, Some(1));
+			studio.more();
+		}
 		View::Setting(setting) | View::OnAirSetting(setting) => studio.open(*setting),
 		View::ModsOn | View::ModsAt(_) => studio.open(Setting::Mods),
 		View::Restart | View::CustomCanvas => studio.open(Setting::Show),
