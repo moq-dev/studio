@@ -858,6 +858,46 @@ fn a_scene_removes_from_its_pad() {
 	quit(&engine, &runtime);
 }
 
+/// A show opened with its only scene of another size than the program has
+/// nothing on program; removing that scene empties it and opens it off air,
+/// where its quick start is. It draws no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn the_only_scene_of_another_size_empties_into_its_quick_start() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let mut show = show::first(moq_scene::Canvas::default(), false).unwrap();
+	let name = show.scenes[0].name.clone();
+	show.scenes[0].size = Some(moq_scene::Size {
+		width: 640,
+		height: 480,
+	});
+	std::fs::write("show.toml", show.to_toml().unwrap()).unwrap();
+	let app = start(launch(&gpu), stream(None), &runtime);
+	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, recent::Recent::default());
+	harness.step();
+	let engine = started.get().expect("the studio started").clone();
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		panic!("the studio starts on its first frame")
+	};
+	studio.seed_devices(first_devices());
+	harness.run_steps(2);
+	assert!(
+		engine.state.lock().unwrap().compositor.program_scene().is_none(),
+		"nothing is on program"
+	);
+	harness.get_all_by_label(&name).last().unwrap().click_secondary();
+	harness.run_steps(2);
+	harness.get_all_by_label("Remove").last().unwrap().click();
+	harness.run_steps(2);
+	assert_eq!(engine.state.lock().unwrap().collection().scenes.len(), 1);
+	assert!(
+		harness.query_by_label("Screen").is_some(),
+		"its quick start is shown, the scene open off air"
+	);
+	quit(&engine, &runtime);
+}
+
 /// A click on a pad takes its scene on air, and the panic key mutes every
 /// microphone and guest, in an edit undo takes back, and cuts to the safe
 /// scene: the window as a person uses it, on a real engine. A guest of a room

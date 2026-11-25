@@ -931,7 +931,12 @@ impl Panels {
 		let cued = snapshot.cued.as_ref().is_some_and(|cued| cued.name == pad.name);
 		let live = self.engine.on_air().live().is_some();
 		let (tally, tagged) = tally(on_air, live, cued);
-		let response = self.pad(ui, pad, tally, tagged, width, snapshot);
+		// Keyed by the scene, so the keyboard's focus stays with it, and does not
+		// pass to the scene that takes its place in the strip when it goes.
+		let response = ui.push_id(("pad", &pad.name), |ui| {
+			self.pad(ui, pad, tally, tagged, width, snapshot)
+		});
+		let response = response.inner;
 		let click = match snapshot.studio {
 			true => PadAction::Cue(pad.name.clone()),
 			false => PadAction::Take(pad.name.clone()),
@@ -967,9 +972,24 @@ impl Panels {
 		if response.has_focus() {
 			self.pad_focused = true;
 			let modal = ui.ctx().memory(|memory| memory.top_modal_layer()).is_some();
+			// Once per press, never a key held down, which would go on to remove
+			// every scene the repeats find focused.
 			let delete = ui.input_mut(|input| {
-				let delete = input.consume_key(egui::Modifiers::NONE, egui::Key::Delete);
-				input.consume_key(egui::Modifiers::NONE, egui::Key::Backspace) | delete
+				let pressed = input.events.iter().any(|event| {
+					matches!(
+						event,
+						egui::Event::Key {
+							key: egui::Key::Delete | egui::Key::Backspace,
+							pressed: true,
+							repeat: false,
+							modifiers,
+							..
+						} if modifiers.is_none()
+					)
+				});
+				input.consume_key(egui::Modifiers::NONE, egui::Key::Delete);
+				input.consume_key(egui::Modifiers::NONE, egui::Key::Backspace);
+				pressed
 			});
 			if delete && !modal {
 				action = Some(PadAction::Remove(pad.name.clone()));

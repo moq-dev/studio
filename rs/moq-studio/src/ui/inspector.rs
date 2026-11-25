@@ -1134,6 +1134,14 @@ impl Panels {
 			SceneAction::Remove(index) => {
 				let result = remove_scene(state, index);
 				if result.is_ok() {
+					// A show opened with nothing on program, its only scene of
+					// another size, has the emptied scene for Studio to edit,
+					// where its quick start is.
+					if state.compositor.program_scene().is_none()
+						&& let Ok(scene) = state.open_off_air(&name)
+					{
+						self.editing = state.cued().is_some().then_some(scene);
+					}
 					// Removing its scene sources removes the items showing
 					// them, which moves the ones after them.
 					self.deselect_item();
@@ -1332,9 +1340,10 @@ impl Panels {
 	}
 }
 
-/// Remove the scene at `index`. One on program, or leaving it, goes only
-/// after the next scene that can go on program, after it along the strip and
-/// wrapping, takes its place by a cut, or a new empty scene when none can. The
+/// Remove the scene at `index`. One on program goes only after the next scene
+/// that can go on program, after it along the strip and wrapping, takes its
+/// place by a cut, or a new empty scene when none can; one only leaving it in a
+/// transition goes after a cut finishes the transition. The
 /// show's last scene is emptied instead, so the show keeps one.
 fn remove_scene(state: &mut State, index: usize) -> anyhow::Result<()> {
 	let (count, name) = {
@@ -1347,18 +1356,23 @@ fn remove_scene(state: &mut State, index: usize) -> anyhow::Result<()> {
 		});
 	}
 	if state.compositor.on_air().any(|on| on == name) {
-		let collection = state.collection();
-		let mut others = (1..count).map(|step| &collection.scenes[(index + step) % count].name);
-		let next = others.find(|other| collection.takes(other).is_ok()).cloned();
-		let next = match next {
-			Some(next) => next,
-			None => {
-				let free = (count + 1..).find(|number| collection.scene(&format!("Scene {number}")).is_none());
-				let next = format!("Scene {}", free.expect("a free name"));
-				edit(state, format!("Add scene `{next}`"), None, |draft| {
-					draft.insert_scene(count, Scene::new(next.clone()))
-				})?;
-				next
+		// One only leaving in a transition lets the program it goes to finish.
+		let next = match state.compositor.program_scene() {
+			Some(program) if program != name => program.to_string(),
+			_ => {
+				let collection = state.collection();
+				let mut others = (1..count).map(|step| &collection.scenes[(index + step) % count].name);
+				match others.find(|other| collection.takes(other).is_ok()).cloned() {
+					Some(next) => next,
+					None => {
+						let free = (count + 1..).find(|number| collection.scene(&format!("Scene {number}")).is_none());
+						let next = format!("Scene {}", free.expect("a free name"));
+						edit(state, format!("Add scene `{next}`"), None, |draft| {
+							draft.insert_scene(count, Scene::new(next.clone()))
+						})?;
+						next
+					}
+				}
 			}
 		};
 		state.collection().takes(&next)?;
