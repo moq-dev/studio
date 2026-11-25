@@ -184,9 +184,10 @@ impl Panels {
 			// selection's index, which this lets go of.
 			self.follow_reloads(&state);
 			let Some(picked) = self.selection.clone() else { return };
-			// Removing it shifts the layers after it, which a drag or crop
-			// under way would then hold the wrong one of.
+			// Removing it shifts the layers after it, which a drag, a row's
+			// drag, or a crop under way would then hold the wrong one of.
 			self.drag = None;
+			self.moving = None;
 			self.cropping = false;
 			let (spot, result) = match picked.item(state.collection()) {
 				None => (None, Ok(())),
@@ -1164,6 +1165,8 @@ pub(super) struct Menu {
 	slots: bool,
 	/// Whether it offers a copy of its own, with Linked layers on.
 	linking: bool,
+	/// Whether the picture Studio edits shows it, so it can fit or fill it.
+	placeable: bool,
 }
 
 impl Panels {
@@ -1173,7 +1176,14 @@ impl Panels {
 		let mods = &self.controls.mods;
 		let slots = mods.on(crate::mods::Mod::Layout);
 		let linking = mods.on(crate::mods::Mod::Linked);
-		Menu::of(state, picked, off_air).map(|menu| Menu { slots, linking, ..menu })
+		let collection = state.collection();
+		let format = collection.format_of(&picked.layer, self.format);
+		Menu::of(state, picked, off_air).map(|menu| Menu {
+			slots,
+			linking,
+			placeable: menu.item.shown_in(format),
+			..menu
+		})
 	}
 }
 
@@ -1193,6 +1203,7 @@ impl Menu {
 			off_air,
 			slots: false,
 			linking: false,
+			placeable: true,
 			item,
 		})
 	}
@@ -1222,7 +1233,7 @@ pub(super) fn layer_menu(ui: &mut Ui, menu: &Menu) -> Option<LayerAction> {
 		action = Some(LayerAction::Lock(locked));
 	}
 	// The toolbar offers them on the picture, which a hidden layer is not on.
-	if !item.visible && item.slot.is_none() {
+	if !item.visible && item.slot.is_none() && menu.placeable {
 		if ui
 			.button("Fit")
 			.on_hover_text("As large as fits on the canvas, keeping its shape")
