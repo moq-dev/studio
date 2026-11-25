@@ -1128,7 +1128,9 @@ fn grade(state: &mut State, picked: &Picked, item: &Item, prepared: Prepared) ->
 /// A rounded label at `at` with `icon`, outlined in `color`, such as the
 /// file a drag holds or why it cannot land.
 fn chip(ui: &Ui, painter: &egui::Painter, at: egui::Pos2, text: &str, icon: Icon, color: Color32) {
-	let galley = painter.layout(text.to_string(), kit::ui_medium(12.0), kit::TEXT, 320.0);
+	// Icon and padding take 36 points of the picture's width.
+	let wrap = 320.0_f32.min(painter.clip_rect().width() - 36.0);
+	let galley = painter.layout(text.to_string(), kit::ui_medium(12.0), kit::TEXT, wrap);
 	let size = galley.size() + egui::vec2(36.0, 12.0);
 	// Kept on the picture.
 	let clip = painter.clip_rect();
