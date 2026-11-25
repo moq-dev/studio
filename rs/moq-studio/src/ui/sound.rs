@@ -17,6 +17,12 @@ pub(super) struct Sound {
 /// The room a row's slider leaves its knob at each end.
 const KNOB: f32 = 7.0;
 
+/// The narrowest a row's slider gets before its decibels give it their room.
+const SLIDER: f32 = 48.0;
+
+/// The room a row's decibels take.
+const READOUT: f32 = 44.0;
+
 impl Panels {
 	/// A row for each of `sounds` in `rows`, scrolling past as many as fit,
 	/// and the options of the one whose gear is open.
@@ -82,9 +88,17 @@ impl Panels {
 			},
 		);
 		let db = decibels(audio.gain);
-		// The decibels and the gear take their room at the right first.
-		let along = (ui.available_width() - 44.0 - 24.0 - 2.0 * 8.0).max(48.0);
-		let (rect, response) = ui.allocate_exact_size(vec2(along, 18.0), Sense::drag());
+		// The gear takes its room at the right first, then the decibels while
+		// the slider keeps its own; a narrow column shows them on hover.
+		let room = ui.available_width() - 24.0 - 8.0;
+		let readout_shown = room - READOUT - 8.0 >= SLIDER;
+		let along = match readout_shown {
+			true => room - READOUT - 8.0,
+			false => room.max(SLIDER),
+		};
+		let (rect, _) = ui.allocate_exact_size(vec2(along, 18.0), Sense::hover());
+		// Keyed by the sound, so a drag stays on it while the rows reorder.
+		let response = ui.interact(rect, egui::Id::new(("sound volume", name)), Sense::drag());
 		let response = kit::named(response, &format!("{name} volume"));
 		let gesture = self.gestures.of(&response);
 		let track = egui::Rangef::new(rect.left() + KNOB, rect.right() - KNOB);
@@ -107,25 +121,27 @@ impl Panels {
 			});
 		}
 		response.widget_info(|| egui::WidgetInfo::slider(true, f64::from(db), format!("{name} volume")));
-		response.on_hover_text("Drag to set its volume; double-click for 0 dB");
-		if ui.is_rect_visible(rect) {
-			self.volume(ui, name, muted, rect, track, at);
-		}
 		let readout = match db.round() {
 			_ if db <= MUTE_DB => "-inf dB".to_string(),
 			0.0 => "0 dB".to_string(),
 			db if db > 0.0 => format!("+{db} dB"),
 			db => format!("{db} dB"),
 		};
-		let readout = egui::RichText::new(readout).font(kit::mono(11.5)).color(kit::DIM);
-		ui.allocate_ui_with_layout(
-			vec2(44.0, layout::SOUND_ROW),
-			egui::Layout::right_to_left(Align::Center),
-			|ui| {
-				ui.set_min_width(44.0);
-				ui.label(readout);
-			},
-		);
+		response.on_hover_text(format!("{readout}: drag to set its volume; double-click for 0 dB"));
+		if ui.is_rect_visible(rect) {
+			self.volume(ui, name, muted, rect, track, at);
+		}
+		if readout_shown {
+			let readout = egui::RichText::new(readout).font(kit::mono(11.5)).color(kit::DIM);
+			ui.allocate_ui_with_layout(
+				vec2(READOUT, layout::SOUND_ROW),
+				egui::Layout::right_to_left(Align::Center),
+				|ui| {
+					ui.set_min_width(READOUT);
+					ui.label(readout);
+				},
+			);
+		}
 		let open = self.sound_options.as_deref() == Some(name.as_str());
 		let gear = IconButton::new(Icon::Settings, "Options").lit(open, kit::P3).small();
 		let gear = kit::named(ui.add(gear), &format!("{name} options"));
@@ -225,6 +241,23 @@ impl Panels {
 			&& solo == name
 		{
 			ui.label(egui::RichText::new(format!("Stopped: {why}")).color(kit::ERR));
+		}
+		// Where it plays, picked before it plays so it never starts on the
+		// speakers by mistake; picking moves what already plays.
+		if mix::MONITOR {
+			let output = self.speakers.named(&self.runtime, self.speaker.as_deref());
+			let header = egui::CollapsingHeader::new(format!("On {output}"))
+				.id_salt(("sound output", name))
+				.show(ui, |ui| {
+					let mut speaker = self.speaker.clone();
+					if self.speakers.menu(ui, &mut speaker) {
+						changes.push(Change::Speaker(speaker));
+					}
+				});
+			let header = kit::named(header.header_response, &format!("{name} output"));
+			if header.clicked() {
+				self.speakers.refresh(&self.runtime);
+			}
 		}
 		if toggle.changed() {
 			let engine = self.engine.clone();

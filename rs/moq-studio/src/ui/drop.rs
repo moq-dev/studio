@@ -528,6 +528,28 @@ impl Panels {
 		self.offer(ui, state, &view);
 	}
 
+	/// Refuse the files dropped this frame onto the locked picture at
+	/// `rect`, which a drop elsewhere would otherwise place on the scene,
+	/// keeping a paste and a drop off the picture.
+	pub(super) fn drops_on_locked(&mut self, ui: &Ui, rect: egui::Rect) {
+		let dropped: Vec<std::path::PathBuf> = ui.input(|input| {
+			input
+				.raw
+				.dropped_files
+				.iter()
+				.map(|file| file.path().to_path_buf())
+				.collect()
+		});
+		let before = self.dropping.arrived.len();
+		self.dropping.arrived.retain(|(arrival, at)| {
+			let on = at.is_some_and(|at| rect.contains(at));
+			!(on && matches!(arrival, Arrival::File(path) if dropped.contains(path)))
+		});
+		if self.dropping.arrived.len() < before {
+			self.say(Err("the picture is locked: unlock it to drop onto it".into()));
+		}
+	}
+
 	/// Place what arrived on no picture at the edited scene's center.
 	pub(super) fn drops_elsewhere(&mut self, ctx: &egui::Context) {
 		if self.dropping.arrived.is_empty() {

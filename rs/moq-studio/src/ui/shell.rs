@@ -868,13 +868,20 @@ impl Panels {
 				let added = edit(&mut state, format!("Add scene `{name}`"), None, |draft| {
 					draft.insert_scene(index, Scene::new(name.clone()))
 				});
-				// Straight to it, empty but for the quick start: taken off air,
-				// and opened off air on air, never putting a blank scene on the
-				// stream.
-				let on_air = self.engine.on_air() != crate::engine::OnAir::Off || self.controls.going();
-				match (added, on_air) {
+				// Straight to it, empty but for the quick start: taken while
+				// nothing uses program, and opened off air while anything does,
+				// never putting a blank scene on the stream, a recording, or the
+				// virtual camera.
+				let used = self.engine.on_air() != crate::engine::OnAir::Off
+					|| self.controls.going()
+					|| self.engine.recorder.status().is_some_and(|status| !status.done)
+					|| state.camera(None).is_some();
+				match (added, used) {
 					(Err(err), _) => Err(err),
-					(Ok(()), false) => crate::controls::take(&mut state, &name).map(drop),
+					(Ok(()), false) => {
+						self.page = Page::Studio;
+						crate::controls::take(&mut state, &name).map(drop)
+					}
 					(Ok(()), true) => {
 						drop(state);
 						let result = self.open_off_air(&name);

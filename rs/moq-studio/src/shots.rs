@@ -1969,7 +1969,8 @@ fn studio_mode_cues_and_takes() {
 }
 
 /// Studio's title bar and strip as a person uses them: locked, a click on
-/// the picture selects nothing, and unlocked it does; off air with no safe
+/// the picture selects nothing and a file dropped on it is refused, and
+/// unlocked a click selects; off air with no safe
 /// scene the panic key stays out of the strip; `+` adds a scene and takes it,
 /// showing its quick start; and a sound's mute and gear act on that sound.
 /// It draws no view.
@@ -2006,6 +2007,13 @@ fn the_studio_locks_adds_and_mutes() {
 	harness.get_by_label("Canvas").click();
 	harness.run_steps(2);
 	assert!(!selected(&mut harness), "locked, the picture selects nothing");
+	// Dropped where the click left the pointer, on the picture.
+	image::RgbaImage::new(4, 4).save("dropped.png").unwrap();
+	let dropped = std::env::current_dir().unwrap().join("dropped.png");
+	harness.input_mut().dropped_files.push(Arc::new(Dropped(dropped)));
+	harness.run_steps(2);
+	harness.get_by_label_contains("the picture is locked");
+	assert!(harness.query_by_label_contains("Reading").is_none(), "nothing is read");
 	harness.get_by_label("Locked").click();
 	harness.run_steps(2);
 	harness.get_by_label("Canvas").click();
@@ -2991,22 +2999,22 @@ fn gallery(gpu: &engine::Gpu, sheet: bool) -> image::RgbaImage {
 	harness.render().unwrap()
 }
 
-/// A file on the picture as `drop` has it, from the show's directory.
-fn drag(harness: &mut Harness<'_, Window>, engine: &engine::Engine, drop: Drop) {
-	/// A file the system drops, which the studio reads by its path.
-	#[derive(Debug)]
-	struct Dropped(std::path::PathBuf);
+/// A file the system drops, which the studio reads by its path.
+#[derive(Debug)]
+struct Dropped(std::path::PathBuf);
 
-	impl egui::DroppedFile for Dropped {
-		fn path(&self) -> &Path {
-			&self.0
-		}
-
-		fn bytes(&self) -> Result<Vec<u8>, String> {
-			unreachable!("the studio reads the file itself")
-		}
+impl egui::DroppedFile for Dropped {
+	fn path(&self) -> &Path {
+		&self.0
 	}
 
+	fn bytes(&self) -> Result<Vec<u8>, String> {
+		unreachable!("the studio reads the file itself")
+	}
+}
+
+/// A file on the picture as `drop` has it, from the show's directory.
+fn drag(harness: &mut Harness<'_, Window>, engine: &engine::Engine, drop: Drop) {
 	// A white ring, as the mock-up's logo.
 	let logo = image::RgbaImage::from_fn(400, 400, |x, y| {
 		let distance = ((x as f32 - 200.0).powi(2) + (y as f32 - 200.0).powi(2)).sqrt();

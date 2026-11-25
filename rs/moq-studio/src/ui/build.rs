@@ -246,7 +246,10 @@ impl Panels {
 			})
 			.inner;
 		let (spot, result) = match self.locked {
-			true => (None, Ok(())),
+			true => {
+				self.drops_on_locked(ui, response.rect);
+				(None, Ok(()))
+			}
 			false => {
 				let arranged = self.arrange(ui, &mut state, &response, canvas);
 				let acted = self.on_picture(ui, &mut state, &response, canvas);

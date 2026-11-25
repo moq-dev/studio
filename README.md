@@ -234,9 +234,10 @@ The **strip** holds:
   with its own copies** gives each of its layers a copy of its source to edit
   apart (a scene or the program drawn in it stays one picture). A pad ringed
   in red says what just failed on it under the pointer. The last pad, **+**,
-  adds an empty scene and switches to it, showing its quick start: off air
-  it takes it, and on air it opens it off air, so nothing blank reaches the
-  stream. With its mod on, the switch after it turns
+  adds an empty scene and switches to it, showing its quick start: it takes
+  it while nothing uses the program, and opens it off air while the stream,
+  a recording, or the virtual camera does, so nothing blank reaches them.
+  With its mod on, the switch after it turns
   [Studio mode](#off-air-and-studio-mode) on and off.
 - The **panic key**, shown once a scene is marked safe or the stream is on
   air (or going on), amber and named for the safe scene: it mutes every
@@ -417,8 +418,9 @@ desk` finds **Mute `desk`**.
 
 Switch on **Multiview** in Settings, [Mods](#mods), first. **Open the multiview**, in the show's menu, then opens a window for another
 monitor with every scene and the sources you pick live in one grid, as large
-as the window allows: the scene on air framed in blue and tagged ON AIR, the
-one cued (or, off air, the one the stream opens on) framed in amber, and a
+as the window allows: the scene on program framed in blue (tagged ON AIR while
+live, and untagged off air, as the one the stream opens on), the one cued
+framed in amber, and a
 blue dot on each source the live picture shows. A source
 [gone dark](#a-capture-gone-dark) or [stalled](#a-picture-that-stalls), and
 each scene showing it, carries the amber badge, and the source's picture says
@@ -1290,7 +1292,8 @@ taken out.
 
 Switch on **Phone remote** in Settings, [Mods](#mods), first. A phone paired as a remote drives the show from wherever it reaches the
 relay, with nothing installed: its page shows the scene pads with their
-tally (ON AIR, FIRST, or NEXT, as the studio's own pads), TAKE and AUTO in
+tally (ON AIR, the one the stream opens on, or NEXT, as the studio's own
+pads), TAKE and AUTO in
 Studio mode, each sound's mute, and the live clock, and the whole page is
 framed in the accent while the program is on air. A pad the studio cannot
 take now is greyed out. Each press shows in the studio's status

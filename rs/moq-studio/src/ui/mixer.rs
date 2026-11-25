@@ -1249,10 +1249,14 @@ impl Panels {
 				Change::Listen(scene) => self.listen(&mut state, scene.as_deref()),
 				Change::Speaker(speaker) => {
 					self.speaker = speaker;
-					// The monitor moves to the new output.
-					match self.engine.listening() {
-						Some((heard, _)) => self.listen(&mut state, Some(&heard)),
-						None => Ok(()),
+					// The monitor moves to the new output, still playing what it did.
+					match (self.engine.listening(), self.engine.soloing()) {
+						(Some((heard, _)), _) => self.listen(&mut state, Some(&heard)),
+						(None, Some((solo, _))) => {
+							self.engine
+								.monitor_source(&mut state, &self.runtime, Some(&solo), self.speaker.as_deref())
+						}
+						(None, None) => Ok(()),
 					}
 				}
 			};
@@ -1667,7 +1671,7 @@ pub(super) struct Speakers {
 
 impl Speakers {
 	/// List the outputs again, in the background.
-	fn refresh(&mut self, runtime: &tokio::runtime::Handle) {
+	pub(super) fn refresh(&mut self, runtime: &tokio::runtime::Handle) {
 		if self.pending.is_some() {
 			return;
 		}
@@ -1689,7 +1693,7 @@ impl Speakers {
 	/// The output `speaker` names, as the listing calls it, listing the
 	/// outputs first if nothing has yet; marked if the listing lacks it,
 	/// such as a headset since unplugged.
-	fn named(&mut self, runtime: &tokio::runtime::Handle, speaker: Option<&str>) -> String {
+	pub(super) fn named(&mut self, runtime: &tokio::runtime::Handle, speaker: Option<&str>) -> String {
 		self.poll();
 		let Some(id) = speaker else {
 			return "System default".to_string();
@@ -1709,7 +1713,7 @@ impl Speakers {
 
 	/// The outputs to pick `speaker` from, or the system default; whether
 	/// the pick changed.
-	fn menu(&mut self, ui: &mut Ui, speaker: &mut Option<String>) -> bool {
+	pub(super) fn menu(&mut self, ui: &mut Ui, speaker: &mut Option<String>) -> bool {
 		self.poll();
 		let before = speaker.clone();
 		ui.label(kit::caps("Listen on", kit::display(11.0)).color(kit::DIM));

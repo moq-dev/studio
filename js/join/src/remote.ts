@@ -196,7 +196,7 @@ function view(
 			}
 			const tally = Desk.tally(desk, scene.name);
 			const tag = pad.firstChild as HTMLSpanElement;
-			tag.hidden = !tally;
+			tag.hidden = !tally?.tag;
 			text(tag, tally?.tag ?? "");
 			if (tally) pad.dataset.tally = tally.on;
 			else delete pad.dataset.tally;
