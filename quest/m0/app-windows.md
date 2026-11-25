@@ -33,7 +33,7 @@ The nightly `windows-latest` job (`.github/workflows/nightly.yml`) compiles
 
 ## Required
 
-- [The windows PC hosts Windows agents](/quest/m0/windows-host.md) - the Windows machine this runs on
+- [The new Windows PC hosts Windows agents](/quest/m0/windows-host.md) - the Windows machine this runs on
 
 ## Related
 
