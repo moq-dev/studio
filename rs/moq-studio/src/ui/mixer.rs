@@ -1661,6 +1661,14 @@ fn paint_dot(painter: &egui::Painter, at: Rect, reach: &Reach, letter: &str, pro
 	}
 }
 
+/// The height the output picker's popover takes besides its list of outputs:
+/// its heading, the system default, the button to look again, its margins,
+/// and the gap and the half of the button it opens from.
+const OUTPUTS_AROUND: f32 = 120.0;
+
+/// The least the list of outputs shows, a few rows, however short the window.
+const OUTPUTS_LEAST: f32 = 96.0;
+
 /// The audio outputs Listen can play on, listed when its tag first names a
 /// picked output or its menu opens, and again on asking.
 #[derive(Default)]
@@ -1720,9 +1728,19 @@ impl Speakers {
 		ui.selectable_value(speaker, None, "System default");
 		match &self.listing {
 			Some(Ok(speakers)) => {
-				for found in speakers {
-					ui.selectable_value(speaker, Some(found.id.clone()), &found.name);
-				}
+				// A desktop can list dozens of outputs. Popovers flip to the
+				// roomier side of their button, which has at least half the
+				// window, so the list scrolls within that, less the rows around it.
+				let room = (ui.ctx().content_rect().height() / 2.0 - OUTPUTS_AROUND).max(OUTPUTS_LEAST);
+				egui::ScrollArea::vertical()
+					.id_salt("outputs")
+					.max_height(room)
+					.auto_shrink([false, true])
+					.show(ui, |ui| {
+						for found in speakers {
+							ui.selectable_value(speaker, Some(found.id.clone()), &found.name);
+						}
+					});
 			}
 			Some(Err(err)) => {
 				ui.colored_label(kit::ERR, format!("Cannot list the outputs: {err}"));
@@ -1737,7 +1755,79 @@ impl Speakers {
 
 #[cfg(test)]
 mod tests {
+	use egui_kittest::kittest::Queryable;
+
 	use super::*;
+
+	/// However many outputs a desktop lists, the picker opened from a tag at
+	/// the foot of a short window stays in it, and the wheel scrolls to the
+	/// last output to pick it.
+	#[test]
+	fn many_outputs_scroll_in_the_window() {
+		const WINDOW: Vec2 = vec2(800.0, 400.0);
+		let listing = (1..=28)
+			.map(|at| mix::Speaker {
+				id: format!("out{at}"),
+				name: format!("Output {at}"),
+			})
+			.collect();
+		let speakers = Speakers {
+			listing: Some(Ok(listing)),
+			pending: None,
+		};
+		// The outputs, the pick, the popover's rect, and whether the kit's
+		// faces, which take effect a frame later, are installed.
+		let mut harness = egui_kittest::Harness::builder().with_size(WINDOW).build_ui_state(
+			|ui, (speakers, speaker, popover, ready): &mut (Speakers, Option<String>, Rect, bool)| {
+				if !std::mem::replace(ready, true) {
+					kit::install(ui.ctx());
+					return;
+				}
+				ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+					let response = ui.button("On System default");
+					let shown = egui::Popup::from_response(&response)
+						.open(true)
+						.frame(kit::popover_frame())
+						.align(egui::RectAlign::BOTTOM)
+						.gap(6.0)
+						.width(280.0)
+						.show(|ui| {
+							speakers.menu(ui, speaker);
+							ui.add(kit::button(Icon::Reload, "Look for outputs again"));
+						});
+					*popover = shown.expect("the popover is open").response.rect;
+				});
+			},
+			(speakers, None, Rect::NOTHING, false),
+		);
+		harness.run();
+		let window = Rect::from_min_size(pos2(0.0, 0.0), WINDOW);
+		let popover = harness.state().2;
+		assert!(window.contains_rect(popover), "{popover:?} in {window:?}");
+		assert!(
+			harness.get_by_label("Output 28").rect().top() > popover.bottom(),
+			"the last output starts out of sight"
+		);
+		harness.get_by_label("Output 1").hover();
+		harness.run();
+		harness.event(egui::Event::MouseWheel {
+			unit: egui::MouseWheelUnit::Point,
+			delta: vec2(0.0, -2000.0),
+			phase: egui::TouchPhase::Move,
+			modifiers: egui::Modifiers::NONE,
+		});
+		// The wheel scrolls smoothly, a frame at a time.
+		harness.run_steps(60);
+		let last = harness.get_by_label("Output 28").rect();
+		assert!(popover.contains_rect(last), "{last:?} in {popover:?}");
+		assert!(
+			popover.contains_rect(harness.get_by_label("System default").rect()),
+			"the system default stays above the list"
+		);
+		harness.get_by_label("Output 28").click();
+		harness.run();
+		assert_eq!(harness.state().1.as_deref(), Some("out28"));
+	}
 
 	/// The taper runs from silence to the most boost, unity where the fader
 	/// marks it, and back again.
