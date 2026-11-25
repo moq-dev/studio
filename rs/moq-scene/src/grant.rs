@@ -82,6 +82,18 @@ impl Grants {
 		self.change(|grants| grants.remove(source).is_some())
 	}
 
+	/// Keep this scene file's grants under `to` from now on, where the file
+	/// moved, replacing any `to` had.
+	pub fn rename(&self, to: &Path) -> Result<(), Error> {
+		let _lock = self.lock(true)?;
+		let mut tables = self.read()?;
+		let Some(grants) = tables.remove(&self.collection) else {
+			return Ok(());
+		};
+		tables.insert(to.to_string_lossy().into_owned(), grants);
+		self.write(&tables)
+	}
+
 	/// Apply `change` to this scene file's table, writing the file back only
 	/// when `change` says it changed something.
 	fn change(&self, change: impl FnOnce(&mut BTreeMap<String, String>) -> bool) -> Result<(), Error> {
@@ -232,6 +244,23 @@ mod tests {
 		assert_eq!(two.get().unwrap().as_deref(), Some("b"));
 		let text = std::fs::read_to_string(&file).unwrap();
 		assert!(!text.contains("one.toml"), "an empty table is dropped: {text}");
+	}
+
+	/// A renamed scene file keeps its grants under its new name.
+	#[test]
+	fn a_renamed_scene_file_keeps_its_grants() {
+		let dir = tempfile::tempdir().unwrap();
+		let file = dir.path().join("portal.toml");
+		let old = Grants::new(file.clone(), Path::new("/scenes/old.toml"));
+		old.claim("Screen").set(Some("a")).unwrap();
+		old.rename(Path::new("/scenes/new.toml")).unwrap();
+		let new = Grants::new(file.clone(), Path::new("/scenes/new.toml")).claim("Screen");
+		assert_eq!(new.get().unwrap().as_deref(), Some("a"));
+		assert_eq!(old.claim("Screen").get().unwrap(), None);
+		// Nothing to move is no write.
+		Grants::new(file, Path::new("/scenes/none.toml"))
+			.rename(Path::new("/scenes/elsewhere.toml"))
+			.unwrap();
 	}
 
 	#[test]

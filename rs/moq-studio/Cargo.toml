@@ -63,6 +63,9 @@ egui_extras = { version = "0.36", default-features = false, features = ["svg"] }
 egui_kittest = { version = "0.36", features = ["eframe", "wgpu"] }
 # `--watch` awaits the composition broadcast's catalog.
 hang = { workspace = true, features = ["async"] }
+# The system's Videos folder, where a show kept in the app's storage records:
+# XDG user dirs on Linux, Movies on macOS, the known folder on Windows.
+dirs = "6.0"
 # Stamps a recording's file name with when it started. Already in the graph
 # through moq-scene's humantime-serde.
 humantime = { workspace = true }
@@ -87,7 +90,7 @@ moq-video = { workspace = true }
 # A recording's length, from its movie header; the version moq-mux writes it
 # with.
 mp4-atom = "0.17.0"
-# A show's picture in the library, the last frame of its program.
+# A picture pasted from the clipboard, kept as a file beside the show.
 png = "0.18"
 pollster = { workspace = true }
 # The window, to ask where the pointer is during a drag, and whether it is on
@@ -98,8 +101,8 @@ qrcodegen = "1.8"
 # The system's own dialog for opening a show file or saving a new one: the
 # desktop portal on Linux, so it works in the Flatpak.
 rfd = "0.18"
-# Whether a recording's marker is still the file its holder locked, which std
-# cannot tell on Windows.
+# Whether a recording's marker is still the file its holder locked, and
+# whether two paths name one show file, which std cannot tell on Windows.
 same-file = "1.0.6"
 # The guests removed from scenes, kept beside the scene file.
 serde = { workspace = true }

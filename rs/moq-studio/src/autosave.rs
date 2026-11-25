@@ -503,7 +503,7 @@ fn parse(path: &Path, bytes: &[u8]) -> anyhow::Result<Collection> {
 
 /// Where the history of the scene file at `scene` is saved: beside it, as
 /// `show.history.toml` for `show.toml`.
-fn history_path(scene: &Path) -> PathBuf {
+pub(crate) fn history_path(scene: &Path) -> PathBuf {
 	let mut name = scene.file_stem().unwrap_or_default().to_os_string();
 	name.push(".history.toml");
 	scene.with_file_name(name)
@@ -598,6 +598,21 @@ fn write(
 		}
 	}
 	Ok(Some(dir))
+}
+
+/// Write `text` to the file at `path` whole, as a save does: through any
+/// symlinks there, keeping the permissions of a file it replaces. An error
+/// means the old file is still there; once the new one replaces it, a folder
+/// that cannot be synced is only logged, since what is on disk is the new
+/// text either way.
+pub(crate) fn write_file(path: &Path, text: &str) -> std::io::Result<()> {
+	// Only a new file, or one found changed, is left as it is.
+	if let Some(dir) = write(path, text, false, || Ok(true))?
+		&& let Err(err) = sync(&dir)
+	{
+		tracing::warn!(%err, dir = %dir.display(), "cannot sync a folder after writing into it");
+	}
+	Ok(())
 }
 
 /// Sync the directory `dir` a file was renamed into, so a power loss cannot
@@ -722,8 +737,8 @@ mod tests {
 	}
 
 	/// A scene file another program creates after the studio found none, such
-	/// as a second studio finishing setup first, is an outside edit, not
-	/// replaced by the collection setup proposed.
+	/// as a second studio creating the same new show first, is an outside
+	/// edit, not replaced by the new show's collection.
 	#[test]
 	fn leaves_a_file_created_since_it_found_none() {
 		let dir = tempfile::tempdir().unwrap();

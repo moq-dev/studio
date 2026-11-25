@@ -23,10 +23,8 @@ says where to find it). What to try:
   Windows once [Studio on Windows](/quest/m0/app-windows.md) runs it):
   dragging by the title bar, double-click to maximize, resizing from each
   edge, snapping to a screen edge, and full screen.
-- **macOS:** the system title bar stays after first-run setup until the next
-  launch, then the studio's own frame replaces it.
 - **Going live** ([moq-dev/studio#175](https://github.com/moq-dev/studio/pull/175)):
-  opening a show from the library, a real stream to a relay with your token
+  opening a show from the Show menu, a real stream to a relay with your token
   set in Settings, Destinations (kept in the OS credential store; only Linux's
   Secret Service has been exercised, so macOS's keychain matters most), the
   first GO LIVE with no relay, asking for one in its popover, then one-click

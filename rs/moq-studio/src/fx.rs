@@ -14,8 +14,8 @@ use eframe::egui_wgpu;
 use egui::{Color32, Rect};
 use rune_fx::{
 	ElectricParams, ElectricStyle, Fx as Effect, FxFrame, FxLayer, FxOptions, FxRenderer, GlowParams, GlowStyle,
-	GradientKind, GrainGradientParams, LiquidMetalParams, MeshGradientParams, PlasticParams, PulseParams, PulseStyle,
-	Rgb, Shape, SparkleParams, Stops,
+	GradientKind, GrainGradientParams, LiquidMetalParams, PlasticParams, PulseParams, PulseStyle, Rgb, Shape,
+	SparkleParams, Stops,
 };
 
 use crate::health::Verdict;
@@ -117,23 +117,6 @@ impl Fx {
 			at,
 			egui_wgpu::Callback::new_paint_callback(painter.clip_rect(), callback),
 		);
-	}
-
-	/// A first-launch screen's background.
-	pub fn backdrop(&mut self, spot: &Spot) {
-		let base = kit::P1;
-		let params = MeshGradientParams {
-			colors: Stops::new(&[
-				linear(base),
-				linear(mix(base, kit::ACCENT, 0.12)),
-				linear(kit::BG),
-				linear(mix(base, kit::ACCENT, 0.06)),
-			]),
-			// Still: the screen repaints only while setup probes the machine.
-			drift: 0.0,
-			..MeshGradientParams::graphite()
-		};
-		self.draw(&spot.painter, spot.under, [Effect::fill(params).on(spot.shape(0.0))]);
 	}
 
 	/// A panel's background: a faint grain over its fill, which never moves.

@@ -52,6 +52,10 @@ pub struct Saved {
 	/// program, rather than waiting under Add.
 	#[serde(skip_serializing_if = "std::ops::Not::not")]
 	pub guests_appear: bool,
+	/// The show's names before it was renamed: its recordings and clips named
+	/// after any are still its own.
+	#[serde(skip_serializing_if = "Vec::is_empty")]
+	pub earlier: Vec<String>,
 }
 
 impl Saved {
@@ -253,17 +257,9 @@ impl Stream {
 	/// Write `saved` to the stream file, all at once.
 	fn write(&self, saved: &Saved) -> anyhow::Result<()> {
 		let text = toml::to_string(saved).context("cannot write the stream settings")?;
-		let dir = self
-			.path
-			.parent()
-			.filter(|dir| !dir.as_os_str().is_empty())
-			.unwrap_or(Path::new("."));
-		let mut file =
-			tempfile::NamedTempFile::new_in(dir).with_context(|| format!("writing {}", self.path.display()))?;
-		std::io::Write::write_all(&mut file, text.as_bytes())
-			.with_context(|| format!("writing {}", self.path.display()))?;
-		file.persist(&self.path)
-			.with_context(|| format!("writing {}", self.path.display()))?;
+		// On disk before it replaces the old file, as a scene save is, so a
+		// crash leaves one or the other whole; an error leaves the old one.
+		crate::autosave::write_file(&self.path, &text).with_context(|| format!("writing {}", self.path.display()))?;
 		Ok(())
 	}
 
@@ -455,7 +451,7 @@ impl Stream {
 }
 
 /// `show.stream.toml` for `show.toml`.
-fn path(scene: &Path) -> PathBuf {
+pub(crate) fn path(scene: &Path) -> PathBuf {
 	let mut name = scene.file_stem().unwrap_or(scene.as_os_str()).to_os_string();
 	name.push(".stream.toml");
 	scene.with_file_name(name)

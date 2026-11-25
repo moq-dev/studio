@@ -24,7 +24,9 @@ const REPAIRED: &str = ".repaired";
 /// The show's recordings and clips, listed again while watched.
 pub struct Shelf {
 	dir: PathBuf,
-	show: String,
+	/// The show's name, then the names it had before: a file named after any
+	/// is its own.
+	names: Vec<String>,
 	runtime: tokio::runtime::Handle,
 	shared: Arc<Mutex<Shared>>,
 }
@@ -85,10 +87,10 @@ pub enum Kind {
 }
 
 impl Shelf {
-	pub fn new(dir: &Path, show: &str, runtime: tokio::runtime::Handle) -> Self {
+	pub fn new(dir: &Path, names: Vec<String>, runtime: tokio::runtime::Handle) -> Self {
 		Self {
 			dir: dir.to_path_buf(),
-			show: show.to_string(),
+			names,
 			runtime,
 			shared: Arc::default(),
 		}
@@ -99,16 +101,21 @@ impl Shelf {
 		&self.dir
 	}
 
+	/// The show's names its files are named after, the current one first.
+	pub fn names(&self) -> &[String] {
+		&self.names
+	}
+
 	/// What the last listing found, listing again in the background once it
 	/// is a [`PERIOD`] old.
 	pub fn cards(&self) -> Arc<Listing> {
 		let mut shared = self.shared.lock().unwrap();
 		if !shared.seeded && !shared.listing && shared.listed.is_none_or(|listed| listed.elapsed() >= PERIOD) {
 			shared.listing = true;
-			let (dir, show, kept) = (self.dir.clone(), self.show.clone(), self.shared.clone());
+			let (dir, names, kept) = (self.dir.clone(), self.names.clone(), self.shared.clone());
 			let lengths = shared.lengths.clone();
 			self.runtime.spawn_blocking(move || {
-				let (listing, lengths) = list(&dir, &show, lengths);
+				let (listing, lengths) = list(&dir, &names, lengths);
 				let mut shared = kept.lock().unwrap();
 				shared.cards = Arc::new(listing);
 				shared.lengths = lengths;
@@ -146,9 +153,9 @@ pub fn open(path: &Path) -> anyhow::Result<()> {
 	Ok(())
 }
 
-/// List the show `show`'s files in `dir` as cards, reading the length of any
-/// file not in `lengths` or changed since.
-fn list(dir: &Path, show: &str, mut lengths: Lengths) -> (Listing, Lengths) {
+/// List the files in `dir` named after any of the show's `names` as cards,
+/// reading the length of any file not in `lengths` or changed since.
+fn list(dir: &Path, names: &[String], mut lengths: Lengths) -> (Listing, Lengths) {
 	let mut listing = Listing {
 		free: free(dir),
 		..Listing::default()
@@ -160,11 +167,19 @@ fn list(dir: &Path, show: &str, mut lengths: Lengths) -> (Listing, Lengths) {
 			return (listing, lengths);
 		}
 	};
+	// The longest name first, so a name that starts with a shorter one, such
+	// as `Talk 2026-11-03T12-00-00Z` after `Talk`, is not read as its stamp.
+	let mut names = names.to_vec();
+	names.sort_by_key(|name| std::cmp::Reverse(name.len()));
 	let mut seen = BTreeMap::new();
-	let mut recordings: BTreeMap<String, Gathered> = BTreeMap::new();
+	// By the name a recording was made under and its stamp, so two names'
+	// recordings that share a stamp stay apart.
+	let mut recordings: BTreeMap<(&str, String), Gathered> = BTreeMap::new();
 	for entry in entries.flatten() {
 		let name = entry.file_name().to_string_lossy().into_owned();
-		let Some(file) = parse(show, &name) else { continue };
+		let Some((show, file)) = names.iter().find_map(|show| Some((show.as_str(), parse(show, &name)?))) else {
+			continue;
+		};
 		let Ok(metadata) = entry.metadata() else { continue };
 		let path = entry.path();
 		let modified = metadata
@@ -190,7 +205,7 @@ fn list(dir: &Path, show: &str, mut lengths: Lengths) -> (Listing, Lengths) {
 				source,
 				repaired,
 			} => {
-				let gathered = recordings.entry(stamp).or_default();
+				let gathered = recordings.entry((show, stamp)).or_default();
 				gathered.bytes += bytes;
 				gathered.modified = gathered.modified.max(modified);
 				gathered.repaired |= repaired;
@@ -210,7 +225,7 @@ fn list(dir: &Path, show: &str, mut lengths: Lengths) -> (Listing, Lengths) {
 	}
 	listing
 		.cards
-		.extend(recordings.into_iter().filter_map(|(stamp, gathered)| {
+		.extend(recordings.into_iter().filter_map(|((_, stamp), gathered)| {
 			// The first program file, its repair over it, is what a click shows.
 			let (_, _, path) = gathered.programs.into_iter().min()?;
 			Some(Card {
@@ -430,6 +445,9 @@ mod tests {
 		std::fs::write(dir.path().join(format!("show {crashed}.mp4")), b"a fragment").unwrap();
 		let clip = write("show-clip-1.mp4", 8, 0);
 		write(&format!("other {stamp}.mp4"), 1, 0);
+		// Recorded before the show was renamed.
+		let before = "2026-11-02T12-00-00Z";
+		write(&format!("earlier {before}.mp4"), 20, 0);
 		// The clip is the newest.
 		let later = kio::clock::wall() + Duration::from_secs(60);
 		std::fs::File::options()
@@ -439,9 +457,10 @@ mod tests {
 			.set_modified(later.into())
 			.unwrap();
 
-		let (listing, lengths) = list(dir.path(), "show", BTreeMap::new());
+		let names = ["show".to_string(), "earlier".to_string()];
+		let (listing, lengths) = list(dir.path(), &names, BTreeMap::new());
 		assert!(listing.error.is_none());
-		assert_eq!(lengths.len(), 7, "every file of the show's is remembered");
+		assert_eq!(lengths.len(), 8, "every file of the show's is remembered");
 		let kinds: Vec<_> = listing.cards.iter().map(|card| (&card.kind, card.length)).collect();
 		assert_eq!(kinds[0], (&Kind::Clip(1), Some(Duration::from_secs(8))));
 		let recording = listing
@@ -480,7 +499,48 @@ mod tests {
 			"the fragment adds no length"
 		);
 		assert_eq!(crash.path, dir.path().join(format!("show {crashed}.repaired.mp4")));
-		assert_eq!(listing.cards.len(), 3);
+		let earlier = listing
+			.cards
+			.iter()
+			.find(|card| card.path.ends_with(format!("earlier {before}.mp4")));
+		assert!(earlier.is_some(), "a file under an earlier name is the show's");
+		assert_eq!(listing.cards.len(), 4);
+	}
+
+	/// A show once named after itself and a stamp lists that name's
+	/// recordings under it, not under the shorter name with the stamp read as
+	/// a source.
+	#[test]
+	fn a_longer_earlier_name_wins() {
+		let dir = tempfile::tempdir().unwrap();
+		let (old, stamp) = ("Talk 2026-11-03T12-00-00Z", "2026-11-04T12-00-00Z");
+		std::fs::write(dir.path().join(format!("{old} {stamp}.mp4")), mp4(5, 0)).unwrap();
+		let names = ["Talk".to_string(), old.to_string()];
+		let (listing, _) = list(dir.path(), &names, BTreeMap::new());
+		let kinds: Vec<_> = listing.cards.iter().map(|card| &card.kind).collect();
+		assert_eq!(
+			kinds,
+			[&Kind::Recording {
+				stamp: stamp.into(),
+				sources: 0,
+				repaired: false
+			}]
+		);
+	}
+
+	/// Recordings under two of the show's names that share a stamp are two
+	/// cards, each its own length.
+	#[test]
+	fn two_names_sharing_a_stamp_stay_apart() {
+		let dir = tempfile::tempdir().unwrap();
+		let stamp = "2026-11-03T12-00-00Z";
+		std::fs::write(dir.path().join(format!("Talk {stamp}.mp4")), mp4(5, 0)).unwrap();
+		std::fs::write(dir.path().join(format!("Podcast {stamp}.mp4")), mp4(7, 0)).unwrap();
+		let names = ["Talk".to_string(), "Podcast".to_string()];
+		let (listing, _) = list(dir.path(), &names, BTreeMap::new());
+		let mut lengths: Vec<_> = listing.cards.iter().map(|card| card.length).collect();
+		lengths.sort();
+		assert_eq!(lengths, [Some(Duration::from_secs(5)), Some(Duration::from_secs(7))]);
 	}
 
 	/// A regular MP4's boxes, holding `seconds` in its movie header after

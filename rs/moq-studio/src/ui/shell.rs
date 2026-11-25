@@ -300,6 +300,8 @@ impl Panels {
 		self.graph_window(ui.ctx(), layout.stage);
 		self.settings(ui.ctx(), fx);
 		self.details(ui.ctx(), layout.stage);
+		self.follow_shows(ui.ctx());
+		self.follow_media_dialog(ui.ctx());
 		// macOS keeps its own frame's edges, and resizes by them.
 		if self.framed && !cfg!(target_os = "macos") {
 			edges(ui, window);
@@ -319,6 +321,7 @@ impl Panels {
 				if let Some(cued) = &snapshot.cued {
 					self.next(ui, fx, cued, picture, Corner::TopRight);
 				}
+				self.quick_start(ui, picture);
 			}
 			Page::Build => self.build(ui, fx, stage, snapshot),
 			// The sound slot holds the live picture instead.
@@ -515,6 +518,8 @@ impl Panels {
 			kit::popover_row(ui, false, |ui| {
 				ui.label(egui::RichText::new(self.engine.autosave.path().display().to_string()).color(kit::DIM));
 			});
+			self.show_list(ui);
+			ui.separator();
 			if ui.add(kit::button(Icon::Reload, "Reload the scene file")).clicked() {
 				let result = self.engine.reload();
 				self.check(result);
@@ -540,15 +545,6 @@ impl Panels {
 				if multiview.clicked() {
 					self.multiview.set_open(!open);
 				}
-			}
-			// Closing ends the show as quitting does, which would cut a stream
-			// on air: the broadcaster ends that with END STREAM.
-			let off = matches!(self.engine.on_air(), crate::engine::OnAir::Off) && !self.controls.going();
-			let close = ui.add_enabled(off, kit::button(Icon::Close, "Close show"));
-			if !off {
-				kit::tip(close, "End the stream first", None);
-			} else if close.clicked() {
-				self.closing = true;
 			}
 		});
 	}
@@ -1633,7 +1629,7 @@ fn nav_width(ui: &Ui, pages: &[Page], compact: bool) -> f32 {
 
 /// The window's minimize, maximize, and close, right to left, which the
 /// desktop draws none of since the title bar is the studio's.
-fn window_buttons(ui: &mut Ui) {
+pub(crate) fn window_buttons(ui: &mut Ui) {
 	let maximized = ui.ctx().input(|input| input.viewport().maximized.unwrap_or(false));
 	if ui.add(IconButton::new(Icon::Close, "Close").small()).clicked() {
 		ui.ctx().send_viewport_cmd(ViewportCommand::Close);

@@ -7,8 +7,9 @@
 //! what a request changes is there on the next frame. The clipboard's text
 //! is the run's own, so a run neither reads nor replaces the desktop's.
 
-use std::sync::Arc;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -16,7 +17,7 @@ use eframe::egui_wgpu;
 use egui_kittest::Harness;
 
 use super::Socket;
-use crate::{App, Started, Window, engine, fx, hotkeys, kit, library, show};
+use crate::{App, Started, Window, engine, fx, hotkeys, kit, recent, show};
 
 /// The window's size, its default on a desktop.
 const SIZE: egui::Vec2 = egui::vec2(1440.0, 900.0);
@@ -24,19 +25,21 @@ const SIZE: egui::Vec2 = egui::vec2(1440.0, 900.0);
 /// The shortest time between frames.
 const FRAME: Duration = Duration::from_micros(16_667);
 
-/// Run `app` off-screen, serving `socket`, until it is told to close; then
-/// end the studio as quitting a window does.
-pub fn run(app: App, opener: show::Opener, socket: Socket) -> anyhow::Result<()> {
+/// Run the studio off-screen on the show at `scenes`, or else on the latest
+/// show in app data or a new one, as a first launch would, serving `socket`
+/// until it is told to close; then end the studio as quitting a window does.
+pub fn run(scenes: Option<PathBuf>, opener: show::Opener, socket: Socket) -> anyhow::Result<()> {
 	let render = render_state(&opener.gpu)?;
 	let started = Arc::<Started>::default();
 	let closed = Arc::new(AtomicBool::new(false));
+	let failed = Arc::new(Mutex::new(None));
 	let (wake, woken) = std::sync::mpsc::channel::<Duration>();
 	let runtime = opener.runtime.clone();
-	let framed = matches!(app, App::Starting(..));
 	let window = {
 		let render = render.clone();
 		let started = started.clone();
 		let closed = closed.clone();
+		let failed = failed.clone();
 		let runtime = runtime.clone();
 		move |cc: &mut eframe::CreationContext<'_>| {
 			kit::install(&cc.egui_ctx);
@@ -45,23 +48,29 @@ pub fn run(app: App, opener: show::Opener, socket: Socket) -> anyhow::Result<()>
 			});
 			let keyboard = hotkeys::Keyboard::default();
 			let control = socket.serve(&cc.egui_ctx, &runtime, keyboard.clone());
-			Window {
-				app,
+			// Empty, and never saved: a headless run neither reads the window's
+			// recent shows nor changes them.
+			let recent = recent::Recent::default();
+			let shows = show::dir();
+			let (target, instead) = crate::first(scenes, &recent, shows.as_deref());
+			let mut window = Window {
+				app: App::Moving,
 				fx: fx::Fx::new(&render, &cc.egui_ctx, &runtime),
 				render,
 				opener,
 				started,
-				recent: library::Recent::default(),
-				// None, so a headless run keeps nothing in the user's own
-				// storage, which a window would.
-				pictures: None,
+				recent,
+				shows,
 				aired: None,
 				keyboard,
-				framed,
+				notice: None,
+				failed,
 				closed,
 				exiting: Default::default(),
 				control: Some(control),
-			}
+			};
+			window.open(target, instead);
+			window
 		}
 	};
 	let mut harness = Harness::builder()
@@ -119,8 +128,13 @@ pub fn run(app: App, opener: show::Opener, socket: Socket) -> anyhow::Result<()>
 		_ => Ok(()),
 	};
 	drop(harness);
-	if let Some(engine) = started.take() {
-		crate::shutdown(&engine, &runtime)?;
+	let saved = started.take().map(|engine| crate::shutdown(&engine, &runtime));
+	// As a window's exit does, so a rename under way lands before the
+	// process ends, and none starts.
+	show::settle();
+	saved.transpose()?;
+	if let Some(err) = failed.lock().unwrap().take() {
+		return Err(err);
 	}
 	flushed.context("cannot save the settings on quit")
 }
