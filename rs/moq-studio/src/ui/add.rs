@@ -929,9 +929,18 @@ pub(super) fn place(
 	if matches!(shown, Some(Source::Color { .. })) {
 		return (0, fill);
 	}
-	// An overlay is drawn see-through, so it hides nothing behind it.
+	// An overlay is drawn see-through, and a layer faded out not at all, so
+	// neither hides anything behind it.
 	let opaque = |item: &&Item| {
+		let opacity: f32 = collection
+			.filters(item)
+			.map(|filter| match filter {
+				moq_scene::Filter::Opacity { amount } => *amount,
+				_ => 1.0,
+			})
+			.product();
 		item.visible
+			&& opacity > 0.0
 			&& !matches!(
 				collection.sources.get(collection.capture(&item.source)),
 				Some(Source::Overlay { .. })
@@ -1606,6 +1615,14 @@ name = "Main"
 			("logo", [960.0, 0.0, 960.0, 1080.0]),
 		]);
 		assert_eq!(placed(&split, CAMERA, None), (2, [1296.0, 708.0, 576.0, 324.0]));
+		// A half faded out hides nothing.
+		let mut faded = split.clone();
+		let mut draft = faded.draft("fade");
+		let mut item = faded.items(&Layer::scene("Main")).unwrap()[0].clone();
+		item.filters = vec![moq_scene::Filter::Opacity { amount: 0.0 }];
+		draft.set_item(&Layer::scene("Main"), 0, item).unwrap();
+		faded = draft.collection().clone();
+		assert_eq!(placed(&faded, CAMERA, None), (0, FULL));
 		// Overlapping halves count their overlap once.
 		let overlap = scene(&[
 			("screen", [0.0, 0.0, 1200.0, 1080.0]),
