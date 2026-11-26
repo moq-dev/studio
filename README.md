@@ -321,7 +321,7 @@ button, or a click beside it closes Add. Its tabs:
 - **Media & Web:** **Image or video file…** opens the system's file dialog,
   and the file lands as a dropped one does (see
   [Dropping and pasting](#dropping-and-pasting)); a web address adds the
-  page; **Text** adds a lower third to edit; **Color** adds the color beside
+  page, in a build with `cef` (others say they cannot); **Text** adds a lower third to edit; **Color** adds the color beside
   its caption; and **From the show** puts the program or another scene
   inside this one, and with their mods on, the replay and a role.
 - **Audio:** each microphone, and on macOS the system's sound, with a level

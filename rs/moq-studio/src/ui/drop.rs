@@ -55,13 +55,13 @@ pub(super) struct Landing {
 	pub(super) layer: Layer,
 	/// The picture it lands in, Studio's while it edits a scene drawn in both,
 	/// and that picture's canvas.
-	format: Format,
+	pub(super) format: Format,
 	pub(super) canvas: Canvas,
 	/// Its center, in canvas pixels.
 	pub(super) at: [f32; 2],
 	/// The layer under it on the picture, which a file can replace the file
 	/// of or a color grade grades, with that layer as it was.
-	onto: Option<(Picked, Item)>,
+	pub(super) onto: Option<(Picked, Item)>,
 }
 
 /// What a file read in the background becomes.
@@ -788,12 +788,16 @@ impl Panels {
 			Picture::Sized(size) => Some(land(canvas, [size.width as f32, size.height as f32], landing.at)),
 			Picture::Unsized => Some(land(canvas, [canvas.width as f32, canvas.height as f32], landing.at)),
 		};
-		self.add_layer(state, landing, name, source, rect)
+		let item = rect.map(|rect| landed(state.collection(), landing, &name, rect));
+		self.add_layer(state, landing, name, source, item)
 	}
 
 	/// Add a web page showing `url` at `landing`, as large as the canvas it
 	/// lands on.
 	fn add_page(&mut self, state: &mut State, landing: &Landing, url: url::Url) -> anyhow::Result<()> {
+		if let Some(why) = moq_scene::browser::MISSING {
+			anyhow::bail!("cannot add {url}: {why}");
+		}
 		let canvas = landing.canvas;
 		let name = state.collection().unused_name(url.host_str().unwrap_or("Web page"));
 		let (width, height) = moq_scene::browser::page_size(canvas);
@@ -803,10 +807,11 @@ impl Panels {
 			height,
 		};
 		let rect = land(canvas, [width as f32, height as f32], landing.at);
-		self.add_layer(state, landing, name, source, Some(rect))
+		let item = landed(state.collection(), landing, &name, rect);
+		self.add_layer(state, landing, name, source, Some(item))
 	}
 
-	/// Add `source` as `name`, in front of `landing`'s layers at `rect` if
+	/// Add `source` as `name`, in front of `landing`'s layers as `item` if
 	/// given, heard on program if it has sound, and select its layer.
 	pub(super) fn add_layer(
 		&mut self,
@@ -814,12 +819,12 @@ impl Panels {
 		landing: &Landing,
 		name: String,
 		source: Source,
-		rect: Option<Rect>,
+		item: Option<Item>,
 	) -> anyhow::Result<()> {
 		let layer = &landing.layer;
 		let heard = source.has_audio();
 		let index = state.collection().items(layer).map_or(0, <[Item]>::len);
-		let item = rect.map(|rect| landed(state.collection(), landing, &name, rect));
+		let shown = item.is_some();
 		edit(state, format!("Drop `{name}` {}", place(layer)), None, |draft| {
 			draft.set_source(&name, Some(source))?;
 			if heard {
@@ -830,15 +835,15 @@ impl Panels {
 			}
 			Ok(())
 		})?;
-		match rect {
-			Some(_) => {
+		match shown {
+			true => {
 				self.select(Some(Picked {
 					layer: layer.clone(),
 					index,
 				}));
 				self.side = Side::Layers;
 			}
-			None => self.say(Ok(format!("`{name}` has no picture, so it is heard on program alone"))),
+			false => self.say(Ok(format!("`{name}` has no picture, so it is heard on program alone"))),
 		}
 		Ok(())
 	}

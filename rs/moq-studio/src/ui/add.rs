@@ -350,9 +350,8 @@ impl Panels {
 							size: pick.size,
 						};
 						let collection = state.collection();
-						let rect =
-							(source.has_video()).then(|| dropped(collection, landing.canvas, picture, landing.at));
-						let added = self.add_layer(&mut state, &landing, name.clone(), source, rect);
+						let item = (source.has_video()).then(|| dropped(collection, &landing, &name, picture));
+						let added = self.add_layer(&mut state, &landing, name.clone(), source, item);
 						added.map(|()| name)
 					}
 				};
@@ -378,8 +377,7 @@ impl Panels {
 		let source = collection.sources.get(name).context("the source is gone")?;
 		let (mut index, mut item) = put(state, &layer, name, Picture::of(source));
 		if let Some(landing) = &landing {
-			let rect = dropped(collection, landing.canvas, Picture::of(source), landing.at);
-			item = super::drop::landed(collection, landing, name, rect);
+			item = dropped(collection, landing, name, Picture::of(source));
 			index = collection.items(&layer).map_or(0, <[Item]>::len);
 		}
 		// A guest takes the next tile of a scene with slots.
@@ -497,37 +495,50 @@ impl Panels {
 			("Screens", Icon::Display, &listing.displays),
 			("Windows", Icon::Window, &listing.windows),
 		];
-		for (heading, icon, picks) in kinds {
-			caption(ui, heading, Beside::Nothing);
-			match picks {
-				Ok(picks) if picks.iter().all(is_own) => {
-					ui.label(egui::RichText::new("None found").color(kit::FAINT));
-				}
-				Ok(picks) => {
-					let shown: Vec<Entry> = picks
-						.iter()
-						.filter(|pick| !is_own(pick))
-						.map(|pick| device(icon, pick))
-						.collect();
-					asked = asked.or(cards(ui, heading, &shown, true));
-				}
-				Err(err) => {
-					// Listing displays on macOS needs the Screen Recording access
-					// only opening one asks for, so the main display is offered
-					// anyway.
-					if heading == "Screens"
-						&& let Some(pick) = super::start::display(picks)
-					{
-						let mut shown = device(icon, &pick);
-						shown.name = "Main display".into();
-						shown.line = "Asks for Screen Recording access first".into();
-						asked = asked.or(cards(ui, heading, &[shown], true));
+		// While the listing asked for as Add opened is under way, the one
+		// before it shows but takes no pick: a display is chosen by its place
+		// in the list, which a monitor unplugged since can give another.
+		let refreshing = self.devices.pending.is_some();
+		if refreshing {
+			looking(ui);
+		}
+		ui.scope(|ui| {
+			if refreshing {
+				ui.disable();
+			}
+			for (heading, icon, picks) in kinds {
+				caption(ui, heading, Beside::Nothing);
+				match picks {
+					Ok(picks) if picks.iter().all(is_own) => {
+						ui.label(egui::RichText::new("None found").color(kit::FAINT));
 					}
-					asked = asked.or(unavailable(ui, err));
+					Ok(picks) => {
+						let shown: Vec<Entry> = picks
+							.iter()
+							.filter(|pick| !is_own(pick))
+							.map(|pick| device(icon, pick))
+							.collect();
+						asked = asked.or(cards(ui, heading, &shown, true));
+					}
+					Err(err) => {
+						// Listing displays on macOS needs the Screen Recording access
+						// only opening one asks for, so the main display is offered
+						// anyway.
+						if heading == "Screens"
+							&& let Some(pick) = super::start::display(picks)
+						{
+							let mut shown = device(icon, &pick);
+							shown.name = "Main display".into();
+							shown.line = "Asks for Screen Recording access first".into();
+							asked = asked.or(cards(ui, heading, &[shown], true));
+						}
+						asked = asked.or(unavailable(ui, err));
+					}
 				}
 			}
-		}
-		asked
+			asked
+		})
+		.inner
 	}
 
 	/// An image or video file, a web page, a text, a color, and what the show
@@ -543,7 +554,12 @@ impl Panels {
 			asked = Some(Asked::Media);
 		}
 		ui.add_space(8.0);
+		// A page this build cannot render would add a layer that only fails.
+		let missing = moq_scene::browser::MISSING;
 		ui.horizontal(|ui| {
+			if missing.is_some() {
+				ui.disable();
+			}
 			let button = 120.0;
 			let field = ui.add(
 				egui::TextEdit::singleline(&mut self.adding.url)
@@ -560,10 +576,13 @@ impl Panels {
 				url.is_some(),
 				kit::button(Icon::Web, "Add page").min_size(vec2(button, 0.0)),
 			);
-			if let Some(url) = url.filter(|_| add.clicked() || entered) {
+			if let Some(url) = url.filter(|_| missing.is_none() && (add.clicked() || entered)) {
 				asked = Some(Asked::Page(url));
 			}
 		});
+		if let Some(why) = missing {
+			ui.label(egui::RichText::new(format!("Web pages: {why}")).color(kit::FAINT));
+		}
 
 		let canvas = {
 			let state = self.engine.state.lock().unwrap();
@@ -714,15 +733,16 @@ impl Panels {
 		let at = (pointer - picture.rect.min) / scale;
 		let at = [at.x, at.y];
 		let collection = state.collection();
-		let landing = match &*card {
+		let shown = match &*card {
 			Card::New(pick) => Some(Picture {
 				source: &pick.source,
 				size: pick.size,
 			}),
 			Card::Unused(name) => collection.sources.get(name).map(Picture::of),
 		};
-		if let Some(shown) = landing.filter(|shown| shown.source.has_video()) {
-			let rect = dropped(collection, canvas, shown, at);
+		let landing = self.landing(state, Some(at)).ok();
+		if let Some((shown, landing)) = shown.filter(|shown| shown.source.has_video()).zip(landing) {
+			let rect = dropping(collection, &landing, shown);
 			let outline = Rect::from_min_size(
 				picture.rect.min + vec2(rect.x, rect.y) * scale,
 				vec2(rect.width, rect.height) * scale,
@@ -979,14 +999,37 @@ pub(super) fn place(collection: &Collection, among: &Among, picture: Picture) ->
 	(front, corner(among))
 }
 
-/// Where `picture` dropped centered on `at` lands on `canvas`, in canvas
-/// pixels: at its own shape, not the canvas's, which in the portrait
-/// picture would squeeze it, and at most half the canvas.
-pub(super) fn dropped(collection: &Collection, canvas: Canvas, picture: Picture, at: [f32; 2]) -> moq_scene::Rect {
-	let size = own(self::picture(collection, picture.source))
+/// The layer `picture`, dropped at `landing`, becomes as `name`: at its
+/// own shape in the picture it lands in, at most half the canvas, and for a
+/// layer drawn in both, centered at its own shape in the landscape picture
+/// too, as a scene drawn in both has a shape in each.
+pub(super) fn dropped(collection: &Collection, landing: &super::drop::Landing, name: &str, picture: Picture) -> Item {
+	let mut item = super::drop::landed(collection, landing, name, dropping(collection, landing, picture));
+	if item.portrait.is_some() {
+		let canvas = collection.canvas;
+		let center = [canvas.width as f32 / 2.0, canvas.height as f32 / 2.0];
+		item.rect = super::drop::land(canvas, size(collection, picture, Format::Landscape), center);
+	}
+	item
+}
+
+/// Where `picture` dropped at `landing` lands in the picture it lands in,
+/// in canvas pixels.
+fn dropping(collection: &Collection, landing: &super::drop::Landing, picture: Picture) -> moq_scene::Rect {
+	let size = size(collection, picture, landing.format);
+	super::drop::land(landing.canvas, size, landing.at)
+}
+
+/// How large `picture` is in `format`'s picture, in canvas pixels: a
+/// page's or overlay's own size or its listed one, or else as tall as the
+/// program at the shape [`shape`] gives it there.
+fn size(collection: &Collection, picture: Picture, format: Format) -> [f32; 2] {
+	own(self::picture(collection, picture.source))
 		.or(picture.size.map(|size| size.map(|side| side as f32)))
-		.unwrap_or([collection.canvas.width as f32, collection.canvas.height as f32]);
-	super::drop::land(canvas, size, at)
+		.unwrap_or_else(|| {
+			let height = collection.canvas.height as f32;
+			[height * shape(collection, picture, format), height]
+		})
 }
 
 /// A page's or overlay's own size.
@@ -1104,8 +1147,9 @@ pub(super) fn put(state: &State, layer: &Layer, name: &str, picture: Picture) ->
 /// place; where one would put it behind and the other in front, in front
 /// as a picture-in-picture in both. In each, its picture is cropped to the
 /// shape it is given there. One the system's picker chooses has no shape
-/// until it shows, so it is left uncropped and the portrait picture fits it
-/// whole, as for any layer without a portrait place.
+/// until it shows, so it is left uncropped and given no portrait place: the
+/// portrait picture places it as it does any layer without one, fitting it
+/// whole, or mapping its inset.
 fn both(
 	collection: &Collection,
 	landscape: Among,
@@ -1120,11 +1164,10 @@ fn both(
 			self::picture(collection, picture.source),
 			Some(Source::PickedDisplay | Source::PickedWindow)
 		);
-	if unknown {
-		return (index, item);
-	}
 	let Some(portrait) = portrait else {
-		item.crop = covering(collection, picture, Format::Landscape, &item.rect);
+		if !unknown {
+			item.crop = covering(collection, picture, Format::Landscape, &item.rect);
+		}
 		return (index, item);
 	};
 	let (at, rect) = place(collection, &portrait, picture);
@@ -1135,11 +1178,13 @@ fn both(
 			corner(&portrait)
 		}
 	};
-	item.crop = covering(collection, picture, Format::Landscape, &item.rect);
-	item.portrait = Some(moq_scene::Placement {
-		crop: covering(collection, picture, Format::Portrait, &rect),
-		rect,
-	});
+	if !unknown {
+		item.crop = covering(collection, picture, Format::Landscape, &item.rect);
+		item.portrait = Some(moq_scene::Placement {
+			crop: covering(collection, picture, Format::Portrait, &rect),
+			rect,
+		});
+	}
 	(index.max(at), item)
 }
 
@@ -1662,10 +1707,10 @@ name = "Main"
 	fn placed(collection: &Collection, source: Source, at: Option<[f32; 2]>) -> (usize, [f32; 4]) {
 		let items = collection.items(&Layer::scene("Main")).unwrap_or_default();
 		let (index, rect) = match at {
-			Some(at) => (
-				items.len(),
-				dropped(collection, collection.canvas, Picture::of(&source), at),
-			),
+			Some(at) => (items.len(), {
+				let size = size(collection, Picture::of(&source), Format::Landscape);
+				super::super::drop::land(collection.canvas, size, at)
+			}),
 			None => place(collection, &wide(collection, items), Picture::of(&source)),
 		};
 		(index, [rect.x, rect.y, rect.width, rect.height])
@@ -1833,13 +1878,55 @@ name = "Main"
 			assert!(item.crop.is_none() && item.portrait.is_none(), "{picked:?}");
 			let (_, inset) = both(&collection, landscape, Some(portrait), "picked", Picture::of(picked));
 			assert!(inset.crop.is_none() && inset.portrait.is_none(), "{picked:?} inset");
+			// Over a screen only the portrait picture shows, in front as an
+			// inset there too, which the portrait picture maps from this one.
+			let only = wide(&collection, &[]);
+			let (index, item) = both(&collection, only, Some(portrait), "picked", Picture::of(picked));
+			assert_eq!((index, item.portrait), (1, None), "{picked:?} in front");
+			assert!(item.rect.width < collection.canvas.width as f32 && item.crop.is_none());
 		}
 
-		let turned = collection.canvas.turned();
-		let landed = dropped(&collection, turned, Picture::of(&CAMERA), [540.0, 960.0]);
-		assert_eq!([landed.width, landed.height], [540.0, 304.0], "16:9, half the width");
-		let landed = dropped(&collection, turned, phone, [540.0, 960.0]);
-		assert_eq!([landed.width, landed.height], [540.0, 960.0], "9:16, half the height");
+		let landing = |picture| {
+			let landing = super::super::drop::Landing {
+				layer: Layer::scene("Main"),
+				format: Format::Portrait,
+				canvas: collection.canvas.turned(),
+				at: [540.0, 960.0],
+				onto: None,
+			};
+			let item = dropped(&collection, &landing, "new", picture);
+			let portrait = item.portrait.unwrap().rect;
+			([item.rect.width, item.rect.height], [portrait.width, portrait.height])
+		};
+		assert_eq!(
+			landing(Picture::of(&CAMERA)),
+			([960.0, 540.0], [540.0, 304.0]),
+			"16:9, half the width"
+		);
+		assert_eq!(
+			landing(phone),
+			([304.0, 540.0], [540.0, 960.0]),
+			"9:16, half the height"
+		);
+		// A scene drawn in both shows its portrait picture there, and its
+		// landscape one in the landscape picture.
+		let mut collection = collection.clone();
+		collection.scenes.push(moq_scene::Scene::new("Guest"));
+		let guest = Source::Scene { scene: "Guest".into() };
+		let landing = super::super::drop::Landing {
+			layer: Layer::scene("Main"),
+			format: Format::Portrait,
+			canvas: collection.canvas.turned(),
+			at: [540.0, 960.0],
+			onto: None,
+		};
+		let item = dropped(&collection, &landing, "guest", Picture::of(&guest));
+		let portrait = item.portrait.unwrap().rect;
+		assert_eq!(
+			([item.rect.width, item.rect.height], [portrait.width, portrait.height]),
+			([960.0, 540.0], [540.0, 960.0]),
+			"each picture's own shape"
+		);
 	}
 
 	/// A layer always on top in a corner keeps the new inset out of it,

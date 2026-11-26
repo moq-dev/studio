@@ -11,7 +11,8 @@ and [Try the first launch](/quest/m0/ux/try-first-run.md) left to it.
 ## Plan
 
 Add is on `main` (`cargo run -p moq-studio --features capture,openh264`,
-adding `pipewire` on a Wayland desktop for its screen picker): **Add a
+adding `pipewire` on a Wayland desktop for its screen picker and `cef`
+for web pages, which Add says it cannot add without): **Add a
 layer**, `A`, the picture's right-click **Add a layer**, or the palette's
 **Add a source** opens it over the stage, beside the
 [mock-up](/quest/m0/ux/mock/overhaul-add.webp). What to try:

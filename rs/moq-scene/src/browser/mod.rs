@@ -56,6 +56,15 @@ pub(crate) use run::run;
 /// The longest side of a page, in pixels: room for a 4K canvas.
 pub(crate) const MAX_SIDE: u32 = 4096;
 
+/// Why this build cannot render web pages, if it cannot.
+pub const MISSING: Option<&str> = match cfg!(not(any(target_os = "linux", target_os = "macos"))) {
+	true => Some("web pages run on Linux and macOS only for now"),
+	false => match cfg!(feature = "cef") {
+		true => None,
+		false => Some("this build cannot render web pages (enable the `cef` feature)"),
+	},
+};
+
 /// A page or overlay the size of `canvas`, scaled down evenly so neither
 /// side passes the longest a page renders, as a 5K canvas's would.
 pub fn page_size(canvas: crate::Canvas) -> (u32, u32) {

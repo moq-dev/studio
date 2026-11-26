@@ -240,9 +240,10 @@ impl Panels {
 		}
 
 		// What can be added: each device listed as the palette opened, once
-		// found, and Add itself.
+		// found, not the listing before it, whose display a monitor unplugged
+		// since can make another; and Add itself.
 		let devices = &["device", "source", "layer"];
-		if let Some(listing) = &self.devices.listing {
+		if let Some(listing) = self.devices.listing.as_ref().filter(|_| self.devices.pending.is_none()) {
 			let kinds = [
 				("Cameras", &listing.cameras),
 				("Displays", &listing.displays),
