@@ -683,11 +683,11 @@ broadcast of one scene share one picture.
 
 A **scene source** draws another scene as one picture, which a layer places,
 scales, crops, filters, and blends like any other: a lower third built once
-and shown in every scene, or a whole layout shrunk into a corner. Add one in
-Studio's Add as kind **Scene**, picking the scene it draws, or
-**Program**, which shows whatever is on air, a transition under way included,
-on the same frame, such as for a portrait scene that follows the program,
-cropped.
+and shown in every scene, or a whole layout shrunk into a corner. Add one
+from Add's **Media & Web** tab, under **From the show**: a card per other
+scene, or **Program**, which shows whatever is on air, a transition under way
+included, on the same frame, such as for a portrait scene that follows the
+program, cropped.
 
 A nested scene is drawn at its own size, transparent where it draws
 nothing, once per frame however many layers show it, and only while something
@@ -1154,7 +1154,7 @@ An overlay's animation starts when the overlay does: when the studio opens
 it, and again whenever it is edited. It also starts over each time a scene
 showing it goes on program, as a layer's keyframes do, so a lower third plays
 its entrance at every cut.
-Set `restart = false` (**Restart on program**, off, in the add form) for one
+Set `restart = false` on the overlay in the scene file for one
 that runs on across cuts, such as a clock or a ticker. One that program does
 not show costs nothing until it is shown again, where its animation has
 carried on unless it restarts.
@@ -2384,7 +2384,7 @@ answer:
   '/studio/page="Mix"'`, failing after `--timeout` (10s by default).
 - `quit` closes the studio, as its Close button does.
 
-A target is a widget's name as `snapshot` lists it, such as `"Add source"`
+A target is a widget's name as `snapshot` lists it, such as `"Add a layer"`
 or `"tone fader"`; `contains:<text>` for a name holding the text; `id:<n>`
 for a node ID from the same layout; or `at:<x>,<y>` for a point in logical
 pixels. A click that matches no widget, several, or a disabled one fails and
@@ -2395,10 +2395,9 @@ For example:
 
 ```bash
 moq-studio --headless --control studio.sock show.toml &
-moq-studio ctl --socket studio.sock click Build
-moq-studio ctl --socket studio.sock click Add
+moq-studio ctl --socket studio.sock click "Add a layer"
 moq-studio ctl --socket studio.sock wait --settled
-moq-studio ctl --socket studio.sock screenshot build.png
+moq-studio ctl --socket studio.sock screenshot add.png
 moq-studio ctl --socket studio.sock quit
 ```
 

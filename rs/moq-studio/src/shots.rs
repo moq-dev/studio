@@ -3799,6 +3799,7 @@ fn first_devices() -> devices::Listing {
 	let pick = |name: &str, source| devices::Pick {
 		name: name.into(),
 		source,
+		size: None,
 	};
 	devices::Listing {
 		cameras: Ok(vec![pick(
@@ -3819,6 +3820,7 @@ fn add_devices() -> devices::Listing {
 	let pick = |name: &str, source| devices::Pick {
 		name: name.into(),
 		source,
+		size: None,
 	};
 	let camera = |id: &str| Source::Camera { id: Some(id.into()) };
 	let display = |id: &str| Source::Display { id: Some(id.into()) };

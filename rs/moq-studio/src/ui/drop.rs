@@ -796,12 +796,13 @@ impl Panels {
 	fn add_page(&mut self, state: &mut State, landing: &Landing, url: url::Url) -> anyhow::Result<()> {
 		let canvas = landing.canvas;
 		let name = state.collection().unused_name(url.host_str().unwrap_or("Web page"));
+		let (width, height) = moq_scene::browser::page_size(canvas);
 		let source = Source::Browser {
 			url: url.to_string(),
-			width: canvas.width,
-			height: canvas.height,
+			width,
+			height,
 		};
-		let rect = land(canvas, [canvas.width as f32, canvas.height as f32], landing.at);
+		let rect = land(canvas, [width as f32, height as f32], landing.at);
 		self.add_layer(state, landing, name, source, Some(rect))
 	}
 

@@ -526,6 +526,7 @@ impl Panels {
 					name,
 					source: pick.source,
 					layer,
+					size: pick.size,
 				};
 				let result = add(&mut state, new);
 				drop(state);
@@ -621,6 +622,7 @@ mod tests {
 			let pick = Pick {
 				name: name.into(),
 				source: Source::Camera { id: Some(id.into()) },
+				size: None,
 			};
 			Row::new(Command::Device(pick), name, "Devices", &[])
 		};

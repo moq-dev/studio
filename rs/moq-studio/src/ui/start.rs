@@ -162,18 +162,19 @@ impl Panels {
 			Card::Web => return,
 		};
 		let Some(pick) = pick else { return };
-		self.quick_add_source(layer, &pick.name, pick.source);
+		self.quick_add_source(layer, pick);
 	}
 
-	/// Add `source` under `name`, numbered past any source called that, as a
+	/// Add `pick` under its name, numbered past any source called that, as a
 	/// layer of `layer`, and select it.
-	fn quick_add_source(&mut self, layer: &Layer, name: &str, source: Source) {
+	fn quick_add_source(&mut self, layer: &Layer, pick: Pick) {
 		let mut state = self.engine.state.lock().unwrap();
-		let name = state.collection().unused_name(name);
+		let name = state.collection().unused_name(&pick.name);
 		let new = New {
 			name,
-			source,
+			source: pick.source,
 			layer: Some(layer.clone()),
+			size: pick.size,
 		};
 		let result = add(&mut state, new);
 		drop(state);
@@ -223,13 +224,19 @@ impl Panels {
 					let collection = state.collection();
 					collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas)
 				};
+				let (width, height) = moq_scene::browser::page_size(canvas);
 				let text = Source::Overlay {
 					html: TEXT.into(),
-					width: canvas.width,
-					height: canvas.height,
+					width,
+					height,
 					restart: true,
 				};
-				self.quick_add_source(layer, "Text", text);
+				let text = Pick {
+					name: "Text".into(),
+					source: text,
+					size: None,
+				};
+				self.quick_add_source(layer, text);
 			}
 			None => {}
 		}
@@ -266,6 +273,7 @@ pub(super) fn display(displays: &Result<Vec<Pick>, String>) -> Option<Pick> {
 		cfg!(all(target_os = "macos", feature = "capture")).then(|| Pick {
 			name: "Display".into(),
 			source: Source::Display { id: None },
+			size: None,
 		})
 	})
 }

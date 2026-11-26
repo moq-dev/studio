@@ -554,6 +554,7 @@ impl Studio {
 		let pick = devices::Pick {
 			name: name.to_string(),
 			source,
+			size: None,
 		};
 		self.panels.take_card(&add::Card::New(pick), None);
 	}
@@ -2388,12 +2389,19 @@ struct New {
 	name: String,
 	source: Source,
 	layer: Option<Layer>,
+	/// Its picture's size, where the listing knew it.
+	size: Option<[u32; 2]>,
 }
 
 /// Add `new`, placed among its layers if it has a picture and heard in the
 /// audio scene on program if it has sound. Returns its name.
 fn add(state: &mut State, new: New) -> anyhow::Result<String> {
-	let New { name, source, layer } = new;
+	let New {
+		name,
+		source,
+		layer,
+		size,
+	} = new;
 	anyhow::ensure!(!name.is_empty(), "a source needs a name");
 	anyhow::ensure!(
 		!state.collection().sources.contains_key(&name),
@@ -2401,7 +2409,8 @@ fn add(state: &mut State, new: New) -> anyhow::Result<String> {
 	);
 	let heard = source.has_audio();
 	let placed = layer.filter(|_| source.has_video()).map(|layer| {
-		let (index, item) = add::put(state, &layer, &name, &source);
+		let picture = add::Picture { source: &source, size };
+		let (index, item) = add::put(state, &layer, &name, picture);
 		(layer, index, item)
 	});
 	edit(state, format!("Add `{name}`"), None, |draft| {

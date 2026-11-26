@@ -277,13 +277,15 @@ impl Panels {
 						Err(_) => collection.canvas(self.edited(&state)).unwrap_or(collection.canvas),
 					}
 				};
+				let (width, height) = moq_scene::browser::page_size(canvas);
 				let page = Pick {
 					name: url.host_str().unwrap_or("Web page").to_string(),
 					source: Source::Browser {
 						url: url.to_string(),
-						width: canvas.width,
-						height: canvas.height,
+						width,
+						height,
 					},
+					size: None,
 				};
 				self.take_card(&Card::New(page), None);
 			}
@@ -330,13 +332,26 @@ impl Panels {
 				let result = match at.map(|at| self.landing(&state, Some(at))) {
 					None => {
 						let layer = self.scene(&state).ok();
-						add(&mut state, New { name, source, layer })
+						let size = pick.size;
+						add(
+							&mut state,
+							New {
+								name,
+								source,
+								layer,
+								size,
+							},
+						)
 					}
 					Some(Err(why)) => Err(anyhow::anyhow!(why)),
 					Some(Ok(landing)) => {
-						let rect = source
-							.has_video()
-							.then(|| place(state.collection(), &[], landing.canvas, &source, Some(landing.at)).1);
+						let picture = Picture {
+							source: &source,
+							size: pick.size,
+						};
+						let collection = state.collection();
+						let rect =
+							(source.has_video()).then(|| dropped(collection, landing.canvas, picture, landing.at));
 						let added = self.add_layer(&mut state, &landing, name.clone(), source, rect);
 						added.map(|()| name)
 					}
@@ -361,9 +376,9 @@ impl Panels {
 		let layer = self.scene(state).map_err(|why| anyhow::anyhow!(why))?;
 		let collection = state.collection();
 		let source = collection.sources.get(name).context("the source is gone")?;
-		let (mut index, mut item) = put(state, &layer, name, source);
+		let (mut index, mut item) = put(state, &layer, name, Picture::of(source));
 		if let Some(landing) = &landing {
-			let rect = place(collection, &[], landing.canvas, source, Some(landing.at)).1;
+			let rect = dropped(collection, landing.canvas, Picture::of(source), landing.at);
 			item = super::drop::landed(collection, landing, name, rect);
 			index = collection.items(&layer).map_or(0, <[Item]>::len);
 		}
@@ -567,10 +582,11 @@ impl Panels {
 					name: "Text".into(),
 					source: Source::Overlay {
 						html: super::start::TEXT.into(),
-						width: canvas.width,
-						height: canvas.height,
+						width: moq_scene::browser::page_size(canvas).0,
+						height: moq_scene::browser::page_size(canvas).1,
 						restart: true,
 					},
+					size: None,
 				})),
 				swatch: None,
 				remove: None,
@@ -584,6 +600,7 @@ impl Panels {
 					source: Source::Color {
 						color: moq_scene::Rgba(color.to_srgba_unmultiplied()),
 					},
+					size: None,
 				})),
 				swatch: Some(color),
 				remove: None,
@@ -608,6 +625,7 @@ impl Panels {
 			card: Ok(Card::New(Pick {
 				name: name.into(),
 				source,
+				size: None,
 			})),
 			swatch: None,
 			remove: None,
@@ -697,11 +715,14 @@ impl Panels {
 		let at = [at.x, at.y];
 		let collection = state.collection();
 		let landing = match &*card {
-			Card::New(pick) => Some(&pick.source),
-			Card::Unused(name) => collection.sources.get(name),
+			Card::New(pick) => Some(Picture {
+				source: &pick.source,
+				size: pick.size,
+			}),
+			Card::Unused(name) => collection.sources.get(name).map(Picture::of),
 		};
-		if let Some(source) = landing.filter(|source| source.has_video()) {
-			let (_, rect) = place(collection, &[], canvas, source, Some(at));
+		if let Some(shown) = landing.filter(|shown| shown.source.has_video()) {
+			let rect = dropped(collection, canvas, shown, at);
 			let outline = Rect::from_min_size(
 				picture.rect.min + vec2(rect.x, rect.y) * scale,
 				vec2(rect.width, rect.height) * scale,
@@ -879,36 +900,43 @@ impl Panels {
 	}
 }
 
-/// Where a new layer showing `source` goes among `items`, a layer's layers
-/// where they are drawn on `canvas`: its index, back first, and its place. Centered on `at` in canvas pixels, it
-/// lands there at most half the canvas; otherwise the first picture fills
-/// the canvas, behind any smaller layers, one over a layer already covering
-/// it lands as a picture-in-picture in the first corner clear of the
-/// others, a color goes behind everything, and a page or overlay lands at
-/// its own size, shrunk to fit the canvas and centered if larger.
-pub(super) fn place(
-	collection: &Collection,
-	items: &[Item],
-	canvas: Canvas,
-	source: &Source,
-	at: Option<[f32; 2]>,
-) -> (usize, moq_scene::Rect) {
-	let front = items.len();
-	let shown = picture(collection, source);
-	let own = match shown {
-		Some(Source::Browser { width, height, .. } | Source::Overlay { width, height, .. }) => {
-			Some([*width as f32, *height as f32])
-		}
-		_ => None,
-	};
-	let (width, height) = (canvas.width as f32, canvas.height as f32);
-	if let Some(at) = at {
-		// At the picture's own shape, not the canvas's, which in the
-		// portrait picture would squeeze it.
-		let landscape = [collection.canvas.width as f32, collection.canvas.height as f32];
-		return (front, super::drop::land(canvas, own.unwrap_or(landscape), at));
+/// What a new layer shows: its source, and its picture's size where the
+/// listing knows it, as it does a display's or a window's.
+#[derive(Clone, Copy)]
+pub(super) struct Picture<'a> {
+	pub(super) source: &'a Source,
+	pub(super) size: Option<[u32; 2]>,
+}
+
+impl<'a> Picture<'a> {
+	/// `source`, its size unknown until it shows.
+	pub(super) fn of(source: &'a Source) -> Self {
+		Self { source, size: None }
 	}
-	if let Some([w, h]) = own {
+}
+
+/// Where a new layer goes in one picture: among `items`, a layer's layers
+/// where that picture draws them on `canvas`, under `pinned`, those always
+/// on top, which hide a corner but take no part in the order.
+#[derive(Clone, Copy)]
+pub(super) struct Among<'a> {
+	pub(super) items: &'a [Item],
+	pub(super) pinned: &'a [Item],
+	pub(super) canvas: Canvas,
+}
+
+/// Where a new layer showing `picture` goes `among` a picture's layers: its
+/// index, back first, and its place. The first picture fills the canvas,
+/// behind any smaller layers; one over layers already covering it lands as
+/// a picture-in-picture in the first corner clear of the others; a color
+/// goes behind everything; and a page or overlay lands at its own size,
+/// shrunk to fit the canvas and centered if larger.
+pub(super) fn place(collection: &Collection, among: &Among, picture: Picture) -> (usize, moq_scene::Rect) {
+	let Among { items, canvas, .. } = *among;
+	let front = items.len();
+	let shown = self::picture(collection, picture.source);
+	let (width, height) = (canvas.width as f32, canvas.height as f32);
+	if let Some([w, h]) = own(shown) {
 		// At its own size, or shrunk to fit and centered, as a portrait
 		// page is in the landscape picture.
 		let fit = (width / w).min(height / h).min(1.0);
@@ -948,7 +976,27 @@ pub(super) fn place(
 		// Behind what is there already, which it would hide.
 		return (0, fill);
 	}
-	(front, corner(items, canvas))
+	(front, corner(among))
+}
+
+/// Where `picture` dropped centered on `at` lands on `canvas`, in canvas
+/// pixels: at its own shape, not the canvas's, which in the portrait
+/// picture would squeeze it, and at most half the canvas.
+pub(super) fn dropped(collection: &Collection, canvas: Canvas, picture: Picture, at: [f32; 2]) -> moq_scene::Rect {
+	let size = own(self::picture(collection, picture.source))
+		.or(picture.size.map(|size| size.map(|side| side as f32)))
+		.unwrap_or([collection.canvas.width as f32, collection.canvas.height as f32]);
+	super::drop::land(canvas, size, at)
+}
+
+/// A page's or overlay's own size.
+fn own(shown: Option<&Source>) -> Option<[f32; 2]> {
+	match shown {
+		Some(Source::Browser { width, height, .. } | Source::Overlay { width, height, .. }) => {
+			Some([*width as f32, *height as f32])
+		}
+		_ => None,
+	}
 }
 
 /// Whether `rect` covers nearly all of `canvas`.
@@ -986,9 +1034,11 @@ fn covered(canvas: Canvas, rects: &[&moq_scene::Rect]) -> f32 {
 	area / (width * height)
 }
 
-/// A picture-in-picture on `canvas` in the first corner clear of `items`
-/// that don't cover it, the bottom right first.
-fn corner(items: &[Item], canvas: Canvas) -> moq_scene::Rect {
+/// A picture-in-picture on the canvas `among` names, in the first corner
+/// clear of its layers that don't cover it and those always on top, the
+/// bottom right first, or else the bottom right.
+fn corner(among: &Among) -> moq_scene::Rect {
+	let Among { items, pinned, canvas } = *among;
 	let (width, height) = (canvas.width as f32, canvas.height as f32);
 	let w = (width * PIP).round();
 	let h = (w * height / width).round();
@@ -998,6 +1048,7 @@ fn corner(items: &[Item], canvas: Canvas) -> moq_scene::Rect {
 	let corners = [(right, bottom), (left, bottom), (right, top), (left, top)];
 	let others: Vec<&moq_scene::Rect> = items
 		.iter()
+		.chain(pinned)
 		.filter(|item| item.visible && !covers(canvas, &item.rect))
 		.map(|item| &item.rect)
 		.collect();
@@ -1017,81 +1068,98 @@ fn corner(items: &[Item], canvas: Canvas) -> moq_scene::Rect {
 		.unwrap_or_else(|| pip(corners[0]))
 }
 
-/// Where `source`, added as `name` to `layer`, goes by [`place`]: among the
-/// layers as each picture draws them, in the landscape picture and, for a
-/// layer drawn in both, in the portrait one too, as [`both`] says, whichever
-/// picture is edited.
-pub(super) fn put(state: &State, layer: &Layer, name: &str, source: &Source) -> (usize, Item) {
+/// Where `picture`, added as `name` to `layer`, goes by [`place`]: among the
+/// layers as each picture draws them, under those always on top, in the
+/// landscape picture and, for a layer drawn in both, in the portrait one
+/// too, as [`both`] says, whichever picture is edited.
+pub(super) fn put(state: &State, layer: &Layer, name: &str, picture: Picture) -> (usize, Item) {
 	let collection = state.collection();
 	let canvas = collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas);
-	let landscape = super::slots::placed(state, layer, Format::Landscape);
-	let portrait = collection
-		.dual(layer)
-		.then(|| super::slots::placed(state, layer, Format::Portrait));
-	both(collection, (&landscape, canvas), portrait.as_deref(), name, source)
+	let drawn = |format| {
+		let items = super::slots::placed(state, layer, format);
+		// Drawn over a scene, not over themselves.
+		let pinned = match layer.scene {
+			Some(_) => super::slots::placed(state, &Layer::top(), format),
+			None => Vec::new(),
+		};
+		(items, pinned)
+	};
+	let landscape = drawn(Format::Landscape);
+	let portrait = collection.dual(layer).then(|| drawn(Format::Portrait));
+	fn among(drawn: &(Vec<Item>, Vec<Item>), canvas: Canvas) -> Among<'_> {
+		Among {
+			items: &drawn.0,
+			pinned: &drawn.1,
+			canvas,
+		}
+	}
+	let turned = collection.canvas_of(Format::Portrait);
+	let portrait = portrait.as_ref().map(|portrait| among(portrait, turned));
+	both(collection, among(&landscape, canvas), portrait, name, picture)
 }
 
-/// [`place`] in the landscape picture, `landscape`'s layers on its canvas,
-/// and in the portrait one too given its layers: where the two agree on
-/// the order, each picture's place; where one would put it behind and the
-/// other in front, in front as a picture-in-picture in both, so it hides
-/// nothing in either.
+/// [`place`] in the landscape picture and, given its layers, in the
+/// portrait one too: where the two agree on the order, each picture's
+/// place; where one would put it behind and the other in front, in front
+/// as a picture-in-picture in both. In each, its picture is cropped to the
+/// shape it is given there.
 fn both(
 	collection: &Collection,
-	(landscape, canvas): (&[Item], Canvas),
-	portrait: Option<&[Item]>,
+	landscape: Among,
+	portrait: Option<Among>,
 	name: &str,
-	source: &Source,
+	picture: Picture,
 ) -> (usize, Item) {
-	let (index, rect) = place(collection, landscape, canvas, source, None);
+	let (index, rect) = place(collection, &landscape, picture);
 	let mut item = Item::new(name.to_string(), rect);
 	let Some(portrait) = portrait else {
-		item.crop = covering(collection, source, Format::Landscape, &item.rect);
+		item.crop = covering(collection, picture, Format::Landscape, &item.rect);
 		return (index, item);
 	};
-	let turned = collection.canvas_of(Format::Portrait);
-	let (at, rect) = place(collection, portrait, turned, source, None);
+	let (at, rect) = place(collection, &portrait, picture);
 	let rect = match at == index {
 		true => rect,
 		false => {
-			item.rect = corner(landscape, canvas);
-			corner(portrait, turned)
+			item.rect = corner(&landscape);
+			corner(&portrait)
 		}
 	};
-	item.crop = covering(collection, source, Format::Landscape, &item.rect);
+	item.crop = covering(collection, picture, Format::Landscape, &item.rect);
 	item.portrait = Some(moq_scene::Placement {
-		crop: covering(collection, source, Format::Portrait, &rect),
+		crop: covering(collection, picture, Format::Portrait, &rect),
 		rect,
 	});
 	(index.max(at), item)
 }
 
-/// The even crop that shows `source`'s picture in `rect` of `format`'s
-/// picture unstretched, as CSS `object-fit: cover` does: none where their
-/// shapes match, or for a color, which has none.
-fn covering(collection: &Collection, source: &Source, format: Format, rect: &moq_scene::Rect) -> moq_scene::Crop {
-	let (shown, wanted) = (shape(collection, source, format), rect.width / rect.height);
-	match matches!(picture(collection, source), Some(Source::Color { .. })) || (shown / wanted - 1.0).abs() < 1e-3 {
+/// The even crop that shows `picture` in `rect` of `format`'s picture
+/// unstretched, as CSS `object-fit: cover` does: none where their shapes
+/// match, or for a color, which has none.
+fn covering(collection: &Collection, picture: Picture, format: Format, rect: &moq_scene::Rect) -> moq_scene::Crop {
+	let (shown, wanted) = (shape(collection, picture, format), rect.width / rect.height);
+	let color = matches!(self::picture(collection, picture.source), Some(Source::Color { .. }));
+	match color || (shown / wanted - 1.0).abs() < 1e-3 {
 		true => moq_scene::Crop::default(),
 		false => moq_scene::Crop::covering(shown, wanted),
 	}
 }
 
-/// How wide for its height `source`'s picture is in `format`'s picture: a
-/// page's or overlay's own size, a scene's canvas, or else the program's,
-/// as a device's picture is taken to be until it shows; in the portrait
-/// picture, the program or a scene drawn in both shows its portrait one.
-fn shape(collection: &Collection, source: &Source, format: Format) -> f32 {
+/// How wide for its height `picture` is in `format`'s picture: its listed
+/// size, a page's or overlay's own, a scene's canvas, or else the
+/// program's, as a camera's picture is taken to be, the listing knowing no
+/// size for one; in the portrait picture, the program or a scene drawn in
+/// both shows its portrait one.
+fn shape(collection: &Collection, picture: Picture, format: Format) -> f32 {
 	let wide = |canvas: Canvas| canvas.width as f32 / canvas.height as f32;
-	let (own, turns) = match picture(collection, source) {
-		Some(Source::Browser { width, height, .. } | Source::Overlay { width, height, .. }) => {
-			(*width as f32 / *height as f32, false)
-		}
-		Some(Source::Scene { scene }) => (
+	let shown = self::picture(collection, picture.source);
+	let (own, turns) = match (own(shown), picture.size, shown) {
+		(Some([width, height]), ..) => (width / height, false),
+		(None, Some([width, height]), _) => (width as f32 / height.max(1) as f32, false),
+		(None, None, Some(Source::Scene { scene })) => (
 			wide(collection.canvas(Some(scene)).unwrap_or(collection.canvas)),
 			collection.dual(&Layer::scene(scene)),
 		),
-		Some(Source::Program) => (wide(collection.canvas), collection.portrait),
+		(None, None, Some(Source::Program)) => (wide(collection.canvas), collection.portrait),
 		_ => (wide(collection.canvas), false),
 	};
 	match (format, turns) {
@@ -1582,8 +1650,31 @@ name = "Main"
 
 	fn placed(collection: &Collection, source: Source, at: Option<[f32; 2]>) -> (usize, [f32; 4]) {
 		let items = collection.items(&Layer::scene("Main")).unwrap_or_default();
-		let (index, rect) = place(collection, items, collection.canvas, &source, at);
+		let (index, rect) = match at {
+			Some(at) => (
+				items.len(),
+				dropped(collection, collection.canvas, Picture::of(&source), at),
+			),
+			None => place(collection, &wide(collection, items), Picture::of(&source)),
+		};
 		(index, [rect.x, rect.y, rect.width, rect.height])
+	}
+
+	/// `items` in the landscape picture, nothing always on top.
+	fn wide<'a>(collection: &Collection, items: &'a [Item]) -> Among<'a> {
+		Among {
+			items,
+			pinned: &[],
+			canvas: collection.canvas,
+		}
+	}
+
+	/// `items` in the portrait picture, nothing always on top.
+	fn tall<'a>(collection: &Collection, items: &'a [Item]) -> Among<'a> {
+		Among {
+			canvas: collection.canvas.turned(),
+			..wide(collection, items)
+		}
 	}
 
 	const CAMERA: Source = Source::Camera { id: None };
@@ -1612,22 +1703,17 @@ name = "Main"
 			visible,
 			..Item::new(source.to_string(), rect(at))
 		};
-		let tall = [0.0, 0.0, 1080.0, 1920.0];
+		let upright = [0.0, 0.0, 1080.0, 1920.0];
 		let corner = [1296.0, 708.0, 576.0, 324.0];
 		let added = |landscape: &[Item], portrait: &[Item]| {
-			let (index, item) = both(
-				&collection,
-				(landscape, collection.canvas),
-				Some(portrait),
-				"cam",
-				&CAMERA,
-			);
+			let (landscape, portrait) = (wide(&collection, landscape), tall(&collection, portrait));
+			let (index, item) = both(&collection, landscape, Some(portrait), "cam", Picture::of(&CAMERA));
 			let portrait = item.portrait.unwrap().rect;
 			(index, item.rect, portrait)
 		};
 
 		let landscape = [shown("screen", FULL, true)];
-		let portrait = [shown("screen", tall, true)];
+		let portrait = [shown("screen", upright, true)];
 		assert_eq!(
 			added(&landscape, &portrait),
 			(1, rect(corner), rect([729.0, 1317.0, 324.0, 576.0])),
@@ -1635,7 +1721,7 @@ name = "Main"
 		);
 
 		let landscape = [shown("screen", FULL, false), shown("logo", corner, true)];
-		let portrait = [shown("screen", tall, true), shown("logo", corner, false)];
+		let portrait = [shown("screen", upright, true), shown("logo", corner, false)];
 		assert_eq!(
 			added(&landscape, &portrait),
 			(
@@ -1648,7 +1734,7 @@ name = "Main"
 
 		// The other way: behind a small screen in landscape, over it in portrait.
 		let landscape = [shown("screen", corner, true)];
-		let portrait = [shown("screen", tall, true)];
+		let portrait = [shown("screen", upright, true)];
 		assert_eq!(
 			added(&landscape, &portrait),
 			(
@@ -1667,8 +1753,16 @@ name = "Main"
 	fn portrait_crops_rather_than_squeezes() {
 		let mut collection = scene(&[]);
 		collection.portrait = true;
-		let layer = |items: &[Item]| items.to_vec();
-		let (_, item) = both(&collection, (&layer(&[]), collection.canvas), Some(&[]), "cam", &CAMERA);
+		let empty = |picture| {
+			both(
+				&collection,
+				wide(&collection, &[]),
+				Some(tall(&collection, &[])),
+				"new",
+				picture,
+			)
+		};
+		let (_, item) = empty(Picture::of(&CAMERA));
 		assert!(item.crop.is_none(), "16:9 on 16:9");
 		let portrait = item.portrait.unwrap();
 		assert_eq!(portrait.rect, moq_scene::Rect::fill(&collection.canvas.turned()));
@@ -1685,13 +1779,9 @@ name = "Main"
 
 		let screen = Item::new("screen".to_string(), moq_scene::Rect::fill(&collection.canvas));
 		let tall = Item::new("screen".to_string(), moq_scene::Rect::fill(&collection.canvas.turned()));
-		let (_, inset) = both(
-			&collection,
-			(&[screen], collection.canvas),
-			Some(&[tall]),
-			"cam",
-			&CAMERA,
-		);
+		let (screen, tall) = ([screen], [tall]);
+		let (landscape, portrait) = (wide(&collection, &screen), self::tall(&collection, &tall));
+		let (_, inset) = both(&collection, landscape, Some(portrait), "cam", Picture::of(&CAMERA));
 		assert_eq!(inset.portrait.unwrap().crop.left, trim, "an inset too");
 
 		let page = Source::Browser {
@@ -1699,7 +1789,7 @@ name = "Main"
 			width: 1920,
 			height: 1080,
 		};
-		let (_, page) = both(&collection, (&[], collection.canvas), Some(&[]), "page", &page);
+		let (_, page) = empty(Picture::of(&page));
 		assert!(
 			page.crop.is_none() && page.portrait.unwrap().crop.is_none(),
 			"fitted at its shape"
@@ -1707,12 +1797,66 @@ name = "Main"
 		let color = Source::Color {
 			color: moq_scene::Rgba([0, 0, 0, 255]),
 		};
-		let (_, color) = both(&collection, (&[], collection.canvas), Some(&[]), "color", &color);
+		let (_, color) = empty(Picture::of(&color));
 		assert!(color.portrait.unwrap().crop.is_none());
 
+		// A window the listing says is 9:16 fills the portrait picture
+		// uncropped, and is cropped to the landscape one's shape there.
+		let window = Source::Window { id: "phone".into() };
+		let phone = Picture {
+			source: &window,
+			size: Some([1080, 1920]),
+		};
+		let (_, window) = empty(phone);
+		assert!(window.portrait.unwrap().crop.is_none(), "9:16 on 9:16");
+		assert!(
+			window.crop.top > 0.0 && window.crop.left == 0.0,
+			"cropped top and bottom"
+		);
+
 		let turned = collection.canvas.turned();
-		let (_, dropped) = place(&collection, &[], turned, &CAMERA, Some([540.0, 960.0]));
-		assert_eq!([dropped.width, dropped.height], [540.0, 304.0], "16:9, half the width");
+		let landed = dropped(&collection, turned, Picture::of(&CAMERA), [540.0, 960.0]);
+		assert_eq!([landed.width, landed.height], [540.0, 304.0], "16:9, half the width");
+		let landed = dropped(&collection, turned, phone, [540.0, 960.0]);
+		assert_eq!([landed.width, landed.height], [540.0, 960.0], "9:16, half the height");
+	}
+
+	/// A layer always on top in a corner keeps the new inset out of it,
+	/// though it takes no part in the order.
+	#[test]
+	fn a_pinned_corner_is_taken() {
+		let collection = scene(&[]);
+		let screen = [Item::new(
+			"screen".to_string(),
+			moq_scene::Rect::fill(&collection.canvas),
+		)];
+		let corner = moq_scene::Rect {
+			x: 1296.0,
+			y: 708.0,
+			width: 576.0,
+			height: 324.0,
+		};
+		let pinned = [Item::new("logo".to_string(), corner)];
+		let among = Among {
+			pinned: &pinned,
+			..wide(&collection, &screen)
+		};
+		let (index, rect) = place(&collection, &among, Picture::of(&CAMERA));
+		assert_eq!(index, 1, "over the scene's own layer");
+		assert_eq!([rect.x, rect.y], [48.0, 708.0], "bottom left, clear of the pinned one");
+	}
+
+	/// A page the size of a canvas past what a page renders is scaled down
+	/// to fit it, keeping its shape.
+	#[test]
+	fn a_page_fits_the_renderer() {
+		let canvas = |width, height| Canvas {
+			width,
+			height,
+			..Canvas::default()
+		};
+		assert_eq!(moq_scene::browser::page_size(canvas(1920, 1080)), (1920, 1080));
+		assert_eq!(moq_scene::browser::page_size(canvas(5120, 1440)), (4096, 1152));
 	}
 
 	/// Two halves of a split screen cover the canvas together, so a camera
