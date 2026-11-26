@@ -354,6 +354,7 @@ impl Studio {
 			graph_open: false,
 			selection: None,
 			cropping: false,
+			clicked: None,
 			gestures: Gestures::default(),
 			snapping: Snapping::default(),
 			direction: Direction::Left,
@@ -962,6 +963,9 @@ struct Panels {
 	/// Whether a drag on the selected layer's edges crops it rather than
 	/// resizing it.
 	cropping: bool,
+	/// When the picture last took a click, in egui's time, so a double-click
+	/// whose first click it took reuses that click's selection.
+	clicked: Option<f64>,
 	gestures: Gestures,
 	snapping: Snapping,
 	/// The direction a slide or wipe last had, which the transition picker

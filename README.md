@@ -317,17 +317,19 @@ is placed in front of the edited scene, and selected.
 
 On the **picture**, click a layer to select it, drag it to move it, and drag
 its edges or corners to resize it (see [Placing layers](#placing-layers)). A
-locked layer stays put: clicks pass through it to what is under it. A small
-toolbar beside the selected layer offers what acts on the picture:
-**Crop**, after which dragging an edge trims the picture without scaling it
-and dragging inside moves the picture under the frame, with the whole
-picture outlined; **Fit**, as large as fits on the canvas, keeping its shape;
-**Fill**, covering the canvas, keeping its shape and cropping the rest
-evenly; **Interact**, on a web page; **Lock**; and **Remove**. Right-click a
-layer for its row's menu, or the picture elsewhere to add a layer, paste, or
-set **Snap**, **Grid**, and the grid's spacing. Escape ends cropping, then the
-selection, and Delete or Backspace removes the selected layer, unless it or
-the picture is locked; undo brings it back.
+locked layer stays put: clicks and double-clicks pass through it to what is
+under it. A small toolbar beside the selected layer offers what acts on the
+picture:
+**Crop**, or a double-click on the layer, after which dragging an edge trims
+the picture without scaling it and dragging inside moves the picture under
+the frame, with the whole picture outlined; **Fit**, as large as fits on the
+canvas, keeping its shape; **Fill**, covering the canvas, keeping its shape
+and cropping the rest evenly; **Interact**, on a web page; **Lock**; and
+**Remove**. Right-click a layer for its row's menu, or the picture elsewhere
+to add a layer, paste, or set **Snap**, **Grid**, and the grid's spacing. A
+double-click or Escape ends cropping, Escape then the selection, and Delete
+or Backspace removes the selected layer, unless it or the picture is locked;
+undo brings it back.
 
 A layer in a [slot](#slots-and-roles) is outlined on the picture, dashed, with
 a chip naming its role, or **Guest** or its slot, and a tag naming the source
