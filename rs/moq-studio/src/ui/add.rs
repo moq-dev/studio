@@ -4,6 +4,7 @@
 
 use egui::{Align2, Rect, Sense, Stroke, Vec2, pos2, vec2};
 
+use super::drop::Landing;
 use super::layers::{kind, unplaced, words};
 use super::*;
 
@@ -318,9 +319,14 @@ impl Panels {
 	}
 
 	/// Add what `card` adds to the edited scene, then close Add with its
-	/// layer selected. Dropped at `at`, in the canvas pixels of the picture
-	/// it was dropped on, it lands there as a dropped file does.
-	pub(super) fn take_card(&mut self, card: &Card, at: Option<[f32; 2]>) {
+	/// layer selected. Dropped at `landing`, resolved as the picture it was
+	/// dropped on drew, it lands there as a dropped file does, or says why
+	/// it cannot.
+	pub(super) fn take_card(&mut self, card: &Card, landing: Option<Result<Landing, String>>) {
+		let landing = match landing.transpose() {
+			Ok(landing) => landing,
+			Err(why) => return self.added(Err(anyhow::anyhow!(why))),
+		};
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
 		self.follow_reloads(&state);
@@ -329,7 +335,7 @@ impl Panels {
 				// Two cameras of the same model share a name; number the later ones.
 				let name = state.collection().unused_name(&pick.name);
 				let source = pick.source.clone();
-				let result = match at.map(|at| self.landing(&state, Some(at))) {
+				let result = match landing {
 					None => {
 						let layer = self.scene(&state).ok();
 						let size = pick.size;
@@ -343,11 +349,10 @@ impl Panels {
 							},
 						)
 					}
-					Some(Err(why)) => Err(anyhow::anyhow!(why)),
-					Some(Ok(landing)) => {
+					Some(landing) => {
 						let picture = Picture {
-							source: &source,
 							size: pick.size,
+							..Picture::of(&source)
 						};
 						let collection = state.collection();
 						let item = (source.has_video()).then(|| dropped(collection, &landing, &name, picture));
@@ -359,7 +364,7 @@ impl Panels {
 				self.added(result);
 			}
 			Card::Unused(name) => {
-				let result = self.place_unused(&mut state, name, at);
+				let result = self.place_unused(&mut state, name, landing.as_ref());
 				drop(state);
 				self.added(result.map(|()| name.clone()));
 			}
@@ -367,17 +372,19 @@ impl Panels {
 	}
 
 	/// Put `name`, a source nothing shows, in the edited scene: dropped at
-	/// `at`, as [`Self::take_card`] says, or else where [`place`] puts it, or
-	/// in the next guest tile of a scene with slots if it is a guest's.
-	fn place_unused(&mut self, state: &mut State, name: &str, at: Option<[f32; 2]>) -> anyhow::Result<()> {
-		let landing = at.map(|at| self.landing(state, Some(at)));
-		let landing = landing.transpose().map_err(|why| anyhow::anyhow!(why))?;
-		let layer = self.scene(state).map_err(|why| anyhow::anyhow!(why))?;
+	/// `landing`, as [`Self::take_card`] says, or else where [`place`] puts
+	/// it, or in the next guest tile of a scene with slots if it is a guest's.
+	fn place_unused(&mut self, state: &mut State, name: &str, landing: Option<&Landing>) -> anyhow::Result<()> {
+		let layer = match landing {
+			Some(landing) => landing.layer.clone(),
+			None => self.scene(state).map_err(|why| anyhow::anyhow!(why))?,
+		};
 		let collection = state.collection();
-		let source = collection.sources.get(name).context("the source is gone")?;
-		let (mut index, mut item) = put(state, &layer, name, Picture::of(source));
-		if let Some(landing) = &landing {
-			item = dropped(collection, landing, name, Picture::of(source));
+		let picture = Picture::shown(collection, name).context("the source is gone")?;
+		let source = picture.source;
+		let (mut index, mut item) = put(state, &layer, name, picture);
+		if let Some(landing) = landing {
+			item = dropped(collection, landing, name, picture);
 			index = collection.items(&layer).map_or(0, <[Item]>::len);
 		}
 		// A guest takes the next tile of a scene with slots.
@@ -676,17 +683,24 @@ impl Panels {
 	/// Each microphone with its level, so the one that moves is the one
 	/// heard, and the system's sound where it can be captured.
 	fn audio_tab(&mut self, ui: &mut Ui) -> Option<Asked> {
-		let Some(listing) = &self.devices.listing else {
-			looking(ui);
-			return None;
-		};
-		let picks = match &listing.audio {
-			Ok(picks) if picks.is_empty() => {
-				ui.label(egui::RichText::new("No microphones found").color(kit::FAINT));
-				return None;
+		// The meters follow the inputs listed now, so one no longer listed,
+		// or a listing that failed, stops capturing.
+		let picks = match self.devices.listing.as_ref().map(|listing| &listing.audio) {
+			Some(Ok(picks)) if !picks.is_empty() => picks.clone(),
+			listed => {
+				self.adding.meters.follow(&self.runtime, &[]);
+				return match listed {
+					None => {
+						looking(ui);
+						None
+					}
+					Some(Err(err)) => unavailable(ui, err),
+					Some(Ok(_)) => {
+						ui.label(egui::RichText::new("No microphones found").color(kit::FAINT));
+						None
+					}
+				};
 			}
-			Ok(picks) => picks.clone(),
-			Err(err) => return unavailable(ui, err),
 		};
 		let inputs: Vec<Input> = picks.iter().filter_map(|pick| Input::of(&pick.source)).collect();
 		self.adding.meters.follow(&self.runtime, &inputs);
@@ -715,15 +729,15 @@ impl Panels {
 	}
 
 	/// While a card is dragged over `picture`, which shows `canvas`, outline
-	/// where it would land; the card and that place, in canvas pixels, once
-	/// it is let go there.
+	/// where it would land; the card and where it lands, or why it cannot,
+	/// once it is let go there.
 	pub(super) fn card_on_picture(
 		&self,
 		ui: &Ui,
 		state: &State,
 		picture: &egui::Response,
 		canvas: Canvas,
-	) -> Option<(Card, [f32; 2])> {
+	) -> Option<(Card, Result<Landing, String>)> {
 		let card = egui::DragAndDrop::payload::<Card>(ui.ctx())?;
 		let pointer = ui.ctx().pointer_latest_pos()?;
 		if !picture.contains_pointer() {
@@ -735,14 +749,19 @@ impl Panels {
 		let collection = state.collection();
 		let shown = match &*card {
 			Card::New(pick) => Some(Picture {
-				source: &pick.source,
 				size: pick.size,
+				..Picture::of(&pick.source)
 			}),
-			Card::Unused(name) => collection.sources.get(name).map(Picture::of),
+			Card::Unused(name) => Picture::shown(collection, name),
 		};
-		let landing = self.landing(state, Some(at)).ok();
-		if let Some((shown, landing)) = shown.filter(|shown| shown.source.has_video()).zip(landing) {
-			let rect = dropping(collection, &landing, shown);
+		// Resolved now, under the lock the picture was drawn with, so a take
+		// before the drop is taken cannot move it to another scene.
+		let landing = self.landing(state, Some(at));
+		if let Some((shown, landing)) = shown
+			.filter(|shown| shown.source.has_video())
+			.zip(landing.as_ref().ok())
+		{
+			let rect = dropping(collection, landing, shown);
 			let outline = Rect::from_min_size(
 				picture.rect.min + vec2(rect.x, rect.y) * scale,
 				vec2(rect.width, rect.height) * scale,
@@ -751,7 +770,7 @@ impl Panels {
 				.rect_stroke(outline, 4, Stroke::new(2.0, kit::ACCENT), egui::StrokeKind::Inside);
 		}
 		let card = picture.dnd_release_payload::<Card>()?;
-		Some(((*card).clone(), at))
+		Some(((*card).clone(), landing))
 	}
 }
 
@@ -920,18 +939,43 @@ impl Panels {
 	}
 }
 
-/// What a new layer shows: its source, and its picture's size where the
-/// listing knows it, as it does a display's or a window's.
+/// What a new layer shows: its source, its picture's size where the
+/// listing knows it, as it does a display's or a window's, and the source's
+/// own crop, which one the show has may trim before any layer's.
 #[derive(Clone, Copy)]
 pub(super) struct Picture<'a> {
 	pub(super) source: &'a Source,
 	pub(super) size: Option<[u32; 2]>,
+	pub(super) crop: moq_scene::Crop,
 }
 
 impl<'a> Picture<'a> {
-	/// `source`, its size unknown until it shows.
+	/// `source`, new to the show, its size unknown until it shows.
 	pub(super) fn of(source: &'a Source) -> Self {
-		Self { source, size: None }
+		Self {
+			source,
+			size: None,
+			crop: moq_scene::Crop::default(),
+		}
+	}
+
+	/// The show's source `name`, through its own crop.
+	fn shown(collection: &'a Collection, name: &str) -> Option<Self> {
+		let source = collection.sources.get(name)?;
+		let crop = collection.video.get(collection.resolve(name)).map(|video| video.crop);
+		Some(Self {
+			crop: crop.unwrap_or_default(),
+			..Self::of(source)
+		})
+	}
+
+	/// `[width, height]` with the source's own crop trimmed off.
+	fn trimmed(&self, [width, height]: [f32; 2]) -> [f32; 2] {
+		let crop = self.crop;
+		[
+			width * (1.0 - crop.left - crop.right),
+			height * (1.0 - crop.top - crop.bottom),
+		]
 	}
 }
 
@@ -1003,7 +1047,7 @@ pub(super) fn place(collection: &Collection, among: &Among, picture: Picture) ->
 /// own shape in the picture it lands in, at most half the canvas, and for a
 /// layer drawn in both, centered at its own shape in the landscape picture
 /// too, as a scene drawn in both has a shape in each.
-pub(super) fn dropped(collection: &Collection, landing: &super::drop::Landing, name: &str, picture: Picture) -> Item {
+pub(super) fn dropped(collection: &Collection, landing: &Landing, name: &str, picture: Picture) -> Item {
 	let mut item = super::drop::landed(collection, landing, name, dropping(collection, landing, picture));
 	if item.portrait.is_some() {
 		let canvas = collection.canvas;
@@ -1015,7 +1059,7 @@ pub(super) fn dropped(collection: &Collection, landing: &super::drop::Landing, n
 
 /// Where `picture` dropped at `landing` lands in the picture it lands in,
 /// in canvas pixels.
-fn dropping(collection: &Collection, landing: &super::drop::Landing, picture: Picture) -> moq_scene::Rect {
+fn dropping(collection: &Collection, landing: &Landing, picture: Picture) -> moq_scene::Rect {
 	let size = size(collection, picture, landing.format);
 	super::drop::land(landing.canvas, size, landing.at)
 }
@@ -1026,6 +1070,7 @@ fn dropping(collection: &Collection, landing: &super::drop::Landing, picture: Pi
 fn size(collection: &Collection, picture: Picture, format: Format) -> [f32; 2] {
 	own(self::picture(collection, picture.source))
 		.or(picture.size.map(|size| size.map(|side| side as f32)))
+		.map(|size| picture.trimmed(size))
 		.unwrap_or_else(|| {
 			let height = collection.canvas.height as f32;
 			[height * shape(collection, picture, format), height]
@@ -1084,11 +1129,17 @@ fn covered(canvas: Canvas, rects: &[&moq_scene::Rect]) -> f32 {
 fn corner(among: &Among, shape: Option<f32>) -> moq_scene::Rect {
 	let Among { items, pinned, canvas } = *among;
 	let (width, height) = (canvas.width as f32, canvas.height as f32);
-	let w = (width * PIP).round();
-	let h = (w / shape.unwrap_or(width / height)).round();
+	let shape = shape.unwrap_or(width / height);
+	// No taller than the canvas, as on a short banner of a scene.
+	let w = (width * PIP).min(height * shape).round();
+	let h = (w / shape).round().min(height);
+	// Each margin no larger than the room its axis leaves.
 	let margin = (width * MARGIN).round();
-	let (left, top) = (margin, margin);
-	let (right, bottom) = (width - margin - w, height - margin - h);
+	let (left, top) = (
+		margin.min(((width - w) / 2.0).floor()),
+		margin.min(((height - h) / 2.0).floor()),
+	);
+	let (right, bottom) = (width - left - w, height - top - h);
 	let corners = [(right, bottom), (left, bottom), (right, top), (left, top)];
 	let others: Vec<&moq_scene::Rect> = items
 		.iter()
@@ -1228,10 +1279,12 @@ fn shape(collection: &Collection, picture: Picture, format: Format) -> f32 {
 		(None, None, Some(Source::Program)) => (wide(collection.canvas), collection.portrait),
 		_ => (wide(collection.canvas), false),
 	};
-	match (format, turns) {
+	let shown = match (format, turns) {
 		(Format::Portrait, true) => own / wide(collection.canvas).powi(2),
 		_ => own,
-	}
+	};
+	let [width, height] = picture.trimmed([shown, 1.0]);
+	width / height
 }
 
 /// The source whose picture `source` shows: itself, or the one it clones.
@@ -1870,8 +1923,8 @@ name = "Main"
 		// uncropped, and is cropped to the landscape one's shape there.
 		let window = Source::Window { id: "phone".into() };
 		let phone = Picture {
-			source: &window,
 			size: Some([1080, 1920]),
+			..Picture::of(&window)
 		};
 		let (_, window) = empty(phone);
 		assert!(window.portrait.unwrap().crop.is_none(), "9:16 on 9:16");
@@ -1889,7 +1942,7 @@ name = "Main"
 			let (_, inset) = both(&collection, landscape, Some(portrait), "picked", Picture::of(picked));
 			assert!(inset.crop.is_none() && inset.portrait.is_none(), "{picked:?} inset");
 			// Over a screen only the portrait picture shows, in front as an
-			// inset there too, which the portrait picture maps from this one.
+			// inset in both, there at this inset's shape in a corner of its own.
 			let only = wide(&collection, &[]);
 			let (index, item) = both(&collection, only, Some(portrait), "picked", Picture::of(picked));
 			assert_eq!(index, 1, "{picked:?} in front");
@@ -1966,6 +2019,71 @@ name = "Main"
 			([item.rect.width, item.rect.height], [portrait.width, portrait.height]),
 			([960.0, 540.0], [540.0, 960.0]),
 			"each picture's own shape"
+		);
+	}
+
+	/// On a short banner of a canvas the inset still lands wholly on it, and
+	/// on the usual canvas where it always has.
+	#[test]
+	fn an_inset_fits_a_short_canvas() {
+		let collection = scene(&[]);
+		let inside = |canvas: Canvas| {
+			let rect = corner(
+				&Among {
+					items: &[],
+					pinned: &[],
+					canvas,
+				},
+				None,
+			);
+			let (width, height) = (canvas.width as f32, canvas.height as f32);
+			assert!(rect.x >= 0.0 && rect.y >= 0.0, "{rect:?}");
+			assert!(
+				rect.x + rect.width <= width && rect.y + rect.height <= height,
+				"{rect:?}"
+			);
+			rect
+		};
+		let banner = Canvas {
+			width: 4096,
+			height: 100,
+			..collection.canvas
+		};
+		inside(banner);
+		let rect = inside(collection.canvas);
+		assert_eq!([rect.x, rect.y, rect.width, rect.height], [1296.0, 708.0, 576.0, 324.0]);
+	}
+
+	/// A source the show crops is placed at the shape its crop leaves, so
+	/// Add's crop doesn't trim it again.
+	#[test]
+	fn a_cropped_source_keeps_its_crop_shape() {
+		let mut collection = scene(&[]);
+		let halved = moq_scene::Crop {
+			left: 0.25,
+			right: 0.25,
+			..Default::default()
+		};
+		collection.video.insert(
+			"screen".into(),
+			moq_scene::Video {
+				crop: halved,
+				..Default::default()
+			},
+		);
+		let picture = Picture::shown(&collection, "screen").unwrap();
+		let tall = moq_scene::Rect {
+			x: 0.0,
+			y: 0.0,
+			width: 960.0,
+			height: 1080.0,
+		};
+		assert!(covering(&collection, picture, Format::Landscape, &tall).is_none());
+		let full = moq_scene::Rect::fill(&collection.canvas);
+		assert_eq!(
+			covering(&collection, picture, Format::Landscape, &full).top,
+			0.25,
+			"trimmed top and bottom, not again at the sides"
 		);
 	}
 

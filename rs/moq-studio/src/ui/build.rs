@@ -353,8 +353,8 @@ impl Panels {
 		if let Some(spot) = spot {
 			self.fail(spot, result);
 		}
-		if let Some((card, at)) = card {
-			self.take_card(&card, Some(at));
+		if let Some((card, landing)) = card {
+			self.take_card(&card, Some(landing));
 		}
 		let cards = self.quick_start(ui, response.rect);
 		if !self.locked {

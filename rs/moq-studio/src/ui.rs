@@ -2409,7 +2409,10 @@ fn add(state: &mut State, new: New) -> anyhow::Result<String> {
 	);
 	let heard = source.has_audio();
 	let placed = layer.filter(|_| source.has_video()).map(|layer| {
-		let picture = add::Picture { source: &source, size };
+		let picture = add::Picture {
+			size,
+			..add::Picture::of(&source)
+		};
 		let (index, item) = add::put(state, &layer, &name, picture);
 		(layer, index, item)
 	});
