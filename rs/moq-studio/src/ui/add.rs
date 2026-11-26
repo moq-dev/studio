@@ -996,7 +996,7 @@ pub(super) fn place(collection: &Collection, among: &Among, picture: Picture) ->
 		// Behind what is there already, which it would hide.
 		return (0, fill);
 	}
-	(front, corner(among))
+	(front, corner(among, None))
 }
 
 /// The layer `picture`, dropped at `landing`, becomes as `name`: at its
@@ -1077,14 +1077,15 @@ fn covered(canvas: Canvas, rects: &[&moq_scene::Rect]) -> f32 {
 	area / (width * height)
 }
 
-/// A picture-in-picture on the canvas `among` names, in the first corner
-/// clear of its layers that don't cover it and those always on top, the
-/// bottom right first, or else the bottom right.
-fn corner(among: &Among) -> moq_scene::Rect {
+/// A picture-in-picture on the canvas `among` names, at the canvas's shape
+/// unless `shape` gives one, in the first corner clear of its layers that
+/// don't cover it and those always on top, the bottom right first, or else
+/// the bottom right.
+fn corner(among: &Among, shape: Option<f32>) -> moq_scene::Rect {
 	let Among { items, pinned, canvas } = *among;
 	let (width, height) = (canvas.width as f32, canvas.height as f32);
 	let w = (width * PIP).round();
-	let h = (w * height / width).round();
+	let h = (w / shape.unwrap_or(width / height)).round();
 	let margin = (width * MARGIN).round();
 	let (left, top) = (margin, margin);
 	let (right, bottom) = (width - margin - w, height - margin - h);
@@ -1147,9 +1148,10 @@ pub(super) fn put(state: &State, layer: &Layer, name: &str, picture: Picture) ->
 /// place; where one would put it behind and the other in front, in front
 /// as a picture-in-picture in both. In each, its picture is cropped to the
 /// shape it is given there. One the system's picker chooses has no shape
-/// until it shows, so it is left uncropped and given no portrait place: the
-/// portrait picture places it as it does any layer without one, fitting it
-/// whole, or mapping its inset.
+/// until it shows, so it is left uncropped and given no portrait place, the
+/// portrait picture fitting it whole as it does any layer without one,
+/// except as an inset in front of both, there at the landscape inset's
+/// shape in the portrait picture's own clear corner.
 fn both(
 	collection: &Collection,
 	landscape: Among,
@@ -1174,8 +1176,16 @@ fn both(
 	let rect = match at == index {
 		true => rect,
 		false => {
-			item.rect = corner(&landscape);
-			corner(&portrait)
+			item.rect = corner(&landscape, None);
+			let shape = unknown.then_some(item.rect.width / item.rect.height);
+			let rect = corner(&portrait, shape);
+			if unknown {
+				item.portrait = Some(moq_scene::Placement {
+					rect,
+					crop: moq_scene::Crop::default(),
+				});
+			}
+			rect
 		}
 	};
 	if !unknown {
@@ -1882,8 +1892,38 @@ name = "Main"
 			// inset there too, which the portrait picture maps from this one.
 			let only = wide(&collection, &[]);
 			let (index, item) = both(&collection, only, Some(portrait), "picked", Picture::of(picked));
-			assert_eq!((index, item.portrait), (1, None), "{picked:?} in front");
+			assert_eq!(index, 1, "{picked:?} in front");
 			assert!(item.rect.width < collection.canvas.width as f32 && item.crop.is_none());
+			// At the landscape inset's shape, in the first portrait corner
+			// clear of a layer always on top there.
+			let pin = Item::new(
+				"logo".to_string(),
+				moq_scene::Rect {
+					x: 729.0,
+					y: 1500.0,
+					width: 324.0,
+					height: 300.0,
+				},
+			);
+			let (pins, items) = ([pin], [tall[0].clone()]);
+			let pinned = Among {
+				items: &items,
+				pinned: &pins,
+				canvas: collection.canvas.turned(),
+			};
+			let (_, item) = both(&collection, only, Some(pinned), "picked", Picture::of(picked));
+			let placed = item.portrait.unwrap();
+			assert_eq!(placed.crop, moq_scene::Crop::default());
+			assert_eq!(
+				placed.rect,
+				moq_scene::Rect {
+					x: 27.0,
+					y: 1711.0,
+					width: 324.0,
+					height: 182.0,
+				},
+				"{picked:?} bottom left"
+			);
 		}
 
 		let landing = |picture| {

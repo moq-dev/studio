@@ -796,7 +796,7 @@ impl Panels {
 	/// lands on.
 	fn add_page(&mut self, state: &mut State, landing: &Landing, url: url::Url) -> anyhow::Result<()> {
 		if let Some(why) = moq_scene::browser::MISSING {
-			anyhow::bail!("cannot add {url}: {why}");
+			anyhow::bail!("cannot add {}: {why}", url.host_str().unwrap_or("the page"));
 		}
 		let canvas = landing.canvas;
 		let name = state.collection().unused_name(url.host_str().unwrap_or("Web page"));
