@@ -1077,10 +1077,11 @@ pub(super) fn put(state: &State, layer: &Layer, name: &str, picture: Picture) ->
 	let canvas = collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas);
 	let drawn = |format| {
 		let items = super::slots::placed(state, layer, format);
-		// Drawn over a scene, not over themselves.
-		let pinned = match layer.scene {
-			Some(_) => super::slots::placed(state, &Layer::top(), format),
-			None => Vec::new(),
+		// Drawn over a scene of the program's size, as the compositor draws
+		// them, not over themselves.
+		let pinned = match layer.scene.is_some() && canvas.size() == collection.canvas.size() {
+			true => super::slots::placed(state, &Layer::top(), format),
+			false => Vec::new(),
 		};
 		(items, pinned)
 	};
