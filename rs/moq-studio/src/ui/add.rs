@@ -194,13 +194,10 @@ impl Panels {
 		};
 		let mut closed = scrim.inner.clicked();
 		let mut asked = None;
-		// Centered on the stage by its size last frame, laid out from its top
-		// so it has the stage's height to grow into.
+		// At a fixed top, not centered by its height, which the listing
+		// arriving changes: that would move a card from under the pointer.
 		let id = egui::Id::new("add");
-		let last = ctx
-			.memory(|memory| memory.area_rect(id))
-			.map_or(Vec2::ZERO, |rect| rect.size());
-		let top = (stage.center().y - last.y / 2.0).max(stage.top() + 24.0);
+		let top = stage.top() + 24.0;
 		let left = stage.center().x - (width + 36.0) / 2.0;
 		egui::Area::new(id)
 			.order(egui::Order::Foreground)
