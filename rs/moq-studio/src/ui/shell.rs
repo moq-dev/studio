@@ -108,7 +108,10 @@ enum PadAction {
 	Edit(String),
 	/// Make it the safe scene, or stop.
 	Safe(String, bool),
+	/// Remove it, asking first while live or if it holds more than one source.
 	Remove(String),
+	/// Remove it, asked or not.
+	Removed(String),
 	/// Ask for a new name.
 	Rename(String),
 	/// Name it the second.
@@ -801,6 +804,7 @@ impl Panels {
 			let (from, to) = rename_sheet(ui.ctx(), "rename scene", &mut self.renaming_pad)?;
 			Some(PadAction::Renamed(from, to))
 		});
+		let action = action.or_else(|| self.remove_sheet(ui.ctx()).map(PadAction::Removed));
 		let Some(action) = action else { return };
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
@@ -816,6 +820,7 @@ impl Panels {
 			| PadAction::Edit(name)
 			| PadAction::Safe(name, _)
 			| PadAction::Remove(name)
+			| PadAction::Removed(name)
 			| PadAction::Rename(name)
 			| PadAction::Renamed(name, _)
 			| PadAction::Duplicate { name, .. }
@@ -834,7 +839,16 @@ impl Panels {
 			PadAction::Safe(name, safe) => {
 				at(&state, &name).and_then(|index| self.scene_action(&mut state, SceneAction::Safe(index, safe)))
 			}
-			PadAction::Remove(name) => {
+			PadAction::Remove(name) => at(&state, &name).and_then(|index| {
+				let scene = &state.collection().scenes[index];
+				let sources: BTreeSet<_> = scene.items.iter().map(|item| &item.source).collect();
+				if self.engine.on_air().live().is_some() || sources.len() > 1 {
+					self.removing_pad = Some(name.clone());
+					return Ok(());
+				}
+				self.scene_action(&mut state, SceneAction::Remove(index))
+			}),
+			PadAction::Removed(name) => {
 				at(&state, &name).and_then(|index| self.scene_action(&mut state, SceneAction::Remove(index)))
 			}
 			PadAction::Rename(name) => {
@@ -917,86 +931,208 @@ impl Panels {
 		let cued = snapshot.cued.as_ref().is_some_and(|cued| cued.name == pad.name);
 		let live = self.engine.on_air().live().is_some();
 		let (tally, tagged) = tally(on_air, live, cued);
-		let response = self.pad(ui, pad, tally, tagged, width, snapshot);
+		// Keyed by the scene, so the keyboard's focus stays with it, and does not
+		// pass to the scene that takes its place in the strip when it goes.
+		let keyed = egui::UiBuilder::new().id(ui.id().with(("pad", &pad.name)));
+		let response = ui
+			.scope_builder(keyed, |ui| self.pad(ui, pad, tally, tagged, width, snapshot))
+			.inner;
 		let click = match snapshot.studio {
 			true => PadAction::Cue(pad.name.clone()),
 			false => PadAction::Take(pad.name.clone()),
 		};
 		let mut action = (response.clicked() && pad.refused.is_none()).then_some(click);
 		response.context_menu(|ui| {
-			let takeable = pad.refused.is_none() || on_air;
-			let take = ui.add_enabled(!on_air && pad.refused.is_none(), egui::Button::new("Take it on air"));
-			if take.clicked() {
-				action = Some(PadAction::Take(pad.name.clone()));
-			}
-			if snapshot.studio {
-				let cue = ui.add_enabled(!on_air && !cued && pad.refused.is_none(), egui::Button::new("Cue it"));
-				if cue.clicked() {
-					action = Some(PadAction::Cue(pad.name.clone()));
-				}
-			}
-			let edit = ui
-				.add_enabled(!on_air, egui::Button::new("Edit off air"))
-				.on_hover_text("Edit it without going on air")
-				.on_disabled_hover_text("On air; Studio edits it live");
-			if edit.clicked() {
-				action = Some(PadAction::Edit(pad.name.clone()));
-			}
-			let mut safe = snapshot.safe.as_deref() == Some(pad.name.as_str());
-			let toggle = ui
-				.add_enabled(takeable || safe, kit::Toggle::new(&mut safe).label("Safe scene"))
-				.on_hover_text(
-					"The scene the panic key cuts to, as it mutes every microphone and guest and hides the always-on-top layers",
-				);
-			if toggle.changed() {
-				action = Some(PadAction::Safe(pad.name.clone(), safe));
-			}
-			// Show-wide, as in Settings, Show, but where a scene goes on air.
-			ui.menu_button("Transition", |ui| {
-				let result = self.transition(ui, true);
-				self.check(result);
-			});
-			if ui.button("Rename").clicked() {
-				action = Some(PadAction::Rename(pad.name.clone()));
-			}
-			let duplicate = ui
-				.button("Duplicate")
-				.on_hover_text("A new scene showing the same sources: editing a layer's look edits both");
-			if duplicate.clicked() {
-				action = Some(PadAction::Duplicate {
-					name: pad.name.clone(),
-					independent: false,
-				});
-			}
-			let own = ui
-				.button("Duplicate with its own copies")
-				.on_hover_text("A new scene whose layers each show a copy of their own, to edit apart");
-			if own.clicked() {
-				action = Some(PadAction::Duplicate {
-					name: pad.name.clone(),
-					independent: true,
-				});
-			}
-			let count = snapshot.scenes.len();
-			if ui.add_enabled(index > 0, egui::Button::new("Move left")).clicked() {
-				action = Some(PadAction::Move(pad.name.clone(), -1));
-			}
-			if ui
-				.add_enabled(index + 1 < count, egui::Button::new("Move right"))
-				.clicked()
-			{
-				action = Some(PadAction::Move(pad.name.clone(), 1));
-			}
-			let remove = ui
-				.add_enabled(!on_air, egui::Button::new("Remove"))
-				.on_disabled_hover_text("On air; take another scene first");
-			if remove.clicked() {
-				action = Some(PadAction::Remove(pad.name.clone()));
-			}
-			if action.is_some() {
-				ui.close();
+			if let Some(chosen) = self.pad_menu(ui, snapshot, index) {
+				action = Some(chosen);
 			}
 		});
+		// The same menu from a button, for whoever does not know to right-click:
+		// while the pointer is on the pad or the menu is open.
+		let more_id = response.id.with("more");
+		let menu_open = egui::Popup::is_id_open(ui.ctx(), more_id.with("popup"));
+		if menu_open || ui.rect_contains_pointer(response.rect) {
+			let badge = if pad.dark { 22.0 } else { 0.0 };
+			let center = pos2(response.rect.right() - 20.0 - badge, response.rect.bottom() - 14.5);
+			let room = Rect::from_center_size(center, vec2(24.0, 24.0));
+			let more = ui.interact(room, more_id, Sense::click());
+			more.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Scene options"));
+			let lit = menu_open || more.hovered();
+			ui.painter().rect_filled(room, 6, if lit { kit::P3 } else { kit::P2 });
+			Icon::More.paint(ui, room, 16.0, if lit { kit::TEXT } else { kit::DIM });
+			let more = kit::tip(more, "Scene options", None);
+			let chosen = egui::Popup::menu(&more).show(|ui| self.pad_menu(ui, snapshot, index));
+			if let Some(chosen) = chosen.and_then(|shown| shown.inner) {
+				action = Some(chosen);
+			}
+		}
+		// Delete or Backspace on a pad the keyboard focused, while no sheet or
+		// field has the keyboard. The selected layer's own Delete waits while
+		// one does, so the two never both act.
+		if response.has_focus() {
+			self.pad_focused = true;
+			let modal = ui.ctx().memory(|memory| memory.top_modal_layer()).is_some();
+			// Once per press, never a key held down, which would go on to remove
+			// every scene the repeats find focused.
+			let delete = ui.input_mut(|input| {
+				let pressed = input.events.iter().any(|event| {
+					matches!(
+						event,
+						egui::Event::Key {
+							key: egui::Key::Delete | egui::Key::Backspace,
+							pressed: true,
+							repeat: false,
+							modifiers,
+							..
+						} if modifiers.is_none()
+					)
+				});
+				input.consume_key(egui::Modifiers::NONE, egui::Key::Delete);
+				input.consume_key(egui::Modifiers::NONE, egui::Key::Backspace);
+				pressed
+			});
+			if delete && !modal {
+				action = Some(PadAction::Remove(pad.name.clone()));
+			}
+		}
+		action
+	}
+
+	/// The sheet asking whether to remove the scene `removing_pad` names, while
+	/// it names one: the scene, once the streamer says so.
+	fn remove_sheet(&mut self, ctx: &egui::Context) -> Option<String> {
+		let name = self.removing_pad.clone()?;
+		let (live, last, on_air, leaving, sources) = {
+			let state = self.engine.state.lock().unwrap();
+			let collection = state.collection();
+			let sources = collection.scene(&name).map_or(0, |scene| {
+				scene
+					.items
+					.iter()
+					.map(|item| &item.source)
+					.collect::<BTreeSet<_>>()
+					.len()
+			});
+			let on_air = state.compositor.program_scene() == Some(name.as_str());
+			let leaving = !on_air && state.compositor.on_air().any(|on| on == name);
+			(
+				self.engine.on_air().live().is_some(),
+				collection.scenes.len() == 1,
+				on_air,
+				leaving,
+				sources,
+			)
+		};
+		let mut asked = None;
+		let title = format!("Remove scene {name}?");
+		let closed = kit::Sheet::new(egui::Id::new("remove scene"), &title).show(ctx, |ui| {
+			let mut says = Vec::new();
+			if live {
+				says.push("You are live.".to_string());
+			}
+			if last {
+				says.push("It is the show's last scene, so it stays, emptied.".to_string());
+			} else if on_air {
+				says.push("It is on air: the next scene that can go on air takes its place at once.".to_string());
+			} else if leaving {
+				says.push("It is leaving the program: the transition finishes on the scene it goes to.".to_string());
+			}
+			if sources > 1 {
+				says.push(format!("Its {sources} sources leave it."));
+			}
+			says.push("Undo brings it back.".to_string());
+			ui.label(says.join(" "));
+			ui.add_space(12.0);
+			ui.horizontal(|ui| {
+				if ui.button("Remove").clicked() {
+					asked = Some(name.clone());
+				}
+			});
+		});
+		if closed || asked.is_some() {
+			self.removing_pad = None;
+		}
+		asked
+	}
+
+	/// A pad's menu, from its right click or its ⋯ button, and what it chose.
+	fn pad_menu(&mut self, ui: &mut Ui, snapshot: &Snapshot, index: usize) -> Option<PadAction> {
+		let pad = &snapshot.scenes[index];
+		let on_air = snapshot.program.as_deref() == Some(pad.name.as_str());
+		let cued = snapshot.cued.as_ref().is_some_and(|cued| cued.name == pad.name);
+		let mut action = None;
+		let takeable = pad.refused.is_none() || on_air;
+		let take = ui.add_enabled(!on_air && pad.refused.is_none(), egui::Button::new("Take it on air"));
+		if take.clicked() {
+			action = Some(PadAction::Take(pad.name.clone()));
+		}
+		if snapshot.studio {
+			let cue = ui.add_enabled(!on_air && !cued && pad.refused.is_none(), egui::Button::new("Cue it"));
+			if cue.clicked() {
+				action = Some(PadAction::Cue(pad.name.clone()));
+			}
+		}
+		let edit = ui
+			.add_enabled(!on_air, egui::Button::new("Edit off air"))
+			.on_hover_text("Edit it without going on air")
+			.on_disabled_hover_text("On air; Studio edits it live");
+		if edit.clicked() {
+			action = Some(PadAction::Edit(pad.name.clone()));
+		}
+		let mut safe = snapshot.safe.as_deref() == Some(pad.name.as_str());
+		let toggle = ui
+			.add_enabled(takeable || safe, kit::Toggle::new(&mut safe).label("Safe scene"))
+			.on_hover_text(
+				"The scene the panic key cuts to, as it mutes every microphone and guest and hides the always-on-top layers",
+			);
+		if toggle.changed() {
+			action = Some(PadAction::Safe(pad.name.clone(), safe));
+		}
+		// Show-wide, as in Settings, Show, but where a scene goes on air.
+		ui.menu_button("Transition", |ui| {
+			let result = self.transition(ui, true);
+			self.check(result);
+		});
+		if ui.button("Rename").clicked() {
+			action = Some(PadAction::Rename(pad.name.clone()));
+		}
+		let duplicate = ui
+			.button("Duplicate")
+			.on_hover_text("A new scene showing the same sources: editing a layer's look edits both");
+		if duplicate.clicked() {
+			action = Some(PadAction::Duplicate {
+				name: pad.name.clone(),
+				independent: false,
+			});
+		}
+		let own = ui
+			.button("Duplicate with its own copies")
+			.on_hover_text("A new scene whose layers each show a copy of their own, to edit apart");
+		if own.clicked() {
+			action = Some(PadAction::Duplicate {
+				name: pad.name.clone(),
+				independent: true,
+			});
+		}
+		let count = snapshot.scenes.len();
+		if ui.add_enabled(index > 0, egui::Button::new("Move left")).clicked() {
+			action = Some(PadAction::Move(pad.name.clone(), -1));
+		}
+		if ui
+			.add_enabled(index + 1 < count, egui::Button::new("Move right"))
+			.clicked()
+		{
+			action = Some(PadAction::Move(pad.name.clone(), 1));
+		}
+		let remove = ui
+			.button("Remove")
+			.on_hover_text("Delete or Backspace on a focused pad too");
+		if remove.clicked() {
+			action = Some(PadAction::Remove(pad.name.clone()));
+		}
+		if action.is_some() {
+			ui.close();
+		}
 		action
 	}
 

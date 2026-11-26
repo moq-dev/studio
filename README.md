@@ -228,8 +228,9 @@ The **strip** holds:
   [Studio mode](#off-air-and-studio-mode); clicking the scene already on air
   leaves nothing cued. A scene that cannot go on air, of another size or
   showing the program, has a dimmed pad that says why under the pointer.
-  Right-click a pad to take its scene, cue it in Studio mode, **Edit off
-  air**, mark it the safe scene, rename it, duplicate it, move it left or
+  Right-click a pad, or click the **⋯** that shows while the pointer is on
+  it, to take its scene, cue it in Studio mode, **Edit off air**, mark it the
+  safe scene, rename it, duplicate it, move it left or
   right, or remove it. **Duplicate** adds a scene after it showing the same
   sources, linked, so an edit to a source's look shows in both; **Duplicate
   with its own copies** gives each of its layers a copy of its source to edit
@@ -365,14 +366,21 @@ from layer to layer:
 Its **Animate** tab holds the layer's keyframes (see [Keyframes](#keyframes)).
 A scene's own settings are on its pad's menu: take or cue it, edit it off
 air, mark it **Safe**, pick the show's **Transition**, also in Settings, Show
-(see [Transitions](#transitions)), rename, duplicate, move, or remove it. With
+(see [Transitions](#transitions)), rename, duplicate, move, or remove it.
+**Remove** takes any scene, the one on air included: that one goes after the
+next scene that can go on air takes its place at once, or a new empty scene
+when none can. It asks first while you are live or when the scene holds more
+than one source, and otherwise removes at once; either way it is an edit, so
+undo brings it back. Removing the show's last scene empties it instead, so a
+show always has one scene, and its quick start. Tab to a pad and press Delete
+or Backspace to remove its scene the same way; with a pad focused, the keys
+leave the selected layer alone. With
 Published scenes or Smart layout on, the inspector with no layer selected
 shows the edited scene's size and **Publish** with the audio scene it carries
 (see [Published scenes](#published-scenes)), or its slots and their roles
-(see [Slots and roles](#slots-and-roles)). A scene on program, or still
-leaving it in a transition, cannot be removed, even by an undo, until program
-cuts away from it. In a narrow window, the inspector is a tab beside Layers
-and Add while it has anything to show.
+(see [Slots and roles](#slots-and-roles)). An undo never removes a scene on
+air, even one an edit added; cut away from it first. In a narrow window, the
+inspector is a tab beside Layers and Add while it has anything to show.
 
 ### Off air and Studio mode
 

@@ -152,19 +152,22 @@ impl Panels {
 	/// The page's keys, unless a field, a page, or a modal such as Settings
 	/// has the keyboard: A adds a layer, opening the rail, Escape leaves
 	/// cropping, then the selection, and Delete or Backspace removes the
-	/// selected layer unless the picture or the layer is locked.
+	/// selected layer unless the picture or the layer is locked, or a scene
+	/// pad has the keyboard's focus, which they remove instead.
 	fn build_keys(&mut self, ui: &Ui) {
 		let ctx = ui.ctx();
 		let modal = ctx.memory(|memory| memory.top_modal_layer()).is_some();
 		if modal || ctx.text_edit_focused() || self.interact.has_keyboard() || self.interacting {
 			return;
 		}
+		// A focused scene pad takes them to remove its scene instead.
+		let pad = std::mem::take(&mut self.pad_focused);
 		let (add, escape, delete, backspace) = ui.input_mut(|input| {
 			(
 				input.consume_key(egui::Modifiers::NONE, egui::Key::A),
 				input.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
-				input.consume_key(egui::Modifiers::NONE, egui::Key::Delete),
-				input.consume_key(egui::Modifiers::NONE, egui::Key::Backspace),
+				!pad && input.consume_key(egui::Modifiers::NONE, egui::Key::Delete),
+				!pad && input.consume_key(egui::Modifiers::NONE, egui::Key::Backspace),
 			)
 		});
 		if add {
