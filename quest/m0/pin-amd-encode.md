@@ -30,7 +30,3 @@ Vulkan encoder reading the canvas on the GPU, not the readback route.
 ## Waiting
 
 - moq-dev/moq: [Vulkan Video encode on AMD](https://github.com/moq-dev/moq/blob/main/quest/m3/vulkan-encode.md) lands on moq's `main`. Check that quest's PR has merged.
-
-## Required
-
-- [The dev shell runs the studio on a non-NixOS GPU](/quest/m0/dev-shell-gpu.md) - the Fedora desktop needs Nix Mesa's Vulkan driver to reach the encoder

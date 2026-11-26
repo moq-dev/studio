@@ -52,6 +52,9 @@ enum View {
 	/// Studio on a new show, as the first launch opens it: one empty scene,
 	/// with a camera and a screen to add.
 	FirstLaunch,
+	/// The first launch after a file no source shows was picked: its refusal
+	/// under the cards.
+	Refused,
 	/// Studio with its picture locked and the layers' rail closed.
 	Locked,
 	/// Studio with the options of the sound called this open from its gear.
@@ -316,6 +319,9 @@ views! {
 	/// A new show, as the first launch opens it: the quick start on the empty
 	/// picture, its cards naming the camera and screen they add.
 	first_launch: Still, on_show(View::FirstLaunch);
+	/// The first launch after the Media card's dialog picked a PDF: why it
+	/// cannot show, under the cards.
+	first_launch_refused: Still, on_show(View::Refused);
 	/// The Studio page: the picture, editable, with the layers' rail beside
 	/// it, and the slim strip of the pads, the panic key, and each sound's
 	/// volume, meter, mute, and gear.
@@ -2860,7 +2866,7 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		Open::Kit { .. } => unreachable!("drawn without an engine"),
 		Open::Studio { show, view, relay, .. } => {
 			let mut text = match view {
-				View::FirstLaunch => show::first(moq_scene::Canvas::default(), true)
+				View::FirstLaunch | View::Refused => show::first(moq_scene::Canvas::default(), true)
 					.unwrap()
 					.to_toml()
 					.unwrap(),
@@ -2891,6 +2897,8 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		_ => recent::Recent::default(),
 	};
 	let (mut harness, started, _) = window(app, gpu, runtime, size, recent);
+	// What a view picks stays until the window has read it.
+	let picks = tempfile::tempdir().unwrap();
 
 	let Open::Studio { view, .. } = open else {
 		unreachable!("drawn without an engine")
@@ -2906,6 +2914,12 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 	match view {
 		View::Page(page) => studio.turn(*page),
 		View::FirstLaunch => studio.seed_devices(first_devices()),
+		View::Refused => {
+			studio.seed_devices(first_devices());
+			let pdf = picks.path().join("Rider.pdf");
+			std::fs::write(&pdf, b"%PDF-1.7\n").unwrap();
+			studio.pick_file(pdf);
+		}
 		View::Locked => {
 			studio.lock(true);
 			studio.rail(false);

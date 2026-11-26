@@ -42,12 +42,12 @@ impl Panels {
 	/// editable, and either the stream is off air or the scene is open off
 	/// air, the quick start: four cards, each adding the scene's first layer,
 	/// and a word that anything dropped or pasted on the picture lands there
-	/// too.
-	pub(super) fn quick_start(&mut self, ui: &mut Ui, picture: Rect) {
+	/// too. Returns where the cards are, while they show.
+	pub(super) fn quick_start(&mut self, ui: &mut Ui, picture: Rect) -> Option<Rect> {
 		let engine = self.engine.clone();
 		let (layer, own) = {
 			let state = engine.state.lock().unwrap();
-			let Ok(layer) = self.scene(&state) else { return };
+			let Ok(layer) = self.scene(&state) else { return None };
 			let collection = state.collection();
 			let empty = |layer: &Layer| collection.items(layer).is_none_or(<[Item]>::is_empty);
 			// Never on the program on air or on its way there, where one click
@@ -55,7 +55,7 @@ impl Panels {
 			let live = self.engine.on_air() != crate::engine::OnAir::Off || self.controls.going();
 			let shown = !self.locked && (!live || self.off_air(&state).is_some());
 			if !shown || !empty(&layer) || !empty(&Layer::top()) {
-				return;
+				return None;
 			}
 			// Never the studio's own virtual cameras, which would feed the
 			// picture back into itself.
@@ -124,6 +124,7 @@ impl Panels {
 				_ => {}
 			}
 		}
+		Some(Rect::from_min_size(pos2(left, cards_top), vec2(row, card.y)))
 	}
 
 	/// Whether `card` can add anything now, the line under its name, and its
@@ -280,6 +281,7 @@ fn media_dialog(runtime: &tokio::runtime::Handle) -> Task<Option<std::path::Path
 	let dialog = Task::spawn(runtime, || async {
 		let picked = rfd::AsyncFileDialog::new()
 			.set_title("Add an image or video")
+			.add_filter("Images and videos", moq_scene::file::EXTENSIONS)
 			.pick_file()
 			.await;
 		picked.map(|file| file.path().to_path_buf())

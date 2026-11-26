@@ -5,6 +5,12 @@ use std::path::Path;
 
 use crate::{Error, Source};
 
+/// The file extensions of the pictures and videos [`source`] shows, for a file
+/// dialog to list: the PNG and JPEG stills it reads, and the video containers
+/// it reads. A file under another name may still show,
+/// since [`source`] reads the bytes, so this narrows a picker, not a drop.
+pub const EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "mp4", "m4v", "mkv", "webm", "ts", "flv"];
+
 /// The source that shows the file at `path`: a PNG or JPEG still, a video or
 /// sound file, or a `.cube` LUT. Reads only the first bytes, and an MP4's
 /// top-level box headers, so a drag can ask on every frame.
@@ -119,6 +125,24 @@ mod tests {
 		let path = dir.join(name);
 		std::fs::write(&path, bytes).unwrap();
 		path
+	}
+
+	/// The picker's stills are the ones [`source`] shows, and its names are
+	/// the lowercase ones a dialog matches.
+	#[test]
+	fn extensions_list_what_shows() {
+		for extension in EXTENSIONS {
+			assert_eq!(*extension, extension.to_lowercase());
+			if let Some(format) = image::ImageFormat::from_extension(extension) {
+				assert!(
+					matches!(format, image::ImageFormat::Png | image::ImageFormat::Jpeg),
+					"{extension}"
+				);
+			}
+		}
+		for still in ["png", "jpg", "jpeg"] {
+			assert!(EXTENSIONS.contains(&still));
+		}
 	}
 
 	/// Each kind is found by what the file holds, not its name, except a LUT,

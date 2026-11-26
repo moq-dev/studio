@@ -341,7 +341,10 @@ impl Panels {
 		if let Some(spot) = spot {
 			self.fail(spot, result);
 		}
-		self.quick_start(ui, response.rect);
+		let cards = self.quick_start(ui, response.rect);
+		if !self.locked {
+			self.dropped_fault(ui, response.rect, canvas, cards);
+		}
 		if let Some(cued) = snapshot.cued.as_ref().filter(|_| off_air.is_none()) {
 			self.next(ui, fx, cued, response.rect, Corner::away_from(selected));
 		}
