@@ -1,4 +1,4 @@
-//! The capture devices this machine has, for Studio's Add and the quick start.
+//! The capture devices this machine has, for Add, the palette, and the quick start.
 
 use moq_scene::Source;
 
@@ -7,6 +7,9 @@ use moq_scene::Source;
 pub struct Pick {
 	pub name: String,
 	pub source: Source,
+	/// Its picture's size, where the listing knows it, as it does a
+	/// display's or a window's, so Add places it at its shape.
+	pub size: Option<[u32; 2]>,
 }
 
 /// One listing of every kind of device, each of which can fail on its own.
@@ -16,18 +19,6 @@ pub struct Listing {
 	pub windows: Result<Vec<Pick>, String>,
 	/// Microphones and other inputs, plus system audio where it can be captured.
 	pub audio: Result<Vec<Pick>, String>,
-}
-
-impl Listing {
-	/// Each kind with its heading, in the order the Devices panel shows them.
-	pub fn kinds(&mut self) -> [(&'static str, &mut Result<Vec<Pick>, String>); 4] {
-		[
-			("Cameras", &mut self.cameras),
-			("Displays", &mut self.displays),
-			("Windows", &mut self.windows),
-			("Audio inputs", &mut self.audio),
-		]
-	}
 }
 
 /// List every kind of device, logging what each listing found.
@@ -70,14 +61,17 @@ async fn find() -> Listing {
 	let cameras = picks(cameras, |camera| Pick {
 		name: camera.name,
 		source: Source::Camera { id: Some(camera.id) },
+		size: None,
 	});
 	let displays = picks(moq_video::capture::displays().await, |display| Pick {
 		name: display.name,
 		source: Source::Display { id: Some(display.id) },
+		size: Some([display.width, display.height]),
 	});
 	let windows = picks(moq_video::capture::windows().await, |window| Pick {
 		name: format!("{} ({})", window.title, window.app),
 		source: Source::Window { id: window.id },
+		size: Some([window.width, window.height]),
 	});
 	#[cfg(all(target_os = "linux", feature = "pipewire"))]
 	let (displays, windows) = {
@@ -90,6 +84,7 @@ async fn find() -> Listing {
 	let mut audio = picks(moq_audio::capture::devices().await, |device| Pick {
 		name: format!("{} ({})", device.name, device.host),
 		source: Source::Microphone { id: Some(device.id) },
+		size: None,
 	});
 	if cfg!(target_os = "macos")
 		&& let Ok(audio) = &mut audio
@@ -97,6 +92,7 @@ async fn find() -> Listing {
 		audio.push(Pick {
 			name: "System audio".into(),
 			source: Source::SystemAudio,
+			size: None,
 		});
 	}
 
@@ -121,6 +117,7 @@ fn with_picker(listed: Result<Vec<Pick>, String>, picked: Source, wayland: bool)
 	let pick = Pick {
 		name: name.into(),
 		source: picked,
+		size: None,
 	};
 	let mut picks = match listed {
 		Ok(picks) => picks,

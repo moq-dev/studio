@@ -194,8 +194,7 @@ macOS the system's buttons and edges stay. It holds, from the left:
   undo or redo back to just after it.
 - While a mod adds a page, the pages: **STUDIO**, and **MIX** and **REVIEW**
   while their [mods](#mods) are on.
-- On Studio, **Layers**, which opens and closes the rail of layers and Add,
-  giving the picture its room, and **Editable**, which locks the picture
+- On Studio, **Layers**, which opens and closes the rail of layers, giving the picture its room, and **Editable**, which locks the picture
   against clicks and drags (reading **Locked**) so nothing on air moves by
   accident; the inspector, the layers' rows, and the keys still edit. Both
   are kept on this computer.
@@ -303,17 +302,49 @@ or send it backward, keep it always on top or move it into this scene,
 duplicate it, or remove it. With **Linked layers** on in Settings,
 [Mods](#mods), it also duplicates a layer as its own copy and makes one
 independent, and with Smart layout on, it puts one in a slot. **Add a layer**
-(A) turns to Add.
+(A) opens Add.
 
-**Add** lists what can be placed: what a drop or paste makes (see
-[Dropping and pasting](#dropping-and-pasting)), the kind a drag over the
-window holds lit; the sources no layer shows, no audio scene
-hears, and nothing reads, each with **Add**, to place it in the edited
-scene, or the bin, to remove it for good; this machine's cameras, displays,
-windows, and audio inputs; any source by hand; and, with a room, guests:
-invite one, show their join link as a QR code in a sheet over the window, see
-who joined, and take a guest out of every scene. A new source with a picture
-is placed in front of the edited scene, and selected.
+**Add** opens over the picture, titled with the scene it adds to, and lists
+this machine's devices by name each time it opens. Click any card to add it
+at once under its own name (numbered past one already taken), which closes
+Add with the new layer selected; undo or Delete takes it back. Drag a card
+onto the picture instead to place it where you let go. Escape, the close
+button, or a click beside it closes Add. Its tabs:
+
+- **Devices & Screens:** the sources no layer shows, no audio scene hears,
+  and nothing reads (right-click one to remove it for good), then the
+  cameras, displays, and windows. On a Wayland desktop, **Picked display**
+  and **Picked window** come first and open the desktop's own picker (see
+  [Picked displays and windows](#picked-displays-and-windows)). A kind that
+  cannot be listed, such as without a permission, says why, with **Try
+  again** to list it once fixed.
+- **Media & Web:** **Image or video file…** opens the system's file dialog,
+  and the file lands as a dropped one does (see
+  [Dropping and pasting](#dropping-and-pasting)); a web address adds the
+  page, in a build with `cef` (others say they cannot); **Text** adds a lower third to edit; **Color** adds the color beside
+  its caption; and **From the show** puts the program or another scene
+  inside this one, and with their mods on, the replay and a role.
+- **Audio:** each microphone, and on macOS the system's sound, with a level
+  meter so the one that moves when you talk is the one to pick. A sound has
+  no layer: it joins the audio scene on program.
+- **Guests:** with a room, invite one, show their join link as a QR code in a
+  sheet over the window, see who joined, and take a guest out of every
+  scene; a guest's picture no scene shows yet is a card to add.
+
+Where a new picture goes: the first fills the canvas; one added while
+nothing covers the canvas fills it behind the smaller layers already there;
+one added over a layer covering the canvas lands as a picture-in-picture,
+30% of its width, in the first corner clear of the others (bottom right,
+bottom left, top right, then top left), or bottom right if none is clear; a
+color goes behind everything; and
+a web page or overlay lands at its own size, or, if larger than the canvas,
+shrunk to fit and centered. With **Both at once** on, it is placed so in
+each picture, whichever is edited; where one would put it behind and the
+other in front, it goes in front as a picture-in-picture in both, in each
+picture's first clear corner. Either way its picture is cropped evenly to the
+shape it is given there, never squeezed, except a display or window the
+system's picker chooses, whose shape isn't known until it shows: it is left
+uncropped, and the portrait picture fits it whole.
 
 On the **picture**, click a layer to select it, drag it to move it, and drag
 its edges or corners to resize it (see [Placing layers](#placing-layers)). A
@@ -382,7 +413,7 @@ shows the edited scene's size and **Publish** with the audio scene it carries
 (see [Published scenes](#published-scenes)), or its slots and their roles
 (see [Slots and roles](#slots-and-roles)). An undo never removes a scene on
 air, even one an edit added; cut away from it first. In a narrow window, the
-inspector is a tab beside Layers and Add while it has anything to show.
+inspector is a tab beside Layers while it has anything to show.
 
 ### Off air and Studio mode
 
@@ -425,10 +456,9 @@ it. It lists:
   what GO LIVE does and **End stream** asks first, as clicking the clock
   does; the rest act at once, as their keys do.
 - Selecting each layer of the scene Studio edits, by its source's name.
-- Adding a camera, screen, window, or input: the first time, **Find cameras,
-  screens, windows, and inputs to add** lists them, then each is a row of its
-  own, added as a layer as the Add tab adds it. **Add a source** opens the
-  Add tab on any kind of source, to fill in by hand.
+- Adding a camera, screen, window, or input: opening the palette lists them,
+  each a row of its own once found, added as Add adds it. **Add a source**
+  opens Add.
 - The pages, each Settings pane, and each setting by its name, such as
   **Frame rate** or **Room key**, which opens its pane at that setting.
 - Undo and redo, naming the edit, the multiview, the stream's health in
@@ -655,11 +685,11 @@ broadcast of one scene share one picture.
 
 A **scene source** draws another scene as one picture, which a layer places,
 scales, crops, filters, and blends like any other: a lower third built once
-and shown in every scene, or a whole layout shrunk into a corner. Add one in
-Studio's Add as kind **Scene**, picking the scene it draws, or
-**Program**, which shows whatever is on air, a transition under way included,
-on the same frame, such as for a portrait scene that follows the program,
-cropped.
+and shown in every scene, or a whole layout shrunk into a corner. Add one
+from Add's **Media & Web** tab, under **From the show**: a card per other
+scene, or **Program**, which shows whatever is on air, a transition under way
+included, on the same frame, such as for a portrait scene that follows the
+program, cropped.
 
 A nested scene is drawn at its own size, transparent where it draws
 nothing, once per frame however many layers show it, and only while something
@@ -771,8 +801,7 @@ half the canvas, in front of the edited scene, and selected. A sound alone
 has no picture, so it is only sent to the audio scene on program, as anything
 with sound is. A `.cube` file grades the layer it is dropped on, in place of
 any grade it had. While the drag is over the window, the picture outlines
-where the layer will land and names what it will become, and Add lights that
-kind. A file dropped on an image or media layer of its own kind asks whether
+where the layer will land and names what it will become. A file dropped on an image or media layer of its own kind asks whether
 to replace that layer's file, which every layer showing its source shows, or
 add a layer. Dropped anywhere else in the window, or on another page, it lands
 in the middle of the edited scene.
@@ -857,9 +886,10 @@ cloned or published; its layers take their own.
 
 The scene inspector's **Slots** section picks the arrangement, lists the
 slots with the role or source in each and what fills each role, and adds a
-**Main slot** or **Camera slot**, making the role if the show has none. Add, under
-**Not in any scene**, puts a guest into the scene's next tile when it has
-slots, and any source it adds there is heard on the stream.
+**Main slot** or **Camera slot**, making the role if the show has none. Add's
+**Guests** tab, under **Waiting for a scene**, puts a guest into the scene's
+next tile when it has slots, and any source it adds there is heard on the
+stream.
 
 **Appear on their own**, in Settings, Guests, has a guest whose camera comes
 online take the next tile of the scene on program, and be heard on program,
@@ -1126,7 +1156,7 @@ An overlay's animation starts when the overlay does: when the studio opens
 it, and again whenever it is edited. It also starts over each time a scene
 showing it goes on program, as a layer's keyframes do, so a lower third plays
 its entrance at every cut.
-Set `restart = false` (**Restart on program**, off, in the add form) for one
+Set `restart = false` on the overlay in the scene file for one
 that runs on across cuts, such as a clock or a ticker. One that program does
 not show costs nothing until it is shown again, where its animation has
 carried on unless it restarts.
@@ -1180,11 +1210,9 @@ On Linux with the `pipewire` feature, a `picked_display` or `picked_window`
 source opens the desktop's screen-sharing picker (xdg-desktop-portal) the
 first time it opens, and shows whichever display or window you choose there.
 It is the way to share a screen or window on a Wayland desktop, where the
-studio cannot list them itself. Studio's Add, among this machine's devices,
-offers them as **Picked display** and **Picked window**, first on a Wayland
-desktop, where the quick start's Screen adds **Picked display**, and Add's
-form for any source as **Display (system picker)** and **Window (system
-picker)**.
+studio cannot list them itself. Add offers them among this machine's
+screens and windows as **Picked display** and **Picked window**, first on a
+Wayland desktop, where the quick start's Screen adds **Picked display**.
 
 The scene file records only that the source is picked, not what you picked,
 so it stays portable. What you picked is the portal's grant, kept per machine
@@ -2358,7 +2386,7 @@ answer:
   '/studio/page="Mix"'`, failing after `--timeout` (10s by default).
 - `quit` closes the studio, as its Close button does.
 
-A target is a widget's name as `snapshot` lists it, such as `"Add source"`
+A target is a widget's name as `snapshot` lists it, such as `"Add a layer"`
 or `"tone fader"`; `contains:<text>` for a name holding the text; `id:<n>`
 for a node ID from the same layout; or `at:<x>,<y>` for a point in logical
 pixels. A click that matches no widget, several, or a disabled one fails and
@@ -2369,10 +2397,9 @@ For example:
 
 ```bash
 moq-studio --headless --control studio.sock show.toml &
-moq-studio ctl --socket studio.sock click Build
-moq-studio ctl --socket studio.sock click Add
+moq-studio ctl --socket studio.sock click "Add a layer"
 moq-studio ctl --socket studio.sock wait --settled
-moq-studio ctl --socket studio.sock screenshot build.png
+moq-studio ctl --socket studio.sock screenshot add.png
 moq-studio ctl --socket studio.sock quit
 ```
 

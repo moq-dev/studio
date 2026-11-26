@@ -15,7 +15,3 @@ The behavior is today's (`rs/moq-studio/src/guests.rs`): only the place
 changes. A guest's sound still joins no audio scene until placed, so the card
 says "not heard yet" until it is sent to the stream's mix, with the button
 that does it.
-
-## Required
-
-- [Adding a source in one click](/quest/m0/ux/add.md) - the page and the cards

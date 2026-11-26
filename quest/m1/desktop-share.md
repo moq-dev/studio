@@ -31,4 +31,3 @@ windows on two monitors.
 ## Required
 
 - [See and crop what is shared, on the desktop itself](/quest/m1/desktop-frame.md) - Build, and the overlay the buttons are drawn on
-- [Adding a source in one click](/quest/m0/ux/add.md) - where a new layer is placed

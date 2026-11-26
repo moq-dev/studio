@@ -124,7 +124,10 @@ reference mock-ups live in [`mock/overhaul.html`](/quest/m0/ux/mock/overhaul.htm
   `Delete`/`Backspace`, and tucks advanced geometry, crop %, blend, and filters
   under a collapsed `More` section (rejected: keeping all layer fields visible
   in accordions; canvas-only editing with no inspector; two-click select then
-  Add). See [Adding a source](/quest/m0/ux/add.md); the inspector is done in
+  Add). Add is done in
+  [moq-dev/studio#262](https://github.com/moq-dev/studio/pull/262), with
+  pictures left to [Add shows pictures](/quest/m0/ux/add-pictures.md); the
+  inspector is done in
   [moq-dev/studio#256](https://github.com/moq-dev/studio/pull/256).
 - **Audio & bottom dock:** ✅ horizontal volume sliders, live meters, mute, and
   per-source options popovers (headphones monitor, delay, pan, filters) inline

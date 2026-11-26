@@ -18,10 +18,42 @@ const LIST: f32 = 420.0;
 
 /// The palette, while open: what is typed, and the row the arrows picked
 /// among those it finds.
-#[derive(Default)]
 pub(super) struct Palette {
 	query: String,
-	picked: usize,
+	/// The row Enter runs, if any: none once the picked row is gone, such as
+	/// a camera unplugged, until the arrows, the pointer, or typing pick one.
+	picked: Option<usize>,
+	/// The picked row's [`Row::id`], which keeps it picked as rows found
+	/// since, such as devices, move it.
+	picked_row: Option<String>,
+}
+
+impl Palette {
+	/// Follow the picked row to where it is in `rows`, or pick none if it is
+	/// gone, then move by the arrows pressed.
+	fn repick(&mut self, rows: &[Row], up: bool, down: bool) {
+		if let Some(picked) = &self.picked_row {
+			self.picked = rows.iter().position(|row| row.id() == *picked);
+		}
+		let last = rows.len().saturating_sub(1);
+		self.picked = match (self.picked, up, down) {
+			(Some(picked), true, false) => Some(picked.saturating_sub(1)),
+			(Some(picked), false, true) => Some((picked + 1).min(last)),
+			(None, true, false) | (None, false, true) => Some(0),
+			(picked, _, _) => picked.map(|picked| picked.min(last)),
+		};
+		self.picked_row = self.picked.and_then(|picked| rows.get(picked)).map(Row::id);
+	}
+}
+
+impl Default for Palette {
+	fn default() -> Self {
+		Self {
+			query: String::new(),
+			picked: Some(0),
+			picked_row: None,
+		}
+	}
 }
 
 /// What a row does.
@@ -32,15 +64,13 @@ enum Command {
 	Page(Page),
 	/// Open Settings at a pane, at the row named, if any.
 	Setting(Setting, Option<&'static str>),
-	/// Select a layer on Studio.
-	Layer(Picked),
+	/// Select a layer on Studio, the item of this id there.
+	Layer(Picked, moq_scene::Id),
 	/// Add a device the last listing found as a layer of the scene Studio
 	/// edits.
 	Device(Pick),
-	/// List this machine's devices, which then show as rows of their own.
-	Devices,
-	/// Open Studio's Add tab on a kind of source.
-	Kind(Kind),
+	/// Open Add over Studio's picture.
+	Add,
 	Undo,
 	Redo,
 	Multiview,
@@ -63,6 +93,18 @@ struct Row {
 }
 
 impl Row {
+	/// What tells it from every other row as the rows change: the device it
+	/// adds, as the system knows it, since two of one model share a name, the
+	/// layer it selects, since a duplicate shares its source, or else its
+	/// name and group.
+	fn id(&self) -> String {
+		match &self.command {
+			Command::Device(pick) => format!("{:?}", pick.source),
+			Command::Layer(_, id) => format!("{id:?}"),
+			_ => format!("{} {}", self.name, self.group),
+		}
+	}
+
 	fn new(command: Command, name: impl Into<String>, group: impl Into<String>, words: &[&'static str]) -> Self {
 		Self {
 			command,
@@ -136,6 +178,8 @@ impl Panels {
 			self.stop_interacting(&engine.state.lock().unwrap());
 		}
 		self.palette = Some(Palette::default());
+		// What can be added is listed afresh, so a camera plugged in since shows.
+		self.devices.renew(&self.runtime);
 	}
 
 	/// Everything the palette offers now, in the order it lists them before
@@ -186,7 +230,7 @@ impl Panels {
 					};
 					let name = format!("Select `{}`", item.source);
 					rows.push(Row::new(
-						Command::Layer(picked),
+						Command::Layer(picked, item.id),
 						name,
 						group,
 						&["layer", "source", "inspect"],
@@ -195,53 +239,49 @@ impl Panels {
 			}
 		}
 
-		// What can be added: each device the last listing found, or else a
-		// listing, and each kind of source by hand.
+		// What can be added: each device listed as the palette opened, once
+		// found, not the listing before it, whose display a monitor unplugged
+		// since can make another; and Add itself.
 		let devices = &["device", "source", "layer"];
-		match &self.devices.listing {
-			Some(listing) => {
-				let kinds = [
-					("Cameras", &listing.cameras),
-					("Displays", &listing.displays),
-					("Windows", &listing.windows),
-					("Audio inputs", &listing.audio),
-				];
-				// Never the studio's own virtual cameras, which would feed what
-				// one shows back into itself.
-				let own: Vec<String> = state.cameras().map(|camera| camera.id).collect();
-				let own = |pick: &&Pick| matches!(&pick.source, Source::Camera { id: Some(id) } if own.contains(id));
-				for (kind, picks) in kinds {
-					for pick in picks.iter().flatten().filter(|pick| !own(pick)) {
-						let name = format!("Add `{}`", pick.name);
-						rows.push(Row::new(
-							Command::Device(pick.clone()),
-							name,
-							format!("Add, {kind}"),
-							devices,
-						));
-					}
+		if let Some(listing) = self.devices.listing.as_ref().filter(|_| self.devices.pending.is_none()) {
+			let kinds = [
+				("Cameras", &listing.cameras),
+				("Displays", &listing.displays),
+				("Windows", &listing.windows),
+				("Audio inputs", &listing.audio),
+			];
+			// Never the studio's own virtual cameras, which would feed what
+			// one shows back into itself.
+			let own: Vec<String> = state.cameras().map(|camera| camera.id).collect();
+			let own = |pick: &&Pick| matches!(&pick.source, Source::Camera { id: Some(id) } if own.contains(id));
+			for (kind, picks) in kinds {
+				for pick in picks.iter().flatten().filter(|pick| !own(pick)) {
+					let name = format!("Add `{}`", pick.name);
+					rows.push(Row::new(
+						Command::Device(pick.clone()),
+						name,
+						format!("Add, {kind}"),
+						devices,
+					));
 				}
 			}
-			None => {
-				let mut row = Row::new(
-					Command::Devices,
-					"Find cameras, screens, windows, and inputs to add",
-					"Add",
-					&["device", "camera", "display", "screen", "window", "microphone", "list"],
-				);
-				if self.devices.pending.is_some() {
-					row.refused = Some("listing them now".into());
-				}
-				rows.push(row);
-			}
 		}
-		let picker =
-			|kind: &Kind| cfg!(target_os = "linux") || !matches!(kind, Kind::PickedDisplay | Kind::PickedWindow);
-		let offered = |kind: &Kind| on(kind.needs());
-		for kind in Kind::ALL.into_iter().filter(picker).filter(offered) {
-			let name = format!("Add a source: {}", kind.label());
-			rows.push(Row::new(Command::Kind(kind), name, "Add", &["new", "layer", "by hand"]));
-		}
+		rows.push(Row::new(
+			Command::Add,
+			"Add a source",
+			"Add",
+			&[
+				"new",
+				"layer",
+				"camera",
+				"screen",
+				"window",
+				"microphone",
+				"file",
+				"web",
+				"guest",
+			],
+		));
 
 		for page in Page::ALL.into_iter().filter(|page| on(page.needs())) {
 			rows.push(Row::new(
@@ -318,8 +358,11 @@ impl Panels {
 	/// arrows pick a row, Enter or a click runs it, and Escape closes.
 	pub(super) fn palette(&mut self, ctx: &egui::Context) {
 		let Some(mut palette) = self.palette.take() else { return };
-		// A listing asked for from here arrives on any page.
-		self.devices.poll();
+		// The listing asked for as it opened arrives on any page.
+		self.devices.poll(&self.runtime);
+		if self.devices.pending.is_some() {
+			ctx.request_repaint_after(Duration::from_millis(100));
+		}
 		let all = self.palette_rows(ctx);
 		// Taken before the search box sees them, which would move its cursor
 		// or lose focus on them.
@@ -362,19 +405,15 @@ impl Panels {
 					let field = ui.add(field);
 					field.request_focus();
 					if field.changed() {
-						palette.picked = 0;
+						palette.picked = Some(0);
+						palette.picked_row = None;
 					}
 				});
 				// Found from what the box holds after this frame's typing, so
 				// Enter pressed with it runs what was typed, not what was before.
 				let rows = found(all, &palette.query);
-				let last = rows.len().saturating_sub(1);
-				palette.picked = match (up, down) {
-					(true, false) => palette.picked.saturating_sub(1),
-					(false, true) => (palette.picked + 1).min(last),
-					_ => palette.picked.min(last),
-				};
-				let mut run = enter.then_some(palette.picked);
+				palette.repick(&rows, up, down);
+				let mut run = palette.picked.filter(|_| enter);
 				ui.add_space(10.0);
 				let y = ui.cursor().top();
 				ui.painter()
@@ -393,12 +432,14 @@ impl Panels {
 							ui.add_space(10.0);
 						}
 						for (index, row) in rows.iter().enumerate() {
-							let response = row_ui(ui, row, index == palette.picked);
-							if (up || down) && index == palette.picked {
+							let picked = palette.picked == Some(index);
+							let response = row_ui(ui, row, picked);
+							if (up || down) && picked {
 								response.scroll_to_me(None);
 							}
 							if response.hovered() && ui.input(|input| input.pointer.delta() != egui::Vec2::ZERO) {
-								palette.picked = index;
+								palette.picked = Some(index);
+								palette.picked_row = Some(row.id());
 							}
 							if response.clicked() {
 								run = Some(index);
@@ -420,8 +461,7 @@ impl Panels {
 				// Shown on its row already; the palette stays open on it.
 				Some(_) => {}
 				None => {
-					// A listing keeps the palette open, to show what it finds.
-					open = matches!(row.command, Command::Devices);
+					open = false;
 					self.run(ctx, row.command);
 				}
 			}
@@ -439,9 +479,9 @@ impl Panels {
 			Command::Act(Action::GoLive)
 				| Command::Act(Action::EndStream)
 				| Command::Page(_)
-				| Command::Layer(_)
+				| Command::Layer(..)
 				| Command::Device(_)
-				| Command::Kind(_)
+				| Command::Add
 				| Command::Health
 				| Command::Graph
 		) {
@@ -461,11 +501,21 @@ impl Panels {
 					super::settings::seek(ctx, row);
 				}
 			}
-			Command::Layer(picked) => {
+			Command::Layer(picked, id) => {
+				// By its id, as a guest taking a tile since the rows were
+				// found may have moved its index.
+				let state = self.engine.state.lock().unwrap();
+				let items = state.collection().items(&picked.layer).unwrap_or_default();
+				let index = items.iter().position(|item| item.id == id);
+				drop(state);
+				let Some(index) = index else {
+					self.report(Err(anyhow::anyhow!("that layer is gone")));
+					return;
+				};
 				self.page = Page::Studio;
 				self.side = Side::Layers;
 				self.rail = true;
-				self.select(Some(picked));
+				self.select(Some(Picked { index, ..picked }));
 			}
 			Command::Device(pick) => {
 				self.page = Page::Studio;
@@ -473,7 +523,13 @@ impl Panels {
 				// Two cameras of the same model share a name; number the later ones.
 				let name = state.collection().unused_name(&pick.name);
 				let layer = self.scene(&state).ok();
-				let result = add(&mut state, layer, name, pick.source, None);
+				let new = New {
+					name,
+					source: pick.source,
+					layer,
+					size: pick.size,
+				};
+				let result = add(&mut state, new);
 				drop(state);
 				self.added(result);
 				if let Some(fault) = self.fault(&Spot::Add) {
@@ -481,15 +537,9 @@ impl Panels {
 					self.say(Err(fault));
 				}
 			}
-			Command::Devices => {
-				let refreshed = self.devices.refresh(&self.runtime).context("cannot list devices");
-				self.check(refreshed);
-			}
-			Command::Kind(kind) => {
+			Command::Add => {
 				self.page = Page::Studio;
-				self.side = Side::Add;
-				self.rail = true;
-				self.add.kind = kind;
+				self.open_add();
 			}
 			Command::Undo => self.undo(),
 			Command::Redo => self.redo(),
@@ -505,7 +555,10 @@ impl Panels {
 fn row_ui(ui: &mut Ui, row: &Row, picked: bool) -> egui::Response {
 	let height = if row.refused.is_some() { 48.0 } else { 34.0 };
 	let width = ui.available_width();
-	let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+	let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+	// Keyed by the row, not its place, so a row found mid-click cannot take
+	// the click.
+	let response = ui.interact(rect, ui.id().with(("row", row.id())), Sense::click());
 	let enabled = row.refused.is_none();
 	response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, &row.name));
 	if !ui.is_rect_visible(rect) {
@@ -563,6 +616,55 @@ fn row_ui(ui: &mut Ui, row: &Row, picked: bool) -> egui::Response {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn the_pick_follows_its_row_and_is_lost_with_it() {
+		let device = |name: &str, id: &str| {
+			let pick = Pick {
+				name: name.into(),
+				source: Source::Camera { id: Some(id.into()) },
+				size: None,
+			};
+			Row::new(Command::Device(pick), name, "Devices", &[])
+		};
+		let add = || Row::new(Command::Add, "Add a source", "Studio", &[]);
+		let mut palette = Palette::default();
+		palette.repick(&[add()], false, false);
+		assert_eq!(palette.picked, Some(0));
+		// Two cameras of one model, listed above it as they arrive.
+		let listed = [device("Cam", "a"), device("Cam", "b"), add()];
+		palette.repick(&listed, false, false);
+		assert_eq!(palette.picked, Some(2), "still Add a source");
+		palette.repick(&listed, true, false);
+		palette.repick(&listed, true, false);
+		assert_eq!(palette.picked, Some(0));
+		// The first camera unplugged: its twin does not take its place.
+		let unplugged = [device("Cam", "b"), add()];
+		palette.repick(&unplugged, false, false);
+		assert_eq!(palette.picked, None, "Enter runs nothing until a pick");
+		palette.repick(&unplugged, false, true);
+		assert_eq!(palette.picked, Some(0));
+
+		// A duplicated layer shares its source's name; its row is its own.
+		let layer = |index: usize| {
+			let picked = Picked {
+				layer: Layer::scene("Main"),
+				index,
+			};
+			Row::new(
+				Command::Layer(picked, moq_scene::Id::fresh()),
+				"Select `cam`",
+				"Layers",
+				&[],
+			)
+		};
+		let layers = [layer(1), layer(0)];
+		palette.repick(&layers, false, true);
+		palette.repick(&layers, false, true);
+		assert_eq!(palette.picked, Some(1));
+		palette.repick(&layers, false, false);
+		assert_eq!(palette.picked, Some(1), "still the second, not the first of that name");
+	}
 
 	fn names(rows: Vec<Row>, query: &str) -> Vec<String> {
 		found(rows, query).into_iter().map(|row| row.name).collect()

@@ -37,7 +37,3 @@ data type, on every backend including Wayland.
   release's `egui-winit` dependency on `winit`. A 0.30 backport of Wayland
   drops ([rust-windowing/winit#4729](https://github.com/rust-windowing/winit/pull/4729))
   would bring Wayland drops alone, landing at the scene's center, sooner.
-
-## Related
-
-- [Adding a source in one click](/quest/m0/ux/add.md) - its cards land where they are dropped, inside the window

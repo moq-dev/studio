@@ -15,7 +15,7 @@ const GAP: f32 = 16.0;
 const HEAD: f32 = 120.0;
 
 /// What a text overlay starts as: a lower third to edit in the inspector.
-const TEXT: &str = "<div style=\"position: absolute; left: 64px; bottom: 64px; padding: 16px 28px; \
+pub(super) const TEXT: &str = "<div style=\"position: absolute; left: 64px; bottom: 64px; padding: 16px 28px; \
 	border-radius: 12px; background: rgba(0, 0, 0, 0.6); color: white; \
 	font: 600 48px sans-serif\">Your text</div>";
 
@@ -23,7 +23,7 @@ const TEXT: &str = "<div style=\"position: absolute; left: 64px; bottom: 64px; p
 #[derive(Default)]
 pub(super) struct QuickStart {
 	/// The system's file dialog for a media file, while open.
-	dialog: Option<Task<Option<std::path::PathBuf>>>,
+	pub(super) dialog: Option<Task<Option<std::path::PathBuf>>>,
 	/// The web address typed so far.
 	url: String,
 }
@@ -62,19 +62,8 @@ impl Panels {
 			let own: Vec<String> = state.cameras().map(|camera| camera.id).collect();
 			(layer, own)
 		};
-		self.devices.poll();
-		if self.devices.listing.is_none()
-			&& self.devices.pending.is_none()
-			&& let Err(err) = self.devices.refresh(&self.runtime)
-		{
-			let failed = || Err(format!("cannot list devices: {err}"));
-			self.devices.listing = Some(Listing {
-				cameras: failed(),
-				displays: failed(),
-				windows: failed(),
-				audio: failed(),
-			});
-		}
+		self.devices.poll(&self.runtime);
+		self.devices.list(&self.runtime);
 		if self.devices.pending.is_some() {
 			ui.ctx().request_repaint_after(Duration::from_millis(100));
 		}
@@ -173,15 +162,21 @@ impl Panels {
 			Card::Web => return,
 		};
 		let Some(pick) = pick else { return };
-		self.quick_add_source(layer, &pick.name, pick.source);
+		self.quick_add_source(layer, pick);
 	}
 
-	/// Add `source` under `name`, numbered past any source called that, as a
+	/// Add `pick` under its name, numbered past any source called that, as a
 	/// layer of `layer`, and select it.
-	fn quick_add_source(&mut self, layer: &Layer, name: &str, source: Source) {
+	fn quick_add_source(&mut self, layer: &Layer, pick: Pick) {
 		let mut state = self.engine.state.lock().unwrap();
-		let name = state.collection().unused_name(name);
-		let result = add(&mut state, Some(layer.clone()), name, source, None);
+		let name = state.collection().unused_name(&pick.name);
+		let new = New {
+			name,
+			source: pick.source,
+			layer: Some(layer.clone()),
+			size: pick.size,
+		};
+		let result = add(&mut state, new);
 		drop(state);
 		match result {
 			Ok(name) => self.added(Ok(name)),
@@ -229,13 +224,19 @@ impl Panels {
 					let collection = state.collection();
 					collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas)
 				};
+				let (width, height) = moq_scene::browser::page_size(canvas);
 				let text = Source::Overlay {
 					html: TEXT.into(),
-					width: canvas.width,
-					height: canvas.height,
+					width,
+					height,
 					restart: true,
 				};
-				self.quick_add_source(layer, "Text", text);
+				let text = Pick {
+					name: "Text".into(),
+					source: text,
+					size: None,
+				};
+				self.quick_add_source(layer, text);
 			}
 			None => {}
 		}
@@ -266,18 +267,19 @@ fn first<'a>(devices: &'a [Pick], own: &[String]) -> Option<&'a Pick> {
 /// The display the Screen card adds: the first listed, or on macOS with
 /// capture, the main display when none is, since listing them needs the
 /// Screen Recording access that only opening one asks for.
-fn display(displays: &Result<Vec<Pick>, String>) -> Option<Pick> {
+pub(super) fn display(displays: &Result<Vec<Pick>, String>) -> Option<Pick> {
 	let listed = displays.as_ref().ok().and_then(|displays| displays.first()).cloned();
 	listed.or_else(|| {
 		cfg!(all(target_os = "macos", feature = "capture")).then(|| Pick {
 			name: "Display".into(),
 			source: Source::Display { id: None },
+			size: None,
 		})
 	})
 }
 
 /// The system's dialog for an image or video file.
-fn media_dialog(runtime: &tokio::runtime::Handle) -> Task<Option<std::path::PathBuf>> {
+pub(super) fn media_dialog(runtime: &tokio::runtime::Handle) -> Task<Option<std::path::PathBuf>> {
 	let dialog = Task::spawn(runtime, || async {
 		let picked = rfd::AsyncFileDialog::new()
 			.set_title("Add an image or video")

@@ -26,5 +26,4 @@ Human check: real games, a restart mid-stream, and alt-tabbing fast.
 
 ## Required
 
-- [Adding a source in one click](/quest/m0/ux/add.md) - the card that adds it
 - [moq-video's foreground app is pinned](/quest/m1/pin-capture-foreground.md) - which app and window are in front
