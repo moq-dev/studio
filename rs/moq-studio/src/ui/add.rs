@@ -889,7 +889,7 @@ impl Panels {
 /// the canvas, behind any smaller layers, one over a layer already covering
 /// it lands as a picture-in-picture in the first corner clear of the
 /// others, a color goes behind everything, and a page or overlay lands at
-/// its own size.
+/// its own size, shrunk to fit the canvas and centered if larger.
 pub(super) fn place(
 	collection: &Collection,
 	items: &[Item],
@@ -937,15 +937,25 @@ pub(super) fn place(
 				Some(Source::Overlay { .. })
 			)
 	};
-	let covers = |rect: &moq_scene::Rect| {
-		let x = (rect.x + rect.width).min(width) - rect.x.max(0.0);
-		let y = (rect.y + rect.height).min(height) - rect.y.max(0.0);
-		x.max(0.0) * y.max(0.0) >= COVERS * width * height
-	};
-	if !items.iter().filter(opaque).any(|item| covers(&item.rect)) {
+	if !items.iter().filter(opaque).any(|item| covers(canvas, &item.rect)) {
 		// Behind what is there already, which it would hide.
 		return (0, fill);
 	}
+	(front, corner(items, canvas))
+}
+
+/// Whether `rect` covers nearly all of `canvas`.
+fn covers(canvas: Canvas, rect: &moq_scene::Rect) -> bool {
+	let (width, height) = (canvas.width as f32, canvas.height as f32);
+	let x = (rect.x + rect.width).min(width) - rect.x.max(0.0);
+	let y = (rect.y + rect.height).min(height) - rect.y.max(0.0);
+	x.max(0.0) * y.max(0.0) >= COVERS * width * height
+}
+
+/// A picture-in-picture on `canvas` in the first corner clear of `items`
+/// that don't cover it, the bottom right first.
+fn corner(items: &[Item], canvas: Canvas) -> moq_scene::Rect {
+	let (width, height) = (canvas.width as f32, canvas.height as f32);
 	let w = (width * PIP).round();
 	let h = (w * height / width).round();
 	let margin = (width * MARGIN).round();
@@ -954,7 +964,7 @@ pub(super) fn place(
 	let corners = [(right, bottom), (left, bottom), (right, top), (left, top)];
 	let others: Vec<&moq_scene::Rect> = items
 		.iter()
-		.filter(|item| item.visible && !covers(&item.rect))
+		.filter(|item| item.visible && !covers(canvas, &item.rect))
 		.map(|item| &item.rect)
 		.collect();
 	let overlaps = |a: &moq_scene::Rect, b: &moq_scene::Rect| {
@@ -966,34 +976,57 @@ pub(super) fn place(
 		width: w,
 		height: h,
 	};
-	let rect = corners
+	corners
 		.into_iter()
 		.map(pip)
 		.find(|rect| others.iter().all(|other| !overlaps(rect, other)))
-		.unwrap_or_else(|| pip(corners[0]));
-	(front, rect)
+		.unwrap_or_else(|| pip(corners[0]))
 }
 
 /// Where `source`, added as `name` to `layer` while `format`'s picture is
 /// edited, goes by [`place`]: among the layers as each picture draws them,
 /// in the landscape picture and, while editing the portrait one of a layer
-/// drawn in both, in that one too, at the index the edited picture's says.
+/// drawn in both, in that one too, as [`both`] says.
 pub(super) fn put(state: &State, layer: &Layer, format: Format, name: &str, source: &Source) -> (usize, Item) {
 	let collection = state.collection();
 	let canvas = collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas);
-	let shown = super::slots::placed(state, layer, Format::Landscape);
-	let (mut index, rect) = place(collection, &shown, canvas, source, None);
+	let landscape = super::slots::placed(state, layer, Format::Landscape);
+	let portrait = (collection.format_of(layer, format) == Format::Portrait)
+		.then(|| super::slots::placed(state, layer, Format::Portrait));
+	both(collection, (&landscape, canvas), portrait.as_deref(), name, source)
+}
+
+/// [`place`] in the landscape picture, `landscape`'s layers on its canvas,
+/// and in the portrait one too given its layers: where the two agree on
+/// the order, each picture's place; where one would put it behind and the
+/// other in front, in front as a picture-in-picture in both, so it hides
+/// nothing in either.
+fn both(
+	collection: &Collection,
+	(landscape, canvas): (&[Item], Canvas),
+	portrait: Option<&[Item]>,
+	name: &str,
+	source: &Source,
+) -> (usize, Item) {
+	let (index, rect) = place(collection, landscape, canvas, source, None);
 	let mut item = Item::new(name.to_string(), rect);
-	if collection.format_of(layer, format) == Format::Portrait {
-		let shown = super::slots::placed(state, layer, Format::Portrait);
-		let (at, rect) = place(collection, &shown, collection.canvas_of(Format::Portrait), source, None);
-		index = at;
-		item.portrait = Some(moq_scene::Placement {
-			rect,
-			crop: moq_scene::Crop::default(),
-		});
-	}
-	(index, item)
+	let Some(portrait) = portrait else {
+		return (index, item);
+	};
+	let turned = collection.canvas_of(Format::Portrait);
+	let (at, rect) = place(collection, portrait, turned, source, None);
+	let rect = match at == index {
+		true => rect,
+		false => {
+			item.rect = corner(landscape, canvas);
+			corner(portrait, turned)
+		}
+	};
+	item.portrait = Some(moq_scene::Placement {
+		rect,
+		crop: moq_scene::Crop::default(),
+	});
+	(index.max(at), item)
 }
 
 /// A listed device as its card shows it.
@@ -1486,6 +1519,53 @@ name = "Main"
 		assert_eq!(placed(&screen, CAMERA, None), (1, [1296.0, 708.0, 576.0, 324.0]));
 		let taken = scene(&[("screen", FULL), ("logo", [1296.0, 708.0, 576.0, 324.0])]);
 		assert_eq!(placed(&taken, CAMERA, None), (2, [48.0, 708.0, 576.0, 324.0]));
+	}
+
+	/// Added in both pictures, it takes each one's place where they agree
+	/// on the order; where the landscape picture would put it behind a
+	/// graphic and the portrait one in front of a display shown only there,
+	/// it goes in front as a picture-in-picture in both, hiding neither.
+	#[test]
+	fn both_pictures_agree_or_it_goes_in_front() {
+		let collection = scene(&[]);
+		let rect = |[x, y, width, height]: [f32; 4]| moq_scene::Rect { x, y, width, height };
+		let shown = |source: &str, at: [f32; 4], visible: bool| Item {
+			visible,
+			..Item::new(source.to_string(), rect(at))
+		};
+		let tall = [0.0, 0.0, 1080.0, 1920.0];
+		let corner = [1296.0, 708.0, 576.0, 324.0];
+		let added = |landscape: &[Item], portrait: &[Item]| {
+			let (index, item) = both(
+				&collection,
+				(landscape, collection.canvas),
+				Some(portrait),
+				"cam",
+				&CAMERA,
+			);
+			let portrait = item.portrait.unwrap().rect;
+			(index, item.rect, portrait)
+		};
+
+		let landscape = [shown("screen", FULL, true)];
+		let portrait = [shown("screen", tall, true)];
+		assert_eq!(
+			added(&landscape, &portrait),
+			(1, rect(corner), rect([729.0, 1317.0, 324.0, 576.0])),
+			"over a screen in both, a corner in each"
+		);
+
+		let landscape = [shown("screen", FULL, false), shown("logo", corner, true)];
+		let portrait = [shown("screen", tall, true), shown("logo", corner, false)];
+		assert_eq!(
+			added(&landscape, &portrait),
+			(
+				2,
+				rect([48.0, 708.0, 576.0, 324.0]),
+				rect([729.0, 1317.0, 324.0, 576.0])
+			),
+			"in front in both, clear of the landscape graphic"
+		);
 	}
 
 	/// With nothing covering the canvas, a new picture fills it behind what

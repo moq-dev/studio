@@ -1869,7 +1869,8 @@ fn add_places_a_card_in_one_click() {
 	);
 
 	// Editing the portrait picture, where the landscape display covers
-	// little, a display goes behind there at the portrait picture's size.
+	// little, the pictures disagree: behind it there, in front of it in
+	// landscape. A display goes in front as a picture-in-picture in both.
 	let App::Studio(studio) = &mut harness.state_mut().app else {
 		panic!("still the studio")
 	};
@@ -1878,10 +1879,11 @@ fn add_places_a_card_in_one_click() {
 	harness.run_steps(2);
 	harness.get_by_label("Add Display 2").click();
 	harness.run_steps(2);
-	let second = items().into_iter().position(|item| item.source == "Display 2");
-	assert_eq!(second, Some(0), "behind, as the portrait picture draws them");
-	let portrait = items()[0].portrait.map(|placed| placed.rect);
-	assert_eq!(portrait, Some(moq_scene::Rect::fill(&canvas.turned())));
+	let added = items().last().cloned().expect("a layer");
+	assert_eq!(added.source, "Display 2", "in front");
+	assert_eq!(added.rect.width, (width * 0.3).round(), "a picture-in-picture");
+	let portrait = added.portrait.expect("placed in portrait too").rect;
+	assert_eq!(portrait.width, (canvas.turned().width as f32 * 0.3).round());
 	drop(harness);
 	quit(&engine, &runtime);
 }
