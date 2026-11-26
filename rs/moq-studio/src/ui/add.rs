@@ -985,13 +985,19 @@ impl Panels {
 					},
 				)),
 				_,
-			) => ("Not heard yet, muted in Mix", kit::CUE),
+			) => ("Not heard, muted", kit::CUE),
 			(Some((_, Sound { muted: true, .. })), _) => ("Muted in Mix", kit::CUE),
 			(Some(_), _) => ("Heard on the stream", kit::DIM),
 			(None, Some(_)) => ("Screen share", kit::DIM),
-			(None, None) => ("Waiting for them to open the link", kit::DIM),
+			(None, None) => ("Waiting to join", kit::DIM),
 		};
-		text.text(
+		// Never under Hear, which sits at the right.
+		let hearing = matches!(&guest.voice, Some((_, Sound { routed: false, .. })));
+		let room = Rect::from_min_max(
+			pos2(at.left() + 12.0, at.top()),
+			pos2(if hearing { right - 56.0 } else { right }, at.bottom()),
+		);
+		painter.with_clip_rect(room).text(
 			pos2(at.left() + 12.0, sound + 2.0),
 			Align2::LEFT_TOP,
 			note,
