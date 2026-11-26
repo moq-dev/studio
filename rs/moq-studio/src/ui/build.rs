@@ -465,31 +465,33 @@ impl Panels {
 			// picture under the pointer. Only when the picture took that
 			// first click, though; egui pairs a click elsewhere too. A slow
 			// frame holding both clicks selected nothing first, so it hits
-			// once for them.
+			// each, and crops only when both are on the same layer.
 			let now = ui.input(|input| input.time);
 			let delay = ui.ctx().options(|options| options.input_options.max_double_click_delay);
-			let together = response.double_clicked()
-				&& ui.input(|input| {
-					let released = |event: &&egui::Event| {
-						matches!(
-							event,
-							egui::Event::PointerButton {
-								button: egui::PointerButton::Primary,
-								pressed: false,
-								..
-							}
-						)
-					};
-					input.events.iter().filter(released).count() >= 2
-				});
+			let released: Vec<egui::Pos2> = ui.input(|input| {
+				let released = |event: &egui::Event| match *event {
+					egui::Event::PointerButton {
+						pos,
+						button: egui::PointerButton::Primary,
+						pressed: false,
+						..
+					} => Some(pos),
+					_ => None,
+				};
+				input.events.iter().filter_map(released).collect()
+			});
+			let together = response.double_clicked() && released.len() >= 2;
 			let paired = response.double_clicked()
 				&& !together && self.selection.is_some()
 				&& self.clicked.is_some_and(|at| now - at < delay);
+			let mut both = false;
 			if !held && !paired {
 				let picked = response.interact_pointer_pos().and_then(hit);
+				let first = released.iter().rev().nth(1).and_then(|&pos| hit(pos));
+				both = together && picked.is_some() && first.map(|(index, _)| index) == picked.map(|(index, _)| index);
 				self.select(picked.map(|(index, _)| shown[index].0.clone()));
 			}
-			if (paired || together) && self.selection.is_some() {
+			if paired || both {
 				self.cropping = !self.cropping;
 			}
 			if response.clicked() {

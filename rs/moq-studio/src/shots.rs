@@ -2188,6 +2188,19 @@ fn the_studio_locks_adds_and_mutes() {
 		selected(&mut harness) && !cropping(&harness),
 		"a click paired with one off the picture selects without cropping"
 	);
+	harness.key_press(egui::Key::Escape);
+	harness.run_steps(2);
+	assert!(!selected(&mut harness));
+	double_click(
+		&mut harness,
+		egui::vec2(0.5, 0.0),
+		1,
+		[egui::vec2(0.0, -3.0), egui::vec2(0.0, 2.0)],
+	);
+	assert!(
+		selected(&mut harness) && !cropping(&harness),
+		"so do both in one slow frame"
+	);
 
 	assert!(harness.query_by_label("Panic").is_none(), "no safe scene off air");
 	harness.get_by_label("Add a scene").click();
