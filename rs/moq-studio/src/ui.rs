@@ -796,6 +796,9 @@ impl Studio {
 		panels.shortcuts(ui.ctx());
 		panels.drops_read();
 		panels.staged = false;
+		// Add opened this frame from another page, as the palette's Add a
+		// source does, shows once Studio draws next frame.
+		let adding = panels.adding.open;
 		let verdict = {
 			let report = panels.engine.health.lock().unwrap();
 			report
@@ -814,10 +817,12 @@ impl Studio {
 			}
 		}
 		// A stage not shown hears no input, so it lets go of the pages, as
-		// turning Interact off does.
+		// turning Interact off does, and Add over it closes.
 		if !panels.staged {
 			panels.let_go();
-			panels.close_add();
+			if adding {
+				panels.close_add();
+			}
 		}
 		// A thumbnail nothing shows is not drawn, until it is again.
 		let bindings = panels.hotkeys.as_ref().map(Hotkeys::bindings).unwrap_or_default();

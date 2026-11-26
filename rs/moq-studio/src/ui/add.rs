@@ -937,7 +937,9 @@ pub(super) fn place(
 				Some(Source::Overlay { .. })
 			)
 	};
-	if !items.iter().filter(opaque).any(|item| covers(canvas, &item.rect)) {
+	// Together, as two halves of a split screen do.
+	let opaques: Vec<&moq_scene::Rect> = items.iter().filter(opaque).map(|item| &item.rect).collect();
+	if covered(canvas, &opaques) < COVERS {
 		// Behind what is there already, which it would hide.
 		return (0, fill);
 	}
@@ -946,10 +948,37 @@ pub(super) fn place(
 
 /// Whether `rect` covers nearly all of `canvas`.
 fn covers(canvas: Canvas, rect: &moq_scene::Rect) -> bool {
+	covered(canvas, &[rect]) >= COVERS
+}
+
+/// How much of `canvas` `rects` cover together, from 0 to 1: the canvas cut
+/// at every edge, each cell under any of them counted once.
+fn covered(canvas: Canvas, rects: &[&moq_scene::Rect]) -> f32 {
 	let (width, height) = (canvas.width as f32, canvas.height as f32);
-	let x = (rect.x + rect.width).min(width) - rect.x.max(0.0);
-	let y = (rect.y + rect.height).min(height) - rect.y.max(0.0);
-	x.max(0.0) * y.max(0.0) >= COVERS * width * height
+	let cuts = |edges: &mut dyn Iterator<Item = f32>, most: f32| {
+		let mut cuts: Vec<f32> = edges.map(|edge| edge.clamp(0.0, most)).chain([0.0, most]).collect();
+		cuts.sort_by(f32::total_cmp);
+		cuts.dedup();
+		cuts
+	};
+	let xs = cuts(&mut rects.iter().flat_map(|rect| [rect.x, rect.x + rect.width]), width);
+	let ys = cuts(
+		&mut rects.iter().flat_map(|rect| [rect.y, rect.y + rect.height]),
+		height,
+	);
+	let mut area = 0.0;
+	for x in xs.windows(2) {
+		for y in ys.windows(2) {
+			let (cx, cy) = ((x[0] + x[1]) / 2.0, (y[0] + y[1]) / 2.0);
+			let under = |rect: &&&moq_scene::Rect| {
+				rect.x <= cx && cx < rect.x + rect.width && rect.y <= cy && cy < rect.y + rect.height
+			};
+			if rects.iter().any(|rect| under(&rect)) {
+				area += (x[1] - x[0]) * (y[1] - y[0]);
+			}
+		}
+	}
+	area / (width * height)
 }
 
 /// A picture-in-picture on `canvas` in the first corner clear of `items`
@@ -1566,6 +1595,23 @@ name = "Main"
 			),
 			"in front in both, clear of the landscape graphic"
 		);
+	}
+
+	/// Two halves of a split screen cover the canvas together, so a camera
+	/// goes in front of them rather than hidden behind both.
+	#[test]
+	fn a_split_screen_covers_together() {
+		let split = scene(&[
+			("screen", [0.0, 0.0, 960.0, 1080.0]),
+			("logo", [960.0, 0.0, 960.0, 1080.0]),
+		]);
+		assert_eq!(placed(&split, CAMERA, None), (2, [1296.0, 708.0, 576.0, 324.0]));
+		// Overlapping halves count their overlap once.
+		let overlap = scene(&[
+			("screen", [0.0, 0.0, 1200.0, 1080.0]),
+			("logo", [600.0, 0.0, 600.0, 1080.0]),
+		]);
+		assert_eq!(placed(&overlap, CAMERA, None), (0, FULL));
 	}
 
 	/// With nothing covering the canvas, a new picture fills it behind what

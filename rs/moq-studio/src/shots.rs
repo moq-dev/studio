@@ -1380,6 +1380,16 @@ fn the_palette_finds_and_runs_anything() {
 	harness.run_steps(2);
 	assert!(harness.query_by_role(Role::TextInput).is_none(), "Escape closes it");
 
+	// Add a source from another page opens Add over Studio's picture.
+	enable(&mut harness, &[Mod::Audio]);
+	run(&mut harness, "go to mix");
+	assert!(harness.query_by_label("Canvas").is_none(), "on MIX");
+	run(&mut harness, "add a source");
+	harness.run_steps(2);
+	assert!(harness.query_by_label("Close Add").is_some(), "Add is open on Studio");
+	harness.get_by_label("Close Add").click();
+	harness.run_steps(2);
+
 	// A setting under a disclosure opens it, its mod on.
 	enable(&mut harness, &[Mod::Published]);
 	run(&mut harness, "scene sizes");

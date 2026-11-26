@@ -64,8 +64,8 @@ enum Command {
 	Page(Page),
 	/// Open Settings at a pane, at the row named, if any.
 	Setting(Setting, Option<&'static str>),
-	/// Select a layer on Studio.
-	Layer(Picked),
+	/// Select a layer on Studio, the item of this id there.
+	Layer(Picked, moq_scene::Id),
 	/// Add a device the last listing found as a layer of the scene Studio
 	/// edits.
 	Device(Pick),
@@ -94,11 +94,13 @@ struct Row {
 
 impl Row {
 	/// What tells it from every other row as the rows change: the device it
-	/// adds, as the system knows it, since two of one model share a name, or
-	/// else its name and group.
+	/// adds, as the system knows it, since two of one model share a name, the
+	/// layer it selects, since a duplicate shares its source, or else its
+	/// name and group.
 	fn id(&self) -> String {
 		match &self.command {
 			Command::Device(pick) => format!("{:?}", pick.source),
+			Command::Layer(_, id) => format!("{id:?}"),
 			_ => format!("{} {}", self.name, self.group),
 		}
 	}
@@ -228,7 +230,7 @@ impl Panels {
 					};
 					let name = format!("Select `{}`", item.source);
 					rows.push(Row::new(
-						Command::Layer(picked),
+						Command::Layer(picked, item.id),
 						name,
 						group,
 						&["layer", "source", "inspect"],
@@ -476,7 +478,7 @@ impl Panels {
 			Command::Act(Action::GoLive)
 				| Command::Act(Action::EndStream)
 				| Command::Page(_)
-				| Command::Layer(_)
+				| Command::Layer(..)
 				| Command::Device(_)
 				| Command::Add
 				| Command::Health
@@ -498,7 +500,7 @@ impl Panels {
 					super::settings::seek(ctx, row);
 				}
 			}
-			Command::Layer(picked) => {
+			Command::Layer(picked, _) => {
 				self.page = Page::Studio;
 				self.side = Side::Layers;
 				self.rail = true;
@@ -630,6 +632,26 @@ mod tests {
 		assert_eq!(palette.picked, None, "Enter runs nothing until a pick");
 		palette.repick(&unplugged, false, true);
 		assert_eq!(palette.picked, Some(0));
+
+		// A duplicated layer shares its source's name; its row is its own.
+		let layer = |index: usize| {
+			let picked = Picked {
+				layer: Layer::scene("Main"),
+				index,
+			};
+			Row::new(
+				Command::Layer(picked, moq_scene::Id::fresh()),
+				"Select `cam`",
+				"Layers",
+				&[],
+			)
+		};
+		let layers = [layer(1), layer(0)];
+		palette.repick(&layers, false, true);
+		palette.repick(&layers, false, true);
+		assert_eq!(palette.picked, Some(1));
+		palette.repick(&layers, false, false);
+		assert_eq!(palette.picked, Some(1), "still the second, not the first of that name");
 	}
 
 	fn names(rows: Vec<Row>, query: &str) -> Vec<String> {

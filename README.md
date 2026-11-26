@@ -797,8 +797,7 @@ half the canvas, in front of the edited scene, and selected. A sound alone
 has no picture, so it is only sent to the audio scene on program, as anything
 with sound is. A `.cube` file grades the layer it is dropped on, in place of
 any grade it had. While the drag is over the window, the picture outlines
-where the layer will land and names what it will become, and Add lights that
-kind. A file dropped on an image or media layer of its own kind asks whether
+where the layer will land and names what it will become. A file dropped on an image or media layer of its own kind asks whether
 to replace that layer's file, which every layer showing its source shows, or
 add a layer. Dropped anywhere else in the window, or on another page, it lands
 in the middle of the edited scene.
