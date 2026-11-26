@@ -123,7 +123,7 @@ jobs:
     # APPLE_API_PRIVATE_KEY, the App Store Connect key ID, issuer ID, and .p8
     # text; APPLE_PROVISIONING_PROFILE, the Developer ID profile for
     # live.kixel.studio with the System Extension capability (base64), which
-    # lets the app install its camera extension. quest/m0/signing-renew.md
+    # lets the app install its camera extension. quest/m1/signing-renew.md
     # renews them. Nothing built runs until
     # they are gone from the runner.
     environment: release
