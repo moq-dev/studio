@@ -2,7 +2,7 @@
 
 ## Goal
 
-A new Windows 11 Pro desktop, reachable over Tailscale as `windows`, runs
+A new Windows 11 Home desktop, reachable over Tailscale as `windows`, runs
 agents natively through T3 Code. On it an agent builds
 `moq-studio --features capture`, runs the studio, lists a real camera and a
 microphone, and publishes through both the Intel (QSV) and NVIDIA (NVENC)
@@ -12,13 +12,18 @@ Media Foundation encoders, so Windows quests run on real hardware.
 
 Decided 2026-11-25 (maintainer, `/quest-plan`):
 
-- Host: ✅ a new desktop with an Intel Core Ultra 5 245K-class CPU (Arc
-  iGPU), an RTX 5060 Ti 16 GB, 32 GB, and Windows 11 Pro (rejected: an Azure
+- Host: ✅ a new desktop, bought 2026-11-25 and due 2026-12-01: an ABS
+  Flux II Aqua prebuilt with an Intel Core Ultra 7 260K (Arc iGPU, whose
+  only output on the MSI PRO B860M board is HDMI), an RTX 5060 Ti 16 GB,
+  32 GB, and Windows 11 Home (rejected: an Azure
   GPU VM, with no real camera or display and Windows Server unless licensed
   for Windows 11; reinstalling the old i7-8700/RTX 2070 PC, 2017 hardware
   that may crash again; Windows on nixos as its OS or as a VFIO guest, which
-  puts CI at risk and covers NVIDIA only). The maintainer buys it through
-  [kixelated/corp's Windows PC quest](https://github.com/kixelated/corp/blob/main/quest/m0/windows-pc.md).
+  puts CI at risk and covers NVIDIA only).
+- Windows edition: ✅ Home (rejected: the $99 Pro upgrade now). Agents reach
+  the host over ssh and T3 Code, which Home supports; Pro adds an RDP host
+  and Windows Update deferral policy. Home upgrades to Pro later from
+  Settings > System > Activation for the same price if either is needed.
 - Why two vendors: on Windows `moq-video` encodes through each vendor's
   Media Foundation encoder, which differ in the rate control they accept
   (moq's [Capped VBR on MediaFoundation](https://github.com/moq-dev/moq/blob/main/quest/m1/video-rate/windows.md)).
@@ -60,10 +65,9 @@ facts above, refreshed.
 
 ## Waiting
 
-- Maintainer (PC): buy the PC
-  ([corp quest](https://github.com/kixelated/corp/blob/main/quest/m0/windows-pc.md)),
-  assemble it if it is a parts build, install Windows 11 Pro, sign in to
-  Tailscale as `windows` and to T3 Code, enable OpenSSH with the Linux hosts'
-  keys, and plug in the webcam and a display. An agent cannot handle
+- Maintainer (PC): once the PC arrives (due 2026-12-01), finish Windows
+  11 Home's first sign-in, sign in to Tailscale as `windows` and to T3 Code,
+  enable OpenSSH with the Linux hosts' keys, and plug in the webcam and a
+  display (HDMI on the motherboard for the iGPU). An agent cannot handle
   hardware or the first Windows sign-in. Check: `ssh windows ver` answers
   from another host.
