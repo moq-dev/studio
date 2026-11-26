@@ -6,6 +6,7 @@ use egui::{Align2, Rect, Sense, Stroke, Vec2, pos2, vec2};
 
 use super::drop::Landing;
 use super::layers::{kind, unplaced, words};
+use super::review::cover;
 use super::*;
 
 /// A card's height.
@@ -131,6 +132,8 @@ enum Asked {
 	Page(url::Url),
 	/// List the devices again, after the user fixed what stopped them.
 	Retry,
+	/// Something asked of a guest or the room.
+	Guest(Guest),
 }
 
 impl Panels {
@@ -294,6 +297,7 @@ impl Panels {
 				self.devices.listing = None;
 				self.devices.renew(&self.runtime);
 			}
+			Some(Asked::Guest(action)) => self.guest_action(&ctx, action),
 			None => {}
 		}
 	}
@@ -442,9 +446,9 @@ impl Panels {
 		}
 	}
 
-	/// The sources nothing shows or hears, the guests' if `guests` and the
-	/// rest otherwise, each as a card.
-	fn unused(&self, guests: bool) -> Vec<Entry> {
+	/// The sources nothing shows or hears, but a guest's, which the Guests
+	/// tab holds, each as a card.
+	fn unused(&self) -> Vec<Entry> {
 		let state = self.engine.state.lock().unwrap();
 		let collection = state.collection();
 		let room = self.engine.room();
@@ -457,7 +461,7 @@ impl Panels {
 				let guest = room
 					.as_ref()
 					.is_some_and(|room| crate::guests::plays_guest(room.path(), source));
-				guest == guests
+				!guest
 			})
 			.map(|(name, source)| Entry {
 				icon: kind(collection, name),
@@ -477,7 +481,7 @@ impl Panels {
 	/// windows.
 	fn devices_tab(&mut self, ui: &mut Ui) -> Option<Asked> {
 		let mut asked = None;
-		let unused = self.unused(false);
+		let unused = self.unused();
 		if !unused.is_empty() {
 			caption(ui, "Not in any scene", Beside::Nothing);
 			asked = asked.or(cards(ui, "unused", &unused, true));
@@ -716,16 +720,417 @@ impl Panels {
 		asked
 	}
 
-	/// Invite guests and see who joined, then each guest's picture nothing
-	/// shows yet.
+	/// Invite a guest, then each guest who joined as a card with their live
+	/// picture, placed as any card is.
 	fn guests_tab(&mut self, ui: &mut Ui) -> Option<Asked> {
-		self.guests(ui);
-		let unused = self.unused(true);
-		if unused.is_empty() {
+		let engine = self.engine.clone();
+		let Some(room) = engine.room() else {
+			match self.controls.room_failure() {
+				Some(failure) => ui.colored_label(kit::ERR, format!("Guests cannot join: {failure}")),
+				None => ui.label("Guests join a room on your relay, which needs a room and its key."),
+			};
+			if ui.add(kit::button(Icon::Settings, "Set up the room")).clicked() {
+				self.setting = Some(Setting::Guests);
+			}
 			return None;
+		};
+		// A link into a room the studio has left joins nothing.
+		self.shown.take_if(|shown| !shown.joins(&room));
+
+		let now = kio::clock::wall();
+		let guests = self.guests(&room, now);
+		let here = guests.iter().filter(|guest| guest.own && guest.here).count();
+		let note = match here {
+			0 => "Nobody here yet".to_string(),
+			here => format!("{here} here"),
+		};
+		let mut asked = None;
+		caption(ui, "Guests", Beside::Note(&note));
+		ui.horizontal(|ui| {
+			let button = 110.0;
+			let field = ui.add(
+				egui::TextEdit::singleline(&mut self.guest)
+					.hint_text("A guest's name")
+					.desired_width(ui.available_width() - button - 8.0),
+			);
+			let field = kit::named(field, "Guest's name");
+			let entered = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+			let invite = ui.add(kit::button(Icon::Add, "Invite").min_size(vec2(button, 0.0)));
+			if invite.clicked() || entered {
+				asked = Some(Asked::Guest(Guest::Invite(self.guest.trim().to_string())));
+			}
+		});
+		ui.add_space(10.0);
+		if let Some(shown) = &self.shown
+			&& invite_box(ui, shown, now)
+		{
+			asked = Some(Asked::Guest(Guest::Hide));
 		}
-		caption(ui, "Waiting for a scene", Beside::Nothing);
-		cards(ui, "guests", &unused, true)
+		if guests.is_empty() {
+			ui.label(
+				egui::RichText::new("Nobody invited yet. A guest shows here once they open their link.")
+					.color(kit::FAINT),
+			);
+			return asked;
+		}
+		let failure = room.renewal_failure();
+		let width = ui.available_width();
+		let columns = ((width + GAP) / (CARD_MIN + GAP)).floor().clamp(1.0, 3.0) as usize;
+		let card_width = (width - GAP * (columns - 1) as f32) / columns as f32;
+		for row in guests.chunks(columns) {
+			let (rect, _) = ui.allocate_exact_size(vec2(width, guest_height(card_width)), Sense::hover());
+			for (column, guest) in row.iter().enumerate() {
+				let at = Rect::from_min_size(
+					pos2(rect.left() + column as f32 * (card_width + GAP), rect.top()),
+					vec2(card_width, rect.height()),
+				);
+				asked = self.guest_card(ui, at, guest, failure.as_deref()).or(asked);
+			}
+			ui.add_space(GAP);
+		}
+		asked
+	}
+
+	/// A card for each guest the room knows of, then one for each screen
+	/// shared beside a camera.
+	fn guests(&self, room: &crate::guests::Room, now: kio::clock::Wall) -> Vec<GuestCard> {
+		let state = self.engine.state.lock().unwrap();
+		let collection = state.collection();
+		let program = collection.program_audio().map(|scene| collection.heard(scene));
+		let sound = |voice: String| {
+			let muted = collection.audio.get(&voice).is_some_and(|audio| audio.muted);
+			let routed = program.as_ref().is_some_and(|heard| heard.contains(voice.as_str()));
+			(voice, Sound { routed, muted })
+		};
+		let mut cards = Vec::new();
+		let mut screens = Vec::new();
+		for (name, guest) in room.known(collection) {
+			let sources = room.sources_of(collection, &name);
+			let voice = room.voices(collection, &name).next().map(str::to_string);
+			let screen = sources
+				.iter()
+				.find(|source| Some(source.as_str()) != voice.as_deref())
+				.cloned();
+			let scenes = shown_in(collection, &sources);
+			// Their camera speaks for them, or else their screen.
+			let source = voice.clone().or_else(|| screen.clone());
+			let camera = voice.is_some();
+			cards.push(GuestCard {
+				guest: name.clone(),
+				title: name.clone(),
+				here: guest.camera || (!camera && guest.screen),
+				source,
+				own: true,
+				scenes,
+				voice: voice.map(sound),
+				renewed: guest.renewed(),
+				removed: guest.removed,
+				link: guest.invite.filter(|link| link.expires > now),
+			});
+			// A guest sharing a screen beside their camera has a card for each.
+			if let Some(screen) = screen.filter(|_| camera) {
+				screens.push(GuestCard {
+					guest: name.clone(),
+					title: format!("{name}'s screen"),
+					here: guest.screen,
+					scenes: shown_in(collection, std::slice::from_ref(&screen)),
+					source: Some(screen),
+					own: false,
+					voice: None,
+					renewed: false,
+					removed: guest.removed,
+					link: None,
+				});
+			}
+		}
+		cards.extend(screens);
+		cards
+	}
+
+	/// Draw `guest`'s card in `at`; what it asks for.
+	fn guest_card(&mut self, ui: &mut Ui, at: Rect, guest: &GuestCard, failure: Option<&str>) -> Option<Asked> {
+		let mut asked = None;
+		let sense = match (&guest.source, guest.own) {
+			(Some(_), _) => Sense::click_and_drag(),
+			// Their menu opens from a right click, whether or not they joined.
+			(None, true) => Sense::click(),
+			(None, false) => Sense::hover(),
+		};
+		let id = ui.id().with(("guest card", &guest.guest, &guest.title));
+		let response = ui.interact(at, id, sense);
+		let label = format!("Add {}", guest.title);
+		response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, guest.source.is_some(), &label));
+		if let Some(source) = &guest.source {
+			if response.drag_started() {
+				egui::DragAndDrop::set_payload(ui.ctx(), Card::Unused(source.clone()));
+			}
+			if response.clicked() {
+				asked = Some(Asked::Card(Card::Unused(source.clone())));
+			}
+		}
+		let painter = ui.painter_at(at);
+		let lit = guest.source.is_some() && response.hovered();
+		painter.rect(
+			at,
+			10,
+			kit::P2,
+			Stroke::new(1.0, if lit { kit::ACCENT } else { kit::LINE }),
+			egui::StrokeKind::Inside,
+		);
+
+		// Their picture, while they are here to have one.
+		let picture = Rect::from_min_size(
+			at.min + vec2(1.0, 1.0),
+			vec2(at.width() - 2.0, (at.width() - 2.0) * 9.0 / 16.0),
+		);
+		let top = egui::CornerRadius {
+			nw: 9,
+			ne: 9,
+			sw: 0,
+			se: 0,
+		};
+		let thumbnail = guest
+			.source
+			.as_ref()
+			.filter(|_| guest.here)
+			.map(|source| Thumbnail::Source(source.clone()));
+		let texture = thumbnail.as_ref().and_then(|thumbnail| {
+			let registered = self.thumbnails.get(thumbnail)?;
+			let size = vec2(registered.texture.width() as f32, registered.texture.height() as f32);
+			Some(egui::load::SizedTexture::new(registered.id, size))
+		});
+		match texture {
+			Some(texture) => {
+				egui::Image::new(texture)
+					.corner_radius(top)
+					.uv(cover(texture.size, picture.size()))
+					.paint_at(ui, picture);
+			}
+			None => {
+				painter.rect_filled(picture, top, kit::P3);
+				let icon = Rect::from_center_size(picture.center() - vec2(0.0, 9.0), Vec2::splat(22.0));
+				Icon::Guests.paint(ui, icon, 22.0, kit::FAINT);
+				let why = match (guest.here, &guest.source) {
+					(true, _) => "Waiting for their picture",
+					(false, Some(_)) => "Not here now",
+					(false, None) => "Not here yet",
+				};
+				painter.text(
+					picture.center() + vec2(0.0, 17.0),
+					Align2::CENTER_CENTER,
+					why,
+					kit::ui(11.5),
+					kit::DIM,
+				);
+			}
+		}
+		if let Some(thumbnail) = thumbnail.filter(|_| ui.is_rect_visible(at)) {
+			self.thumbnails_shown.insert(thumbnail);
+		}
+		if let Some(scene) = guest.scenes.first() {
+			let text = match guest.scenes.len() {
+				1 => format!("In {scene}"),
+				more => format!("In {scene} +{}", more - 1),
+			};
+			let galley = painter.layout_no_wrap(text, kit::ui_strong(10.0), Color32::WHITE);
+			let tag = Rect::from_min_size(picture.min + vec2(7.0, 7.0), galley.size() + vec2(12.0, 8.0));
+			painter.rect_filled(tag, 5, Color32::from_black_alpha(200));
+			painter.galley(tag.min + vec2(6.0, 4.0), galley, Color32::WHITE);
+		}
+
+		// Their name, and how they are doing.
+		let line = picture.bottom() + 9.0;
+		let failing = failure.filter(|_| guest.renewed && !guest.removed);
+		let (dot, status) = standing(guest, failing);
+		let status = painter.layout_no_wrap(status.into(), kit::ui(11.5), kit::DIM);
+		let right = at.right() - 12.0;
+		let status_at = pos2(right - status.size().x, line + 1.0);
+		painter.circle_filled(pos2(status_at.x - 9.0, line + 8.0), 3.5, dot);
+		painter.galley(status_at, status, kit::DIM);
+		// Clipped before their status, whose dot sits 9 points ahead of it.
+		let name_room = Rect::from_min_max(pos2(at.left() + 12.0, at.top()), pos2(status_at.x - 16.0, at.bottom()));
+		painter.with_clip_rect(name_room).text(
+			pos2(at.left() + 12.0, line),
+			Align2::LEFT_TOP,
+			&guest.title,
+			kit::ui_strong(13.0),
+			kit::TEXT,
+		);
+		ui.interact(
+			name_room.with_max_y(line + 18.0).with_min_y(line),
+			id.with("name"),
+			Sense::hover(),
+		)
+		.on_hover_text(&guest.title);
+		if let Some(failure) = failing {
+			let spot = Rect::from_min_max(pos2(status_at.x - 16.0, line), pos2(right, line + 18.0));
+			ui.interact(spot, id.with("renewal"), Sense::hover())
+				.on_hover_text(format!(
+					"Their token is not renewing, so they leave when their link expires: {failure}"
+				));
+		}
+
+		// Whether the stream carries their sound.
+		let sound = line + 24.0;
+		let (note, ink) = match (&guest.voice, &guest.source) {
+			(
+				Some((
+					_,
+					Sound {
+						routed: false,
+						muted: false,
+					},
+				)),
+				_,
+			) => ("Not heard yet", kit::CUE),
+			(
+				Some((
+					_,
+					Sound {
+						routed: false,
+						muted: true,
+					},
+				)),
+				_,
+			) => ("Not heard, muted", kit::CUE),
+			(Some((_, Sound { muted: true, .. })), _) => ("Muted in Mix", kit::CUE),
+			(Some(_), _) => ("Heard on the stream", kit::DIM),
+			(None, Some(_)) => ("Screen share", kit::DIM),
+			(None, None) => ("Waiting to join", kit::DIM),
+		};
+		// Never under Hear, which sits at the right.
+		let hearing = matches!(&guest.voice, Some((_, Sound { routed: false, .. })));
+		let room = Rect::from_min_max(
+			pos2(at.left() + 12.0, at.top()),
+			pos2(if hearing { right - 56.0 } else { right }, at.bottom()),
+		);
+		painter.with_clip_rect(room).text(
+			pos2(at.left() + 12.0, sound + 2.0),
+			Align2::LEFT_TOP,
+			note,
+			kit::ui(11.5),
+			ink,
+		);
+		if let Some((voice, Sound { routed: false, .. })) = &guest.voice {
+			let hear = Rect::from_min_size(pos2(right - 48.0, sound - 1.0), vec2(48.0, 22.0));
+			let button = ui.interact(hear, id.with("hear"), Sense::click());
+			let label = format!("Hear {}", guest.title);
+			button.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label));
+			painter.rect(
+				hear,
+				6,
+				if button.hovered() { kit::P3 } else { kit::P1 },
+				Stroke::new(1.0, kit::LINE),
+				egui::StrokeKind::Inside,
+			);
+			painter.text(
+				hear.center(),
+				Align2::CENTER_CENTER,
+				"Hear",
+				kit::ui_strong(11.5),
+				kit::TEXT,
+			);
+			let button = button.on_hover_text(format!(
+				"Send {}'s sound to the stream, leaving Mix's mute as it is. Placing them in a scene does too.",
+				guest.guest
+			));
+			if button.clicked() {
+				asked = Some(Asked::Guest(Guest::Hear(voice.clone())));
+			}
+		}
+
+		// Their menu, from a button for whoever does not know to right-click.
+		if guest.own || guest.source.is_some() {
+			response.context_menu(|ui| {
+				if let Some(chosen) = guest_menu(ui, guest) {
+					asked = Some(Asked::Guest(chosen));
+				}
+			});
+			let more_id = id.with("more");
+			let open = egui::Popup::is_id_open(ui.ctx(), more_id.with("popup"));
+			if open || ui.rect_contains_pointer(at) {
+				let at = pos2(picture.right() - 19.0, picture.top() + 19.0);
+				let room = Rect::from_center_size(at, Vec2::splat(24.0));
+				let more = ui.interact(room, more_id, Sense::click());
+				more.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Guest options"));
+				let lit = open || more.hovered();
+				let fill = if lit { kit::P3 } else { Color32::from_black_alpha(160) };
+				ui.painter().rect_filled(room, 6, fill);
+				Icon::More.paint(ui, room, 16.0, if lit { kit::TEXT } else { Color32::WHITE });
+				let more = kit::tip(more, "Guest options", None);
+				let chosen = egui::Popup::menu(&more).show(|ui| guest_menu(ui, guest));
+				if let Some(chosen) = chosen.and_then(|shown| shown.inner) {
+					asked = Some(Asked::Guest(chosen));
+				}
+			}
+		}
+		asked
+	}
+
+	/// Do what a click in the Guests tab asked of the room.
+	fn guest_action(&mut self, ctx: &egui::Context, action: Guest) {
+		let engine = self.engine.clone();
+		let Some(room) = engine.room() else {
+			return;
+		};
+		let typed = matches!(action, Guest::Invite(_));
+		match action {
+			Guest::Invite(name) | Guest::Link(name) => match room.invite(&name) {
+				Ok(invite) => {
+					self.show(ctx, &room, name, invite);
+					// What was typed is spent only when it made the link.
+					if typed {
+						self.guest.clear();
+					}
+					self.fail(Spot::Add, Ok(()));
+				}
+				Err(err) => self.fail(Spot::Add, Err(err)),
+			},
+			Guest::Show(name) => {
+				let link = room.participants().remove(&name).and_then(|guest| guest.invite);
+				if let Some(link) = link {
+					self.show(ctx, &room, name, link);
+				}
+			}
+			Guest::Hide => self.shown = None,
+			Guest::Hear(source) => {
+				let result = edit(
+					&mut engine.state.lock().unwrap(),
+					format!("Hear `{source}`"),
+					None,
+					|draft| draft.hear(&source),
+				);
+				self.fail(Spot::Add, result);
+			}
+			Guest::Forget(source) => {
+				let result = edit(
+					&mut engine.state.lock().unwrap(),
+					format!("Remove `{source}`"),
+					None,
+					|draft| draft.remove_source(&source),
+				);
+				self.deselect_item();
+				self.fail(Spot::Add, result);
+			}
+			Guest::Remove(name) => {
+				if let Err(err) = room.stop_renewing(&name) {
+					return self.fail(Spot::Add, Err(err));
+				}
+				let mut state = engine.state.lock().unwrap();
+				let mut draft = state.collection().draft(format!("Remove `{name}` from scenes"));
+				let result = match room.take_off(&mut draft, &name) {
+					Ok(false) => Ok(()),
+					Ok(true) => {
+						// Removing items moves the ones after them.
+						self.deselect_item();
+						state.commit(draft, None)
+					}
+					Err(err) => Err(err.into()),
+				};
+				drop(state);
+				self.report(result.map(|()| format!("removed {name} from every scene and muted them")));
+			}
+		}
 	}
 
 	/// While a card is dragged over `picture`, which shows `canvas`, outline
@@ -775,156 +1180,6 @@ impl Panels {
 }
 
 impl Panels {
-	/// Invite guests, show their links, and see who joined.
-	fn guests(&mut self, ui: &mut Ui) {
-		let engine = self.engine.clone();
-		let Some(room) = engine.room() else {
-			match self.controls.room_failure() {
-				Some(failure) => ui.colored_label(kit::ERR, format!("Guests cannot join: {failure}")),
-				None => ui.label("Guests join a room on your relay, which needs a room and its key."),
-			};
-			if ui.add(kit::button(Icon::Settings, "Set up the room")).clicked() {
-				self.setting = Some(Setting::Guests);
-			}
-			return;
-		};
-		// A link into a room the studio has left joins nothing.
-		self.shown.take_if(|shown| !shown.joins(&room));
-
-		ui.horizontal(|ui| {
-			ui.label("Name");
-			let field = ui.text_edit_singleline(&mut self.guest);
-			let entered = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-			if ui.add(kit::button(Icon::Add, "Invite")).clicked() || entered {
-				let name = self.guest.trim().to_string();
-				match room.invite(&name) {
-					Ok(invite) => {
-						self.show(ui.ctx(), &room, name, invite);
-						self.guest.clear();
-					}
-					Err(err) => self.fail(Spot::Add, Err(err)),
-				}
-			}
-		});
-
-		let now = kio::clock::wall();
-		if let Some(shown) = &self.shown {
-			let title = format!("Invite {}", shown.name);
-			let close = kit::Sheet::new(egui::Id::new("join link"), &title).show(ui.ctx(), |ui| {
-				ui.label(format!("Their join link {}.", expiry(shown.invite.expires, now)));
-				ui.add_space(8.0);
-				// The link is the guest's credential, so it shows only as a code to scan.
-				match &shown.qr {
-					Ok(qr) => {
-						ui.vertical_centered(|ui| ui.image((qr.id(), egui::vec2(240.0, 240.0))));
-					}
-					Err(err) => {
-						ui.colored_label(ui.visuals().error_fg_color, format!("{err}; copy the link instead."));
-					}
-				}
-				ui.add_space(8.0);
-				if ui.add(kit::button(Icon::Copy, "Copy link")).clicked() {
-					ui.ctx().copy_text(shown.invite.link.to_string());
-				}
-			});
-			if close {
-				self.shown = None;
-			}
-		}
-
-		ui.separator();
-		if let Some(failure) = room.renewal_failure() {
-			ui.colored_label(
-				ui.visuals().error_fg_color,
-				format!("Guests' tokens are not renewing, so each leaves when their link expires: {failure}"),
-			);
-		}
-		let participants = room.participants();
-		if participants.is_empty() {
-			ui.weak("Nobody invited yet.");
-			return;
-		}
-		let mut show = None;
-		let mut invite = None;
-		let mut remove = None;
-		egui::ScrollArea::vertical().show(ui, |ui| {
-			egui::Grid::new("guests").striped(true).show(ui, |ui| {
-				for heading in ["Guest", "Camera", "Screen", "Link", ""] {
-					ui.strong(heading);
-				}
-				ui.end_row();
-				for (name, participant) in &participants {
-					ui.label(name);
-					for online in [participant.camera, participant.screen] {
-						if online {
-							ui.colored_label(kit::OK, "live");
-						} else {
-							ui.weak("offline");
-						}
-					}
-					// A renewed guest no longer depends on their link's expiry.
-					match &participant.invite {
-						_ if participant.renewed() => ui.label("renewing"),
-						_ if participant.removed => ui.weak("not renewed"),
-						Some(link) => ui.label(expiry(link.expires, now)),
-						None => ui.weak("invited before this session"),
-					};
-					ui.horizontal(|ui| {
-						// Only a link that still works is worth sharing again.
-						if let Some(link) = &participant.invite
-							&& link.expires > now
-							&& ui.small_button("Show link").clicked()
-						{
-							show = Some((name.clone(), link.clone()));
-						}
-						if ui.small_button("New link").clicked() {
-							invite = Some(name.clone());
-						}
-						if ui
-							.small_button("Remove from scenes")
-							.on_hover_text(
-								"Take their camera and screen, and any mask reading them, out of every scene and mute them. Their token stops renewing, so they leave within the link lifetime in Settings, Guests. Undo puts them back in the scenes; only New link renews them again.",
-							)
-							.clicked()
-						{
-							remove = Some(name.clone());
-						}
-					});
-					ui.end_row();
-				}
-			});
-		});
-
-		if let Some((name, link)) = show {
-			self.show(ui.ctx(), &room, name, link);
-		}
-		if let Some(name) = invite {
-			match room.invite(&name) {
-				Ok(link) => self.show(ui.ctx(), &room, name, link),
-				Err(err) => self.fail(Spot::Add, Err(err)),
-			}
-		}
-		if let Some(name) = remove {
-			if let Err(err) = room.stop_renewing(&name) {
-				self.report(Err(err));
-				return;
-			}
-			let mut state = engine.state.lock().unwrap();
-			let mut draft = state.collection().draft(format!("Remove `{name}` from scenes"));
-			let result = match room.take_off(&mut draft, &name) {
-				Ok(false) => Ok(()),
-				Ok(true) => {
-					// Removing items moves the ones after them.
-					self.deselect_item();
-					state.commit(draft, None)
-				}
-				Err(err) => Err(err.into()),
-			};
-			drop(state);
-			self.report(result.map(|()| format!("removed {name} from every scene and muted them")));
-		}
-	}
-
 	/// Put `invite`'s link for `name` on screen as a QR code.
 	pub(super) fn show(
 		&mut self,
@@ -937,6 +1192,173 @@ impl Panels {
 		let room = Arc::downgrade(room);
 		self.shown = Some(Shown { name, invite, qr, room });
 	}
+}
+
+/// A card in the Guests tab: a guest, or their screen beside their camera.
+struct GuestCard {
+	/// The guest it belongs to.
+	guest: String,
+	/// What it is called.
+	title: String,
+	/// The source its picture shows, which a click places and a drag carries.
+	source: Option<String>,
+	/// Whether its broadcast is announced now.
+	here: bool,
+	/// Whether it is the guest's own card, which holds their menu.
+	own: bool,
+	/// The scenes showing them.
+	scenes: Vec<String>,
+	/// The source playing their microphone, and what the stream does with it.
+	voice: Option<(String, Sound)>,
+	/// Whether the studio renews their token.
+	renewed: bool,
+	/// Whether the host removed them from scenes.
+	removed: bool,
+	/// Their newest link, while it works.
+	link: Option<crate::guests::Invite>,
+}
+
+/// What the stream does with a guest's microphone.
+#[derive(Clone, Copy)]
+struct Sound {
+	/// Whether the audio scene on program holds it.
+	routed: bool,
+	/// Whether Mix mutes it, which a route leaves as it is.
+	muted: bool,
+}
+
+/// What a click in the Guests tab asks of the room.
+enum Guest {
+	/// Make a link for a guest by this name.
+	Invite(String),
+	/// Make this guest a new link.
+	Link(String),
+	/// Show this guest's link again.
+	Show(String),
+	/// Put the link away.
+	Hide,
+	/// Send the sound of this source to the stream.
+	Hear(String),
+	/// Take this guest out of every scene and stop renewing their token.
+	Remove(String),
+	/// Remove this source from the show.
+	Forget(String),
+}
+
+/// The color and words for how a guest is doing: removed, failing to renew
+/// their token for the reason `failing` gives, here, or not.
+fn standing(guest: &GuestCard, failing: Option<&str>) -> (Color32, &'static str) {
+	match (guest.removed, failing, guest.here) {
+		(true, ..) => (kit::CUE, "Removed"),
+		(false, Some(_), _) => (kit::ERR, "Not renewing"),
+		(false, None, true) => (kit::OK, "Here"),
+		(false, None, false) => (kit::FAINT, "Not here"),
+	}
+}
+
+/// How tall a guest's card is, `width` wide: its picture, and two lines.
+fn guest_height(width: f32) -> f32 {
+	(width - 2.0) * 9.0 / 16.0 + 62.0
+}
+
+/// The scenes with a layer showing any of `sources`, in the show's order.
+fn shown_in(collection: &Collection, sources: &[String]) -> Vec<String> {
+	// A clone shows the same capture.
+	let ours = |item: &Item| sources.iter().any(|source| source == collection.capture(&item.source));
+	let scenes = collection.scenes.iter();
+	scenes
+		.filter(|scene| scene.items.iter().any(ours))
+		.map(|scene| scene.name.clone())
+		.collect()
+}
+
+/// A guest's menu, from their card's right click or its ⋯ button, and what it chose.
+fn guest_menu(ui: &mut Ui, guest: &GuestCard) -> Option<Guest> {
+	let mut chosen = None;
+	// The guest's own, not their screen's, which is only a source.
+	if guest.own {
+		if ui
+			.button("New link")
+			.on_hover_text("An earlier link keeps working until it expires")
+			.clicked()
+		{
+			chosen = Some(Guest::Link(guest.guest.clone()));
+		}
+		if guest.link.is_some() && ui.button("Show link").clicked() {
+			chosen = Some(Guest::Show(guest.guest.clone()));
+		}
+		let remove = ui
+			.button("Remove from scenes")
+			.on_hover_text(
+				"Take their camera and screen, and any mask reading them, out of every scene and mute them. Their token stops renewing, so they leave within the link lifetime in Settings, Guests. Undo puts them back in the scenes; only New link renews them again.",
+			);
+		if remove.clicked() {
+			chosen = Some(Guest::Remove(guest.guest.clone()));
+		}
+	}
+	if let Some(source) = &guest.source {
+		let forget = ui.button("Remove for good").on_hover_text(
+			"Take this picture out of the show, and out of every scene and audio scene holding it. It comes back if they join again.",
+		);
+		if forget.clicked() {
+			chosen = Some(Guest::Forget(source.clone()));
+		}
+	}
+	if chosen.is_some() {
+		ui.close();
+	}
+	chosen
+}
+
+/// The link just made, as a code to scan and a button to copy it, which
+/// shows only as a code since the link is the guest's credential. Whether
+/// the host put it away.
+fn invite_box(ui: &mut Ui, shown: &Shown, now: kio::clock::Wall) -> bool {
+	let mut hide = false;
+	egui::Frame::new()
+		.fill(kit::P2)
+		.stroke(Stroke::new(1.0, kit::LINE))
+		.corner_radius(12)
+		.inner_margin(egui::Margin::same(12))
+		.show(ui, |ui| {
+			ui.set_width(ui.available_width());
+			ui.horizontal_top(|ui| {
+				match &shown.qr {
+					Ok(qr) => {
+						ui.add(egui::Image::new((qr.id(), vec2(104.0, 104.0))).corner_radius(8));
+					}
+					Err(err) => {
+						ui.colored_label(kit::ERR, format!("{err}; copy the link instead."));
+					}
+				}
+				ui.vertical(|ui| {
+					ui.horizontal(|ui| {
+						ui.label(
+							egui::RichText::new(format!("Invite {}", shown.name))
+								.font(kit::ui_strong(14.0))
+								.color(kit::TEXT),
+						);
+						ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+							hide = ui.add(IconButton::new(Icon::Close, "Hide link")).clicked();
+						});
+					});
+					ui.label(
+						egui::RichText::new(format!(
+							"They scan this or open the link in any browser. Nothing to install. Their link {}.",
+							expiry(shown.invite.expires, now)
+						))
+						.font(kit::ui(12.0))
+						.color(kit::DIM),
+					);
+					ui.add_space(6.0);
+					if ui.add(kit::button(Icon::Copy, "Copy link")).clicked() {
+						ui.ctx().copy_text(shown.invite.link.to_string());
+					}
+				});
+			});
+		});
+	ui.add_space(10.0);
+	hide
 }
 
 /// What a new layer shows: its source, its picture's size where the
@@ -2189,5 +2611,30 @@ name = "Main"
 			(1, [960.0, 30.0, 960.0, 540.0]),
 			"half the canvas, kept on it"
 		);
+	}
+
+	/// A guest whose token does not renew says so on their card, unless the
+	/// host removed them, who leave anyway.
+	#[test]
+	fn a_failing_renewal_shows_on_the_card() {
+		let guest = |removed, here| GuestCard {
+			guest: "Robin".into(),
+			title: "Robin".into(),
+			source: Some("Robin".into()),
+			here,
+			own: true,
+			scenes: Vec::new(),
+			voice: None,
+			renewed: true,
+			removed,
+			link: None,
+		};
+		assert_eq!(standing(&guest(false, true), None).1, "Here");
+		assert_eq!(standing(&guest(false, false), None).1, "Not here");
+		assert_eq!(
+			standing(&guest(false, true), Some("closed")),
+			(kit::ERR, "Not renewing")
+		);
+		assert_eq!(standing(&guest(true, true), None).1, "Removed");
 	}
 }

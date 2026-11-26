@@ -426,6 +426,19 @@ impl Room {
 		self.participants.lock().unwrap().clone()
 	}
 
+	/// Every guest the studio knows of or keeps a source for in `collection`,
+	/// such as one saved with the show who has not joined this session, by
+	/// name.
+	pub fn known(&self, collection: &Collection) -> BTreeMap<String, Participant> {
+		let mut known = self.participants();
+		for source in collection.sources.values() {
+			if let Some((identity, _)) = self.guest_of(source) {
+				known.entry(identity.to_string()).or_default();
+			}
+		}
+		known
+	}
+
 	/// Make a join link for the guest called `name`, replacing any earlier one.
 	/// An earlier link keeps working until it expires: a signed token cannot be
 	/// taken back.
