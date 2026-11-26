@@ -822,13 +822,11 @@ fn a_scene_removes_from_its_pad() {
 	harness.run_steps(2);
 
 	// A scene only leaving program in a transition goes with the transition
-	// finished on the scene it goes to.
-	engine
-		.state
-		.lock()
-		.unwrap()
-		.take("Interview", kio::clock::Instant::now())
-		.unwrap();
+	// finished on the scene it goes to. The transition starts an hour from now,
+	// so the program clock holds it at its start rather than ending it while
+	// the pad works, which would also shorten the sheet under its Remove.
+	let later = kio::clock::Instant::now().saturating_add(Duration::from_secs(3600));
+	engine.state.lock().unwrap().take("Interview", later).unwrap();
 	assert!(engine.state.lock().unwrap().compositor.transitioning());
 	more(&mut harness, "Main");
 	harness.get_all_by_label("Remove").last().unwrap().click();
