@@ -44,6 +44,12 @@ layer**, `A`, the picture's right-click **Add a layer**, or the palette's
 An agent then turns each finding into a quest, or an edit to the quest that
 owns that part, and deletes this one.
 
+- ✅ Keep this quest (maintainer, on
+  [moq-dev/studio#262](https://github.com/moq-dev/studio/pull/262)).
+- ✅ Placement in both pictures: where the portrait and landscape pictures
+  disagree on the order, a new source goes in front as a picture-in-picture
+  in both. Check it feels right with **Both at once** on.
+
 ## Waiting
 
 - Maintainer (PC): try Add as the Plan lists and report what to change, or
