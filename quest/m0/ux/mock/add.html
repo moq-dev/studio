@@ -100,7 +100,7 @@
 .lnk .u{flex:1;min-width:0;height:30px;border-radius:8px;background:var(--p1);border:1px solid var(--line);display:flex;align-items:center;padding:0 10px;font:500 11.5px/1 var(--mono);color:var(--dim);white-space:nowrap;overflow:hidden}
 .btn.on{background:var(--p3);border-color:var(--dim)}
 .gdot{width:7px;height:7px;border-radius:50%;background:var(--ok);flex:none}
-.draghint{display:flex;align-items:center;gap:7px;margin-top:10px;color:var(--faint);font-size:12px}
+.gname{margin:0 0 10px}.gname .u{height:34px}.heard{display:flex;align-items:center;gap:14px;margin-top:8px;color:var(--dim);font-size:12px}.heard .cue{color:var(--cue,#ffb020)}.draghint{display:flex;align-items:center;gap:7px;margin-top:10px;color:var(--faint);font-size:12px}
 
 /* fake window and camera pictures, sized in cqw like the kit's so one markup is any size */
 .web,.mail{background:#eef0f5}
@@ -216,9 +216,11 @@ const S={
   system:()=>sh('Windows and screens')+`<div class="sysbtn">${I('win')}<span class="grow">Choose a window or screen</span>${I('open','go')}</div>
     <div class="sysnote">${I('lock','sm')}<span>This desktop shows its own picker, so no app can look at your windows without asking. <b>Your choice is remembered next time.</b></span></div>`+
     sh('Chosen before','One click, no picker')+`<div class="g3">${tray(win('drift','Season 4','game',{tag:'In this scene'}))}${tray(dev('mon','Main display','Whole screen','desk'))}</div>`,
-  guests:()=>sh('Guests','2 here',`<div class="btn on sm">${I('userplus')}Invite</div>`)+`<div class="invite">${qr()}<div class="t"><b>Invite a guest</b><span>They scan this or open the link in any browser. Nothing to install.</span><div class="lnk"><div class="u">join.example/amber-fox-27</div><div class="btn sm">${I('copy')}Copy link</div></div></div></div>
-    <div class="g2">${tray(card({pic:P.robin,badge:dv('users','bd'),name:'Robin',sub:'<i class="gdot"></i>Good connection',tag:'In Guest duo'}))}${tray(card({pic:P.sam,badge:dv('users','bd'),name:'Sam',sub:'<i class="gdot"></i>Good connection'}))}</div>
-    <div class="draghint">${I('grip','sm')}Drag a guest onto the picture, like any other source.</div>`,
+  guests:()=>sh('Guests','2 here')+`<div class="lnk gname"><div class="u">A guest's name</div><div class="btn on">${I('userplus')}Invite</div></div>
+    <div class="invite">${qr()}<div class="t"><b>Invite Alex</b><span>They scan this or open the link in any browser. Nothing to install. Their link expires in 4h.</span><div class="lnk"><div class="btn sm">${I('copy')}Copy link</div></div></div></div>
+    <div class="g2">${tray(card({pic:P.robin,badge:dv('users','bd'),name:'Robin',sub:'<i class="gdot"></i>Here',tag:'In Guest duo'}))}${tray(card({pic:P.sam,badge:dv('users','bd'),name:'Sam',sub:'<i class="gdot"></i>Here'}))}</div>
+    <div class="heard"><span>Robin heard on the stream</span><span class="cue">Sam not heard yet</span><div class="btn sm">Hear</div></div>
+    <div class="draghint">${I('grip','sm')}Drag a guest onto the picture, like any other source. The menu on a card makes a new link or removes them from every scene.</div>`,
   scenes:()=>sh('Scenes','Put a whole scene inside this one')+`<div class="g3">${tray(dev('scene','Starting soon','Scene','soon'))}${tray(dev('scene','Just chatting','Scene','chat'))}${tray(dev('scene','BRB','Scene','brb'))}</div>`,
 };
 // A stand-in for the code, not a real one.
@@ -251,7 +253,7 @@ const V={
      f.insertAdjacentHTML('beforeend',`<div class="ghost" style="left:716px;top:300px">${win('notes','Run of show','notes')}</div><svg class="ptr" style="left:762px;top:338px" viewBox="0 0 24 24"><path d="M5 3v16l4.500-4 2.800 6.500 2.700-1.200-2.800-6.300H18L5 3Z" fill="#fff" stroke="#000" stroke-width="1.500" stroke-linejoin="round"/></svg>`)}},
  'system':{label:'System picker',cls:'Ad',note:'<b>A desktop where only the system may show windows.</b> Apps and Screens become one section with one large button that opens the desktop\'s own picker. What was chosen before stays as a card, so the next time is one click with no picker. Everything else in the panel is unchanged.',
    html:()=>page(panel(['Windows'],S.system()+S.cameras(),{more:true,sb:[6,300],idx:[['Windows','win'],...IDX.slice(2)]})),after:f=>air(f,'game')},
- 'guests':{label:'Guests',cls:'Ad',note:'<b>Guests.</b> Invite shows a code to scan and a link to copy; a guest joins from a browser. Each guest who has joined is a card with a live thumbnail, dragged onto the picture like any other source. Scenes sit last: a whole scene can go inside another.',
+ 'guests':{label:'Guests',cls:'Ad',note:'<b>Guests.</b> A name and Invite show a code to scan and a link to copy; a guest joins from a browser. Each guest who has joined is a card with a live thumbnail, dragged onto the picture like any other source; a guest\'s sound joins the stream with them, or with Hear. Scenes sit last: a whole scene can go inside another.',
    html:()=>page(panel(['Guests'],S.guests()+S.scenes(),{sb:[360,200]})),after:f=>air(f,'game')},
 };
 mount(V);

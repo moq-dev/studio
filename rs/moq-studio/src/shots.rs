@@ -149,6 +149,10 @@ enum View {
 	/// Studio with no layer selected, after the guest `Ibis` appears on their
 	/// own in the scene on program.
 	Joined,
+	/// Add's Guests tab in a room with `Robin`, in a scene and heard, and
+	/// `Sam`, who is neither and shares a screen too, and the link just made
+	/// for `Alex`, who has not joined.
+	AddGuests,
 	/// The multiview, as its own window draws it, with the host and the
 	/// highlight picked beside the guests. If `live`, on air in Studio mode
 	/// with `Interview` cued.
@@ -361,8 +365,11 @@ views! {
 	add_media: Still, on_show(View::Add(AddTab::Media));
 	/// Add's microphones, each with its level.
 	add_audio: Still, on_show(View::Add(AddTab::Audio));
-	/// Add's guests: the invite, and who joined.
-	add_guests: Still, on_show(View::Add(AddTab::Guests));
+	/// Add's guests with no room to join.
+	add_guests_room: Still, on_show(View::Add(AddTab::Guests));
+	/// Add's guests: the link just made, and who joined. Not still, as the
+	/// code encodes a token signed afresh each run.
+	add_guests: Live, on_show(View::AddGuests);
 	/// A layer row's menu, as a right click opens it.
 	build_menu: Still, on_show(View::Menu);
 	/// A source published independently selected: under its switch in the
@@ -2662,6 +2669,105 @@ fn the_studio_locks_adds_and_mutes() {
 	quit(&engine, &runtime);
 }
 
+/// Add's Guests tab, in a room with a guest in a scene and heard, and one
+/// waiting: a typed name makes a link shown as a code, hidden again; a card
+/// places its guest in one click and sends their sound to the stream, which
+/// the Hear button does alone; a menu makes a new link and removes the guest
+/// from every scene. It draws no view.
+#[test]
+#[ignore = "draws on a GPU; run with `just shots`"]
+fn add_invites_and_places_guests() {
+	let (_show, runtime, gpu) = lavapipe();
+	let _entered = runtime.enter();
+	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
+	let mut text = std::fs::read_to_string(fixture.join("shots/show.toml")).unwrap();
+	for guest in ["Robin", "Sam"] {
+		text.push_str(&format!(
+			"\n[sources.{guest}]\nkind = \"broadcast\"\npath = \"room/{guest}/camera.hang\"\n"
+		));
+	}
+	std::fs::write("show.toml", text).unwrap();
+	let app = start(launch(&gpu), stream(None), &runtime);
+	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, recent::Recent::default());
+	harness.step();
+	let engine = started.get().expect("the studio started").clone();
+	let connect = url::Url::parse("https://relay.example/show").unwrap();
+	let page = url::Url::parse("https://join.studio.moq.dev/").unwrap();
+	let key = crate::guests::tests::key("show/room", &["**"], &["**"]);
+	let room = crate::guests::Room::new(&connect, "room", key, page, crate::guests::tests::EXPIRY).unwrap();
+	engine.join(Some(crate::guests::Joining::offline(room))).unwrap();
+	let room = engine.room().expect("the room joined");
+	for guest in ["Robin", "Sam"] {
+		let path = moq_net::Path::new(&format!("{guest}/camera.hang")).unwrap();
+		room.observe(&path, true, &moq_scene::Collection::new(), &moq_scene::History::new());
+	}
+	let heard = |name: &str| {
+		let state = engine.state.lock().unwrap();
+		let collection = state.collection();
+		collection.heard(collection.program_audio().unwrap()).contains(name)
+	};
+	let shown = |name: &str| {
+		let state = engine.state.lock().unwrap();
+		let scenes = &state.collection().scenes;
+		scenes
+			.iter()
+			.any(|scene| scene.items.iter().any(|item| item.source == name))
+	};
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		panic!("the studio starts on its first frame")
+	};
+	studio.open_add(AddTab::Guests);
+	harness.run_steps(2);
+	assert!(!heard("Sam") && !shown("Sam"), "a guest waits until placed");
+
+	// A name makes a link, as a code to scan, until it is put away.
+	harness.get_by_role(Role::TextInput).click();
+	harness.run_steps(2);
+	harness.get_by_role(Role::TextInput).type_text("Alex");
+	harness.run_steps(2);
+	harness.get_by_label("Invite").click();
+	harness.run_steps(2);
+	assert!(harness.query_by_label("Invite Alex").is_some(), "the link shows");
+	assert!(
+		harness.query_by_label("Add Alex").is_some(),
+		"Alex has a card, not here yet"
+	);
+	harness.get_by_label("Hide link").click();
+	harness.run_steps(2);
+	assert!(harness.query_by_label("Invite Alex").is_none(), "the link is put away");
+	harness.get_by_label("Add Robin").click_secondary();
+	harness.run_steps(2);
+	harness.get_by_label("New link").click();
+	harness.run_steps(2);
+	assert!(harness.query_by_label("Invite Robin").is_some(), "a new link shows");
+
+	// The Hear button sends the sound alone, as placing does.
+	harness.get_by_label("Hear Sam").click();
+	harness.run_steps(2);
+	assert!(heard("Sam") && !shown("Sam"), "heard, though in no scene");
+	assert!(harness.query_by_label("Hear Sam").is_none(), "nothing left to hear");
+	assert!(harness.query_by_label("Hear Robin").is_some(), "only theirs was sent");
+	harness.get_by_label("Add Sam").click();
+	harness.run_steps(2);
+	assert!(shown("Sam"), "a click places them in the edited scene");
+
+	// Removed from every scene, and no longer heard.
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		unreachable!("the studio is open")
+	};
+	studio.open_add(AddTab::Guests);
+	harness.run_steps(2);
+	harness.get_by_label("Add Sam").click_secondary();
+	harness.run_steps(2);
+	harness.get_by_label("Remove from scenes").click();
+	harness.run_steps(2);
+	assert!(!shown("Sam") && !heard("Sam"), "they leave the picture and the mix");
+	assert!(room.participants()["Sam"].removed, "and their token stops renewing");
+
+	drop(harness);
+	quit(&engine, &runtime);
+}
+
 /// While a mod is off, its feature is held back where no page shows it: a
 /// key for it does nothing, a layer's menu offers no slot, a guest is not
 /// placed on their own, though the settings ask, and a guest waiting to be
@@ -3181,6 +3287,15 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 			if let View::KeepClear { dual: true } = view {
 				text = text.replacen("version = 1\n", "version = 1\nportrait = true\n", 1);
 			}
+			if let View::AddGuests = view {
+				text.push_str(
+					"\n[sources.Robin]\nkind = \"broadcast\"\npath = \"room/Robin/camera.hang\"\n\
+					 \n[sources.Sam]\nkind = \"broadcast\"\npath = \"room/Sam/camera.hang\"\n\
+					 \n[sources.\"Sam screen\"]\nkind = \"broadcast\"\npath = \"room/Sam/screen.hang\"\n\
+					 \n[[scenes]]\nname = \"Guest duo\"\nitems = [\n    \
+					 { source = \"Robin\", rect = { x = 0, y = 0, width = 1920, height = 1080 } },\n]\n",
+				);
+			}
 			if let View::Review { replays: true, .. } = view {
 				text.push_str("\n[sources.replay]\nkind = \"replay\"\n\n[sources.slowmo]\nkind = \"replay\"\n");
 			}
@@ -3237,6 +3352,10 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		View::Add(tab) => {
 			studio.seed_devices(add_devices());
 			studio.open_add(*tab);
+		}
+		View::AddGuests => {
+			studio.seed_devices(add_devices());
+			studio.open_add(AddTab::Guests);
 		}
 		View::KeepClear { .. } => {
 			studio.build(Side::Layers, Inspect::Layer, Some(0));
@@ -3351,6 +3470,23 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		room.unpair("tablet").unwrap();
 		engine.join(Some(crate::guests::Joining::offline(room))).unwrap();
 	}
+	if let View::AddGuests = view {
+		let connect = url::Url::parse("https://relay.example/show").unwrap();
+		let page = url::Url::parse("https://join.studio.moq.dev/").unwrap();
+		let key = crate::guests::tests::key("show/room", &["**"], &["**"]);
+		let room = crate::guests::Room::new(&connect, "room", key, page, crate::guests::tests::EXPIRY).unwrap();
+		engine.join(Some(crate::guests::Joining::offline(room))).unwrap();
+		let room = engine.room().expect("the room joined");
+		let nothing = (&moq_scene::Collection::new(), &moq_scene::History::new());
+		for broadcast in ["Robin/camera.hang", "Sam/camera.hang", "Sam/screen.hang"] {
+			room.observe(&moq_net::Path::new(broadcast).unwrap(), true, nothing.0, nothing.1);
+		}
+		// Robin is heard once in a scene, as placing them does; Sam is not.
+		let mut state = engine.state.lock().unwrap();
+		let mut draft = state.collection().draft("Hear `Robin`");
+		draft.hear("Robin").unwrap();
+		state.commit(draft, None).unwrap();
+	}
 	if let View::Joined = view {
 		let mut state = engine.state.lock().unwrap();
 		let connect = url::Url::parse("https://relay.example/show").unwrap();
@@ -3409,6 +3545,14 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 		}
 		View::CustomCanvas => {
 			harness.get_all_by_label("Custom").next().unwrap().click();
+			harness.run_steps(4);
+		}
+		View::AddGuests => {
+			harness.get_by_role(Role::TextInput).click();
+			harness.run_steps(2);
+			harness.get_by_role(Role::TextInput).type_text("Alex");
+			harness.run_steps(2);
+			harness.get_by_label("Invite").click();
 			harness.run_steps(4);
 		}
 		View::Paired => {

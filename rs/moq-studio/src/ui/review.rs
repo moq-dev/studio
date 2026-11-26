@@ -1412,7 +1412,7 @@ fn grip_at(x: f32, from_x: f32, to_x: f32) -> Option<Grip> {
 }
 
 /// The part of a `texture` that covers a rect of `room`'s shape, centered.
-fn cover(texture: Vec2, room: Vec2) -> Rect {
+pub(super) fn cover(texture: Vec2, room: Vec2) -> Rect {
 	let (texture, room) = (texture.x / texture.y.max(1.0), room.x / room.y.max(1.0));
 	match texture > room {
 		true => {

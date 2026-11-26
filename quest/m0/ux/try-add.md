@@ -38,6 +38,13 @@ layer**, `A`, the picture's right-click **Add a layer**, or the palette's
   and offers **Try again**.
 - **Media & Web:** **Image or video file…** opening the system's file
   dialog, a pasted web address, **Text**, and **Color**.
+- **Guests:** with a room set up, type a name and **Invite**, scan the code
+  with a phone, and join: the guest's card should show their live picture
+  within a few seconds and say "Not heard yet" until **Hear** or a click
+  places them. Check **New link** and **Remove from scenes** from its menu,
+  and that stopping the relay's session shows **Not renewing** on the card.
+  A live picture in the card is unmeasured on a real guest: look at the
+  window's frame time with several guests listed.
 - **The first launch:** from a cold launch (moving the app's storage aside as
   [Try the first launch](/quest/m0/ux/try-first-run.md) says), count the
   clicks to a live screen with a camera picture-in-picture, through the

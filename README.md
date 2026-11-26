@@ -327,9 +327,15 @@ button, or a click beside it closes Add. Its tabs:
 - **Audio:** each microphone, and on macOS the system's sound, with a level
   meter so the one that moves when you talk is the one to pick. A sound has
   no layer: it joins the audio scene on program.
-- **Guests:** with a room, invite one, show their join link as a QR code in a
-  sheet over the window, see who joined, and take a guest out of every
-  scene; a guest's picture no scene shows yet is a card to add.
+- **Guests:** with a room, type a name and **Invite** to show that guest's
+  join link as a QR code to scan, with a button to copy it. Each guest is a
+  card with their live picture, which a click adds to the scene or a drag
+  places on the picture like any source. The card says which scenes show them
+  and whether the stream hears them: **Hear** sends their sound to the stream
+  without placing them. Its ⋯ menu, or a right click, makes **New link**,
+  shows the link again, or takes them out of every scene (**Remove from
+  scenes**). A token the studio cannot renew shows as **Not renewing** on
+  the card of each guest it affects.
 
 Where a new picture goes: the first fills the canvas; one added while
 nothing covers the canvas fills it behind the smaller layers already there;
@@ -887,9 +893,8 @@ cloned or published; its layers take their own.
 The scene inspector's **Slots** section picks the arrangement, lists the
 slots with the role or source in each and what fills each role, and adds a
 **Main slot** or **Camera slot**, making the role if the show has none. Add's
-**Guests** tab, under **Waiting for a scene**, puts a guest into the scene's
-next tile when it has slots, and any source it adds there is heard on the
-stream.
+**Guests** tab puts a guest into the scene's next tile when it has slots, and
+any source it adds there is heard on the stream.
 
 **Appear on their own**, in Settings, Guests, has a guest whose camera comes
 online take the next tile of the scene on program, and be heard on program,
