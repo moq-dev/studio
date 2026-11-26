@@ -2681,6 +2681,7 @@ fn add_invites_and_places_guests() {
 	let _entered = runtime.enter();
 	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
 	let mut text = std::fs::read_to_string(fixture.join("shots/show.toml")).unwrap();
+	text.push_str("\n[sources.\"Sam screen\"]\nkind = \"broadcast\"\npath = \"room/Sam/screen.hang\"\n");
 	// Kit was saved with the show and has not joined this session.
 	for guest in ["Robin", "Sam", "Kit"] {
 		text.push_str(&format!(
@@ -2698,8 +2699,8 @@ fn add_invites_and_places_guests() {
 	let room = crate::guests::Room::new(&connect, "room", key, page, crate::guests::tests::EXPIRY).unwrap();
 	engine.join(Some(crate::guests::Joining::offline(room))).unwrap();
 	let room = engine.room().expect("the room joined");
-	for guest in ["Robin", "Sam"] {
-		let path = moq_net::Path::new(&format!("{guest}/camera.hang")).unwrap();
+	for guest in ["Robin/camera", "Sam/camera", "Sam/screen"] {
+		let path = moq_net::Path::new(&format!("{guest}.hang")).unwrap();
 		room.observe(&path, true, &moq_scene::Collection::new(), &moq_scene::History::new());
 	}
 	let heard = |name: &str| {
@@ -2778,6 +2779,26 @@ fn add_invites_and_places_guests() {
 	harness.run_steps(2);
 	assert!(!shown("Sam") && !heard("Sam"), "they leave the picture and the mix");
 	assert!(room.participants()["Sam"].removed, "and their token stops renewing");
+
+	// A screen is removed for good on its own, leaving their camera.
+	harness.hover_at(harness.get_by_label("Add Robin").rect().center());
+	harness.run_steps(1);
+	harness.input_mut().events.push(egui::Event::MouseWheel {
+		unit: egui::MouseWheelUnit::Point,
+		delta: egui::vec2(0.0, -400.0),
+		phase: egui::TouchPhase::Move,
+		modifiers: egui::Modifiers::NONE,
+	});
+	harness.run_steps(3);
+	harness.get_by_label("Add Sam's screen").click_secondary();
+	harness.run_steps(2);
+	harness.get_by_label("Remove for good").click();
+	harness.run_steps(2);
+	{
+		let state = engine.state.lock().unwrap();
+		let sources = &state.collection().sources;
+		assert!(!sources.contains_key("Sam screen") && sources.contains_key("Sam"));
+	}
 
 	// A saved guest who never joins can be removed for good.
 	harness.get_by_label("Add Kit").click_secondary();

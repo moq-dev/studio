@@ -800,12 +800,7 @@ impl Panels {
 		let sound = |voice: String| {
 			let muted = collection.audio.get(&voice).is_some_and(|audio| audio.muted);
 			let routed = program.as_ref().is_some_and(|heard| heard.contains(voice.as_str()));
-			let sound = match (muted, routed) {
-				(true, _) => Sound::Muted,
-				(false, true) => Sound::Heard,
-				(false, false) => Sound::Unrouted,
-			};
-			(voice, sound)
+			(voice, Sound { routed, muted })
 		};
 		let mut cards = Vec::new();
 		let mut screens = Vec::new();
@@ -971,9 +966,28 @@ impl Panels {
 		// Whether the stream carries their sound.
 		let sound = line + 24.0;
 		let (note, ink) = match (&guest.voice, &guest.source) {
-			(Some((_, Sound::Unrouted)), _) => ("Not heard yet", kit::CUE),
-			(Some((_, Sound::Heard)), _) => ("Heard on the stream", kit::DIM),
-			(Some((_, Sound::Muted)), _) => ("Muted in Mix", kit::CUE),
+			(
+				Some((
+					_,
+					Sound {
+						routed: false,
+						muted: false,
+					},
+				)),
+				_,
+			) => ("Not heard yet", kit::CUE),
+			(
+				Some((
+					_,
+					Sound {
+						routed: false,
+						muted: true,
+					},
+				)),
+				_,
+			) => ("Not heard yet, muted in Mix", kit::CUE),
+			(Some((_, Sound { muted: true, .. })), _) => ("Muted in Mix", kit::CUE),
+			(Some(_), _) => ("Heard on the stream", kit::DIM),
 			(None, Some(_)) => ("Screen share", kit::DIM),
 			(None, None) => ("Waiting for them to open the link", kit::DIM),
 		};
@@ -984,7 +998,7 @@ impl Panels {
 			kit::ui(11.5),
 			ink,
 		);
-		if let Some((voice, Sound::Unrouted)) = &guest.voice {
+		if let Some((voice, Sound { routed: false, .. })) = &guest.voice {
 			let hear = Rect::from_min_size(pos2(right - 48.0, sound - 1.0), vec2(48.0, 22.0));
 			let button = ui.interact(hear, id.with("hear"), Sense::click());
 			let label = format!("Hear {}", guest.title);
@@ -1004,7 +1018,7 @@ impl Panels {
 				kit::TEXT,
 			);
 			let button = button.on_hover_text(format!(
-				"Send {}'s sound to the stream. Placing them in a scene does too.",
+				"Send {}'s sound to the stream, leaving Mix's mute as it is. Placing them in a scene does too.",
 				guest.guest
 			));
 			if button.clicked() {
@@ -1013,7 +1027,7 @@ impl Panels {
 		}
 
 		// Their menu, from a button for whoever does not know to right-click.
-		if guest.own {
+		if guest.own || guest.source.is_some() {
 			response.context_menu(|ui| {
 				if let Some(chosen) = guest_menu(ui, guest) {
 					asked = Some(Asked::Guest(chosen));
@@ -1075,13 +1089,13 @@ impl Panels {
 				);
 				self.fail(Spot::Add, result);
 			}
-			Guest::Forget(name) => {
-				let mut state = engine.state.lock().unwrap();
-				let sources = room.sources_of(state.collection(), &name);
-				let result = edit(&mut state, format!("Remove `{name}` for good"), None, |draft| {
-					sources.iter().try_for_each(|source| draft.remove_source(source))
-				});
-				drop(state);
+			Guest::Forget(source) => {
+				let result = edit(
+					&mut engine.state.lock().unwrap(),
+					format!("Remove `{source}`"),
+					None,
+					|draft| draft.remove_source(&source),
+				);
 				self.deselect_item();
 				self.fail(Spot::Add, result);
 			}
@@ -1192,14 +1206,12 @@ struct GuestCard {
 }
 
 /// What the stream does with a guest's microphone.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Sound {
-	/// No audio scene on program holds it.
-	Unrouted,
-	/// The program carries it.
-	Heard,
-	/// Muted in Mix, whether the program carries it or not.
-	Muted,
+#[derive(Clone, Copy)]
+struct Sound {
+	/// Whether the audio scene on program holds it.
+	routed: bool,
+	/// Whether Mix mutes it, which a route leaves as it is.
+	muted: bool,
 }
 
 /// What a click in the Guests tab asks of the room.
@@ -1216,7 +1228,7 @@ enum Guest {
 	Hear(String),
 	/// Take this guest out of every scene and stop renewing their token.
 	Remove(String),
-	/// Remove this guest's sources from the show.
+	/// Remove this source from the show.
 	Forget(String),
 }
 
@@ -1250,29 +1262,34 @@ fn shown_in(collection: &Collection, sources: &[String]) -> Vec<String> {
 /// A guest's menu, from their card's right click or its ⋯ button, and what it chose.
 fn guest_menu(ui: &mut Ui, guest: &GuestCard) -> Option<Guest> {
 	let mut chosen = None;
-	if ui
-		.button("New link")
-		.on_hover_text("An earlier link keeps working until it expires")
-		.clicked()
-	{
-		chosen = Some(Guest::Link(guest.guest.clone()));
+	// The guest's own, not their screen's, which is only a source.
+	if guest.own {
+		if ui
+			.button("New link")
+			.on_hover_text("An earlier link keeps working until it expires")
+			.clicked()
+		{
+			chosen = Some(Guest::Link(guest.guest.clone()));
+		}
+		if guest.link.is_some() && ui.button("Show link").clicked() {
+			chosen = Some(Guest::Show(guest.guest.clone()));
+		}
+		let remove = ui
+			.button("Remove from scenes")
+			.on_hover_text(
+				"Take their camera and screen, and any mask reading them, out of every scene and mute them. Their token stops renewing, so they leave within the link lifetime in Settings, Guests. Undo puts them back in the scenes; only New link renews them again.",
+			);
+		if remove.clicked() {
+			chosen = Some(Guest::Remove(guest.guest.clone()));
+		}
 	}
-	if guest.link.is_some() && ui.button("Show link").clicked() {
-		chosen = Some(Guest::Show(guest.guest.clone()));
-	}
-	let remove = ui
-		.button("Remove from scenes")
-		.on_hover_text(
-			"Take their camera and screen, and any mask reading them, out of every scene and mute them. Their token stops renewing, so they leave within the link lifetime in Settings, Guests. Undo puts them back in the scenes; only New link renews them again.",
+	if let Some(source) = &guest.source {
+		let forget = ui.button("Remove for good").on_hover_text(
+			"Take this picture out of the show, and out of every scene and audio scene holding it. It comes back if they join again.",
 		);
-	if remove.clicked() {
-		chosen = Some(Guest::Remove(guest.guest.clone()));
-	}
-	let forget = ui.button("Remove for good").on_hover_text(
-		"Take their sources out of the show, and out of every scene and audio scene holding them. They come back if they join again.",
-	);
-	if forget.clicked() {
-		chosen = Some(Guest::Forget(guest.guest.clone()));
+		if forget.clicked() {
+			chosen = Some(Guest::Forget(source.clone()));
+		}
 	}
 	if chosen.is_some() {
 		ui.close();
