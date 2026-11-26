@@ -2681,7 +2681,8 @@ fn add_invites_and_places_guests() {
 	let _entered = runtime.enter();
 	let fixture = Path::new(env!("CARGO_MANIFEST_DIR"));
 	let mut text = std::fs::read_to_string(fixture.join("shots/show.toml")).unwrap();
-	for guest in ["Robin", "Sam"] {
+	// Kit was saved with the show and has not joined this session.
+	for guest in ["Robin", "Sam", "Kit"] {
 		text.push_str(&format!(
 			"\n[sources.{guest}]\nkind = \"broadcast\"\npath = \"room/{guest}/camera.hang\"\n"
 		));
@@ -2719,6 +2720,10 @@ fn add_invites_and_places_guests() {
 	studio.open_add(AddTab::Guests);
 	harness.run_steps(2);
 	assert!(!heard("Sam") && !shown("Sam"), "a guest waits until placed");
+	assert!(
+		harness.query_by_label("Add Kit").is_some(),
+		"a saved guest has a card before they join"
+	);
 
 	// A name makes a link, as a code to scan, until it is put away.
 	harness.get_by_role(Role::TextInput).click();
@@ -2742,6 +2747,16 @@ fn add_invites_and_places_guests() {
 	assert!(harness.query_by_label("Invite Robin").is_some(), "a new link shows");
 
 	// The Hear button sends the sound alone, as placing does.
+	// Below the first row, so scrolled to with the wheel as a person would.
+	harness.hover_at(harness.get_by_label("Add Robin").rect().center());
+	harness.run_steps(1);
+	harness.input_mut().events.push(egui::Event::MouseWheel {
+		unit: egui::MouseWheelUnit::Point,
+		delta: egui::vec2(0.0, -400.0),
+		phase: egui::TouchPhase::Move,
+		modifiers: egui::Modifiers::NONE,
+	});
+	harness.run_steps(3);
 	harness.get_by_label("Hear Sam").click();
 	harness.run_steps(2);
 	assert!(heard("Sam") && !shown("Sam"), "heard, though in no scene");
@@ -2763,6 +2778,16 @@ fn add_invites_and_places_guests() {
 	harness.run_steps(2);
 	assert!(!shown("Sam") && !heard("Sam"), "they leave the picture and the mix");
 	assert!(room.participants()["Sam"].removed, "and their token stops renewing");
+
+	// A saved guest who never joins can be removed for good.
+	harness.get_by_label("Add Kit").click_secondary();
+	harness.run_steps(2);
+	harness.get_by_label("Remove for good").click();
+	harness.run_steps(2);
+	assert!(
+		!engine.state.lock().unwrap().collection().sources.contains_key("Kit"),
+		"their source is gone from the show"
+	);
 
 	drop(harness);
 	quit(&engine, &runtime);

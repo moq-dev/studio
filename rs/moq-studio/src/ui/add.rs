@@ -797,9 +797,19 @@ impl Panels {
 		let state = self.engine.state.lock().unwrap();
 		let collection = state.collection();
 		let program = collection.program_audio().map(|scene| collection.heard(scene));
+		let sound = |voice: String| {
+			let muted = collection.audio.get(&voice).is_some_and(|audio| audio.muted);
+			let routed = program.as_ref().is_some_and(|heard| heard.contains(voice.as_str()));
+			let sound = match (muted, routed) {
+				(true, _) => Sound::Muted,
+				(false, true) => Sound::Heard,
+				(false, false) => Sound::Unrouted,
+			};
+			(voice, sound)
+		};
 		let mut cards = Vec::new();
 		let mut screens = Vec::new();
-		for (name, guest) in room.participants() {
+		for (name, guest) in room.known(collection) {
 			let sources = room.sources_of(collection, &name);
 			let voice = room.voices(collection, &name).next().map(str::to_string);
 			let screen = sources
@@ -816,11 +826,8 @@ impl Panels {
 				here: guest.camera || (!camera && guest.screen),
 				source,
 				own: true,
-				scenes: scenes.clone(),
-				voice: voice.map(|voice| {
-					let heard = program.as_ref().is_some_and(|heard| heard.contains(voice.as_str()));
-					(voice, heard)
-				}),
+				scenes,
+				voice: voice.map(sound),
 				renewed: guest.renewed(),
 				removed: guest.removed,
 				link: guest.invite.filter(|link| link.expires > now),
@@ -831,9 +838,9 @@ impl Panels {
 					guest: name.clone(),
 					title: format!("{name}'s screen"),
 					here: guest.screen,
+					scenes: shown_in(collection, std::slice::from_ref(&screen)),
 					source: Some(screen),
 					own: false,
-					scenes,
 					voice: None,
 					renewed: false,
 					removed: guest.removed,
@@ -848,9 +855,11 @@ impl Panels {
 	/// Draw `guest`'s card in `at`; what it asks for.
 	fn guest_card(&mut self, ui: &mut Ui, at: Rect, guest: &GuestCard, failure: Option<&str>) -> Option<Asked> {
 		let mut asked = None;
-		let sense = match guest.source {
-			Some(_) => Sense::click_and_drag(),
-			None => Sense::hover(),
+		let sense = match (&guest.source, guest.own) {
+			(Some(_), _) => Sense::click_and_drag(),
+			// Their menu opens from a right click, whether or not they joined.
+			(None, true) => Sense::click(),
+			(None, false) => Sense::hover(),
 		};
 		let id = ui.id().with(("guest card", &guest.guest, &guest.title));
 		let response = ui.interact(at, id, sense);
@@ -962,8 +971,9 @@ impl Panels {
 		// Whether the stream carries their sound.
 		let sound = line + 24.0;
 		let (note, ink) = match (&guest.voice, &guest.source) {
-			(Some((_, false)), _) => ("Not heard yet", kit::CUE),
-			(Some((_, true)), _) => ("Heard on the stream", kit::DIM),
+			(Some((_, Sound::Unrouted)), _) => ("Not heard yet", kit::CUE),
+			(Some((_, Sound::Heard)), _) => ("Heard on the stream", kit::DIM),
+			(Some((_, Sound::Muted)), _) => ("Muted in Mix", kit::CUE),
 			(None, Some(_)) => ("Screen share", kit::DIM),
 			(None, None) => ("Waiting for them to open the link", kit::DIM),
 		};
@@ -974,7 +984,7 @@ impl Panels {
 			kit::ui(11.5),
 			ink,
 		);
-		if let Some((voice, false)) = &guest.voice {
+		if let Some((voice, Sound::Unrouted)) = &guest.voice {
 			let hear = Rect::from_min_size(pos2(right - 48.0, sound - 1.0), vec2(48.0, 22.0));
 			let button = ui.interact(hear, id.with("hear"), Sense::click());
 			let label = format!("Hear {}", guest.title);
@@ -1063,6 +1073,16 @@ impl Panels {
 					None,
 					|draft| draft.hear(&source),
 				);
+				self.fail(Spot::Add, result);
+			}
+			Guest::Forget(name) => {
+				let mut state = engine.state.lock().unwrap();
+				let sources = room.sources_of(state.collection(), &name);
+				let result = edit(&mut state, format!("Remove `{name}` for good"), None, |draft| {
+					sources.iter().try_for_each(|source| draft.remove_source(source))
+				});
+				drop(state);
+				self.deselect_item();
 				self.fail(Spot::Add, result);
 			}
 			Guest::Remove(name) => {
@@ -1161,14 +1181,25 @@ struct GuestCard {
 	own: bool,
 	/// The scenes showing them.
 	scenes: Vec<String>,
-	/// The source playing their microphone, and whether the stream carries it.
-	voice: Option<(String, bool)>,
+	/// The source playing their microphone, and what the stream does with it.
+	voice: Option<(String, Sound)>,
 	/// Whether the studio renews their token.
 	renewed: bool,
 	/// Whether the host removed them from scenes.
 	removed: bool,
 	/// Their newest link, while it works.
 	link: Option<crate::guests::Invite>,
+}
+
+/// What the stream does with a guest's microphone.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sound {
+	/// No audio scene on program holds it.
+	Unrouted,
+	/// The program carries it.
+	Heard,
+	/// Muted in Mix, whether the program carries it or not.
+	Muted,
 }
 
 /// What a click in the Guests tab asks of the room.
@@ -1185,6 +1216,8 @@ enum Guest {
 	Hear(String),
 	/// Take this guest out of every scene and stop renewing their token.
 	Remove(String),
+	/// Remove this guest's sources from the show.
+	Forget(String),
 }
 
 /// The color and words for how a guest is doing: removed, failing to renew
@@ -1228,12 +1261,18 @@ fn guest_menu(ui: &mut Ui, guest: &GuestCard) -> Option<Guest> {
 		chosen = Some(Guest::Show(guest.guest.clone()));
 	}
 	let remove = ui
-		.add_enabled(!guest.removed, egui::Button::new("Remove from scenes"))
+		.button("Remove from scenes")
 		.on_hover_text(
 			"Take their camera and screen, and any mask reading them, out of every scene and mute them. Their token stops renewing, so they leave within the link lifetime in Settings, Guests. Undo puts them back in the scenes; only New link renews them again.",
 		);
 	if remove.clicked() {
 		chosen = Some(Guest::Remove(guest.guest.clone()));
+	}
+	let forget = ui.button("Remove for good").on_hover_text(
+		"Take their sources out of the show, and out of every scene and audio scene holding them. They come back if they join again.",
+	);
+	if forget.clicked() {
+		chosen = Some(Guest::Forget(guest.guest.clone()));
 	}
 	if chosen.is_some() {
 		ui.close();
