@@ -38,8 +38,9 @@ layer**, `A`, the picture's right-click **Add a layer**, or the palette's
   and offers **Try again**.
 - **Media & Web:** **Image or video file…** opening the system's file
   dialog, a pasted web address, **Text**, and **Color**.
-- **Guests:** with a room set up, type a name and **Invite**, scan the code
-  with a phone, and join: the guest's card should show their live picture
+- **Guests:** with a room set up and **Appear on their own** off (it would
+  place and route a guest before you touch the card), type a new guest's name
+  and **Invite**, scan the code with a phone, and join: the guest's card should show their live picture
   within a few seconds and say "Not heard yet" until **Hear** or a click
   places them. Check **New link** and **Remove from scenes** from its menu,
   and that stopping the relay's session shows **Not renewing** on the card.

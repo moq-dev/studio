@@ -893,8 +893,9 @@ cloned or published; its layers take their own.
 The scene inspector's **Slots** section picks the arrangement, lists the
 slots with the role or source in each and what fills each role, and adds a
 **Main slot** or **Camera slot**, making the role if the show has none. Add's
-**Guests** tab puts a guest into the scene's next tile when it has slots, and
-any source it adds there is heard on the stream.
+**Guests** tab puts a guest into the scene's next tile on a click, when the
+scene has slots and does not already show that broadcast (a drag lands where
+it is let go), and any source it adds there is heard on the stream.
 
 **Appear on their own**, in Settings, Guests, has a guest whose camera comes
 online take the next tile of the scene on program, and be heard on program,

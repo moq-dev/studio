@@ -939,7 +939,6 @@ impl Panels {
 		}
 
 		// Their name, and how they are doing.
-		let text = painter.with_clip_rect(at.shrink2(vec2(12.0, 0.0)));
 		let line = picture.bottom() + 9.0;
 		let failing = failure.filter(|_| guest.renewed && !guest.removed);
 		let (dot, status) = standing(guest, failing);
@@ -948,13 +947,21 @@ impl Panels {
 		let status_at = pos2(right - status.size().x, line + 1.0);
 		painter.circle_filled(pos2(status_at.x - 9.0, line + 8.0), 3.5, dot);
 		painter.galley(status_at, status, kit::DIM);
-		text.text(
+		// Clipped before their status, whose dot sits 9 points ahead of it.
+		let name_room = Rect::from_min_max(pos2(at.left() + 12.0, at.top()), pos2(status_at.x - 16.0, at.bottom()));
+		painter.with_clip_rect(name_room).text(
 			pos2(at.left() + 12.0, line),
 			Align2::LEFT_TOP,
 			&guest.title,
 			kit::ui_strong(13.0),
 			kit::TEXT,
 		);
+		ui.interact(
+			name_room.with_max_y(line + 18.0).with_min_y(line),
+			id.with("name"),
+			Sense::hover(),
+		)
+		.on_hover_text(&guest.title);
 		if let Some(failure) = failing {
 			let spot = Rect::from_min_max(pos2(status_at.x - 16.0, line), pos2(right, line + 18.0));
 			ui.interact(spot, id.with("renewal"), Sense::hover())
