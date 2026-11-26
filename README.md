@@ -2371,7 +2371,11 @@ screenshots.
 ## Development
 
 Use the Nix dev shell (`direnv allow`, or `nix develop --command ...`) so
-tooling matches CI, then:
+tooling matches CI. On a Linux host that is not NixOS and has an AMD or Intel
+GPU, the shell also points Vulkan and VA-API at its own Mesa (and Intel's
+`iHD`), since the host's drivers cannot load from a Nix binary; an NVIDIA
+host keeps its own driver, and a `VK_DRIVER_FILES` or `LIBVA_DRIVERS_PATH`
+you set wins. Then:
 
 ```bash
 just check   # Lint everything, including the quest tree
