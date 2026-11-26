@@ -47,6 +47,11 @@ impl Tab {
 	}
 }
 
+/// The layer of Add's backdrop, egui's modal layer while it is open.
+fn scrim() -> egui::LayerId {
+	egui::LayerId::new(egui::Order::Middle, egui::Id::new("add scrim"))
+}
+
 /// Add's own state.
 pub(super) struct Adding {
 	/// Whether it is open over the stage.
@@ -102,6 +107,19 @@ struct Entry {
 	remove: Option<String>,
 }
 
+impl Entry {
+	/// What tells it from every other card as the lists change: the source
+	/// it adds, which names its device as the system knows it so two cameras
+	/// of one model differ, or the show's source it places or removes.
+	fn key(&self) -> String {
+		match (&self.card, &self.remove) {
+			(Ok(Card::New(pick)), _) => format!("{:?}", pick.source),
+			(Ok(Card::Unused(name)), _) | (Err(_), Some(name)) => format!("source {name}"),
+			(Err(_), None) => format!("{} {}", self.name, self.line),
+		}
+	}
+}
+
 /// What a click in Add asks for.
 enum Asked {
 	Card(Card),
@@ -141,17 +159,19 @@ impl Panels {
 			dragged(&ctx, &card);
 			return;
 		}
-		// Over the whole window, so nothing beside it, such as a scene's pad,
-		// takes a click while it is open.
+		// Over the whole window, and egui's modal layer, so nothing beside it
+		// takes a click or the keyboard while it is open: a scene's pad that
+		// had it loses it, so Enter cannot press it.
 		let screen = ctx.content_rect();
-		let scrim = egui::Area::new(egui::Id::new("add scrim"))
-			.order(egui::Order::Middle)
+		let scrim = egui::Area::new(self::scrim().id)
+			.order(self::scrim().order)
 			.fixed_pos(screen.min)
 			.show(&ctx, |ui| {
 				let (rect, response) = ui.allocate_exact_size(screen.size(), Sense::click());
 				ui.painter().rect_filled(rect, 0, kit::BG.gamma_multiply(0.7));
 				kit::named(response, "Beside Add")
 			});
+		ctx.memory_mut(|memory| memory.set_modal_layer(scrim.response.layer_id));
 		let width = (stage.width() - 48.0).clamp(320.0, WIDE);
 		let tall = (stage.height() - 170.0).max(160.0);
 		let frame = egui::Frame::new()
@@ -247,10 +267,15 @@ impl Panels {
 			}
 			Some(Asked::Page(url)) => {
 				self.adding.url.clear();
+				// The edited picture's size, so a page added in portrait lays
+				// itself out for a portrait screen.
 				let canvas = {
 					let state = self.engine.state.lock().unwrap();
 					let collection = state.collection();
-					collection.canvas(self.edited(&state)).unwrap_or(collection.canvas)
+					match self.landing(&state, None) {
+						Ok(landing) => landing.canvas,
+						Err(_) => collection.canvas(self.edited(&state)).unwrap_or(collection.canvas),
+					}
 				};
 				let page = Pick {
 					name: url.host_str().unwrap_or("Web page").to_string(),
@@ -276,7 +301,13 @@ impl Panels {
 		if !self.adding.open {
 			return false;
 		}
-		if !ui.ctx().text_edit_focused()
+		// Not while a modal over it, such as the palette, takes Escape.
+		let over = ui
+			.ctx()
+			.memory(|memory| memory.top_modal_layer())
+			.is_some_and(|layer| layer != scrim());
+		if !over
+			&& !ui.ctx().text_edit_focused()
 			&& ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
 		{
 			self.close_add();
@@ -299,7 +330,16 @@ impl Panels {
 				let result = match at.map(|at| self.landing(&state, Some(at))) {
 					None => {
 						let layer = self.scene(&state).ok();
-						add(&mut state, New { name, source, layer })
+						let format = self.format;
+						add(
+							&mut state,
+							New {
+								name,
+								source,
+								layer,
+								format,
+							},
+						)
 					}
 					Some(Err(why)) => Err(anyhow::anyhow!(why)),
 					Some(Ok(landing)) => {
@@ -328,16 +368,13 @@ impl Panels {
 		let landing = at.map(|at| self.landing(state, Some(at)));
 		let landing = landing.transpose().map_err(|why| anyhow::anyhow!(why))?;
 		let layer = self.scene(state).map_err(|why| anyhow::anyhow!(why))?;
-		let shown = super::slots::placed(state, &layer, Format::Landscape);
 		let collection = state.collection();
 		let source = collection.sources.get(name).context("the source is gone")?;
-		let canvas = collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas);
-		let (mut index, rect) = place(collection, &shown, canvas, source, None);
-		let mut item = Item::new(name.to_string(), rect);
+		let (mut index, mut item) = put(state, &layer, self.format, name, source);
 		if let Some(landing) = &landing {
 			let rect = place(collection, &[], landing.canvas, source, Some(landing.at)).1;
 			item = super::drop::landed(collection, landing, name, rect);
-			index = shown.len();
+			index = collection.items(&layer).map_or(0, <[Item]>::len);
 		}
 		// A guest takes the next tile of a scene with slots.
 		let room = self.engine.room();
@@ -879,9 +916,13 @@ pub(super) fn place(
 		return (front, super::drop::land(canvas, own.unwrap_or([width, height]), at));
 	}
 	if let Some([w, h]) = own {
+		// At its own size, or shrunk to fit and centered, as a portrait
+		// page is in the landscape picture.
+		let fit = (width / w).min(height / h).min(1.0);
+		let (w, h) = ((w * fit).round(), (h * fit).round());
 		let rect = moq_scene::Rect {
-			x: 0.0,
-			y: 0.0,
+			x: if fit < 1.0 { ((width - w) / 2.0).round() } else { 0.0 },
+			y: if fit < 1.0 { ((height - h) / 2.0).round() } else { 0.0 },
 			width: w,
 			height: h,
 		};
@@ -934,6 +975,28 @@ pub(super) fn place(
 		.find(|rect| others.iter().all(|other| !overlaps(rect, other)))
 		.unwrap_or_else(|| pip(corners[0]));
 	(front, rect)
+}
+
+/// Where `source`, added as `name` to `layer` while `format`'s picture is
+/// edited, goes by [`place`]: among the layers as each picture draws them,
+/// in the landscape picture and, while editing the portrait one of a layer
+/// drawn in both, in that one too, at the index the edited picture's says.
+pub(super) fn put(state: &State, layer: &Layer, format: Format, name: &str, source: &Source) -> (usize, Item) {
+	let collection = state.collection();
+	let canvas = collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas);
+	let shown = super::slots::placed(state, layer, Format::Landscape);
+	let (mut index, rect) = place(collection, &shown, canvas, source, None);
+	let mut item = Item::new(name.to_string(), rect);
+	if collection.format_of(layer, format) == Format::Portrait {
+		let shown = super::slots::placed(state, layer, Format::Portrait);
+		let (at, rect) = place(collection, &shown, collection.canvas_of(Format::Portrait), source, None);
+		index = at;
+		item.portrait = Some(moq_scene::Placement {
+			rect,
+			crop: moq_scene::Crop::default(),
+		});
+	}
+	(index, item)
 }
 
 /// A listed device as its card shows it.
@@ -1031,15 +1094,17 @@ fn cards(ui: &mut Ui, id: &str, shown: &[Entry], drag: bool) -> Option<Asked> {
 	let columns = ((width + GAP) / (CARD_MIN + GAP)).floor().clamp(1.0, 3.0) as usize;
 	let card_width = (width - GAP * (columns - 1) as f32) / columns as f32;
 	let mut asked = None;
-	for (number, row) in shown.chunks(columns).enumerate() {
+	for row in shown.chunks(columns) {
 		let (rect, _) = ui.allocate_exact_size(vec2(width, CARD), Sense::hover());
 		for (column, shown) in row.iter().enumerate() {
 			let at = Rect::from_min_size(
 				pos2(rect.left() + column as f32 * (card_width + GAP), rect.top()),
 				vec2(card_width, CARD),
 			);
-			// By its place, since two devices can share a name.
-			let mut response = card(ui, at, (id, number * columns + column), shown, drag);
+			// Not by its name, which two devices can share, nor its place,
+			// which a listing arriving under a press can give another.
+			let key = ui.id().with(("add card", id, shown.key()));
+			let mut response = card(ui, at, key, shown, drag);
 			match &shown.card {
 				Ok(card) => {
 					if drag && response.drag_started() {
@@ -1069,7 +1134,7 @@ fn cards(ui: &mut Ui, id: &str, shown: &[Entry], drag: bool) -> Option<Asked> {
 
 /// Draw `shown` in `rect`: an icon in a well, its name, and the line under
 /// it, lit while hovered.
-fn card(ui: &mut Ui, rect: Rect, id: (&str, usize), shown: &Entry, drag: bool) -> egui::Response {
+fn card(ui: &mut Ui, rect: Rect, id: egui::Id, shown: &Entry, drag: bool) -> egui::Response {
 	let enabled = shown.card.is_ok();
 	// One that cannot be added may still be removed from its menu.
 	let sense = match (enabled, drag) {
@@ -1078,7 +1143,7 @@ fn card(ui: &mut Ui, rect: Rect, id: (&str, usize), shown: &Entry, drag: bool) -
 		(true, false) => Sense::click(),
 		(true, true) => Sense::click_and_drag(),
 	};
-	let response = ui.interact(rect, ui.id().with(("add card", id)), sense);
+	let response = ui.interact(rect, id, sense);
 	let label = format!("Add {}", shown.name);
 	response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, &label));
 	let lit = enabled && response.hovered();
@@ -1450,6 +1515,16 @@ name = "Main"
 			height: 600,
 		};
 		assert_eq!(placed(&screen, page, None), (1, [0.0, 0.0, 800.0, 600.0]));
+		let tall = Source::Browser {
+			url: "https://example.com".into(),
+			width: 1080,
+			height: 1920,
+		};
+		assert_eq!(
+			placed(&screen, tall, None),
+			(1, [656.0, 0.0, 608.0, 1080.0]),
+			"a portrait page fits the landscape picture, centered"
+		);
 		assert_eq!(
 			placed(&screen, CAMERA, Some([1500.0, 300.0])),
 			(1, [960.0, 30.0, 960.0, 540.0]),

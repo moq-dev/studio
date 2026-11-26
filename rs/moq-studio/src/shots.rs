@@ -1530,6 +1530,9 @@ fn add_places_a_card_in_one_click() {
 		.unwrap()
 		.to_toml()
 		.unwrap();
+	// Both at once, for the portrait picture's placement at the end.
+	let text = text.replacen("version = 1\n", "version = 1\nportrait = true\n", 1);
+	assert!(text.contains("portrait = true"));
 	std::fs::write("show.toml", text).unwrap();
 	let app = start(launch(&gpu), stream(None), &runtime);
 	let (mut harness, started, _) = window(app, &gpu, &runtime, SIZE, recent::Recent::default());
@@ -1550,8 +1553,19 @@ fn add_places_a_card_in_one_click() {
 	harness.run_steps(2);
 	assert!(harness.query_by_label("Add Display 1").is_none(), "Escape closes Add");
 
+	// What had the keyboard beside it, such as a scene's pad, which Enter
+	// would press, lets go of it as Add opens.
+	harness.key_press(egui::Key::Tab);
+	harness.run_steps(2);
+	let focused = harness.ctx.memory(|memory| memory.focused());
+	assert!(focused.is_some(), "Tab focuses a control");
 	harness.key_press(egui::Key::A);
 	harness.run_steps(2);
+	assert!(
+		harness.query_by_label("Add Display 1").is_some(),
+		"A opens Add over a focused control"
+	);
+	assert_eq!(harness.ctx.memory(|memory| memory.focused()), None);
 	harness.get_by_label("Add Display 1").click();
 	harness.run_steps(2);
 	assert!(
@@ -1609,6 +1623,21 @@ fn add_places_a_card_in_one_click() {
 		"lands where it was let go: {:?}",
 		dropped.rect
 	);
+
+	// Editing the portrait picture, where the landscape display covers
+	// little, a display goes behind there at the portrait picture's size.
+	let App::Studio(studio) = &mut harness.state_mut().app else {
+		panic!("still the studio")
+	};
+	studio.edit_format(moq_scene::Format::Portrait);
+	harness.key_press(egui::Key::A);
+	harness.run_steps(2);
+	harness.get_by_label("Add Display 2").click();
+	harness.run_steps(2);
+	let second = items().into_iter().position(|item| item.source == "Display 2");
+	assert_eq!(second, Some(0), "behind, as the portrait picture draws them");
+	let portrait = items()[0].portrait.map(|placed| placed.rect);
+	assert_eq!(portrait, Some(moq_scene::Rect::fill(&canvas.turned())));
 	drop(harness);
 	quit(&engine, &runtime);
 }

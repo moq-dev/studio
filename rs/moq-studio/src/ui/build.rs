@@ -156,8 +156,12 @@ impl Panels {
 	/// selected layer unless the picture or the layer is locked.
 	fn build_keys(&mut self, ui: &Ui) {
 		let ctx = ui.ctx();
+		// Add first, since it is a modal layer itself.
+		if self.add_keys(ui) {
+			return;
+		}
 		let modal = ctx.memory(|memory| memory.top_modal_layer()).is_some();
-		if modal || self.add_keys(ui) || ctx.text_edit_focused() || self.interact.has_keyboard() || self.interacting {
+		if modal || ctx.text_edit_focused() || self.interact.has_keyboard() || self.interacting {
 			return;
 		}
 		let (add, escape, delete, backspace) = ui.input_mut(|input| {

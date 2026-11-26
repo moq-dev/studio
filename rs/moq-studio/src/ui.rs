@@ -1314,6 +1314,10 @@ impl Panels {
 		// egui pastes only text, so a paste it does not report may be a picture;
 		// one asked of the window waits for its text as a menu's Paste does.
 		let pasted = self.keyboard.as_ref().and_then(hotkeys::Keyboard::pasted);
+		// Add holds the workspace's undo, copy, and paste back while open.
+		if self.adding.open {
+			return;
+		}
 		if pasted == Some(hotkeys::Pasted::Asked) {
 			self.dropping.paste_asked(ctx.pointer_latest_pos());
 		}
@@ -2348,17 +2352,24 @@ fn clone_of(collection: &Collection, name: &str) -> (Source, Option<Video>) {
 }
 
 /// A source to add: its name, what it is, and the layers it joins if it
-/// has a picture, where [`add::place`] puts it.
+/// has a picture, where [`add::put`] puts it while `format`'s picture is
+/// edited.
 struct New {
 	name: String,
 	source: Source,
 	layer: Option<Layer>,
+	format: Format,
 }
 
 /// Add `new`, placed among its layers if it has a picture and heard in the
 /// audio scene on program if it has sound. Returns its name.
 fn add(state: &mut State, new: New) -> anyhow::Result<String> {
-	let New { name, source, layer } = new;
+	let New {
+		name,
+		source,
+		layer,
+		format,
+	} = new;
 	anyhow::ensure!(!name.is_empty(), "a source needs a name");
 	anyhow::ensure!(
 		!state.collection().sources.contains_key(&name),
@@ -2366,20 +2377,16 @@ fn add(state: &mut State, new: New) -> anyhow::Result<String> {
 	);
 	let heard = source.has_audio();
 	let placed = layer.filter(|_| source.has_video()).map(|layer| {
-		let collection = state.collection();
-		let canvas = collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas);
-		// Where they are drawn, so a layer in a slot covers what it covers.
-		let shown = slots::placed(state, &layer, Format::Landscape);
-		let (index, rect) = add::place(collection, &shown, canvas, &source, None);
-		(layer, index, rect)
+		let (index, item) = add::put(state, &layer, format, &name, &source);
+		(layer, index, item)
 	});
 	edit(state, format!("Add `{name}`"), None, |draft| {
 		draft.set_source(&name, Some(source))?;
 		if heard {
 			draft.hear(&name)?;
 		}
-		if let Some((layer, index, rect)) = placed {
-			draft.insert_item(&layer, index, Item::new(name.clone(), rect))?;
+		if let Some((layer, index, item)) = placed {
+			draft.insert_item(&layer, index, item)?;
 		}
 		Ok(())
 	})?;

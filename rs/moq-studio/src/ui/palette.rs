@@ -18,13 +18,42 @@ const LIST: f32 = 420.0;
 
 /// The palette, while open: what is typed, and the row the arrows picked
 /// among those it finds.
-#[derive(Default)]
 pub(super) struct Palette {
 	query: String,
-	picked: usize,
-	/// The picked row's name and group, which keep it picked as rows found
+	/// The row Enter runs, if any: none once the picked row is gone, such as
+	/// a camera unplugged, until the arrows, the pointer, or typing pick one.
+	picked: Option<usize>,
+	/// The picked row's [`Row::id`], which keeps it picked as rows found
 	/// since, such as devices, move it.
-	picked_row: Option<(String, String)>,
+	picked_row: Option<String>,
+}
+
+impl Palette {
+	/// Follow the picked row to where it is in `rows`, or pick none if it is
+	/// gone, then move by the arrows pressed.
+	fn repick(&mut self, rows: &[Row], up: bool, down: bool) {
+		if let Some(picked) = &self.picked_row {
+			self.picked = rows.iter().position(|row| row.id() == *picked);
+		}
+		let last = rows.len().saturating_sub(1);
+		self.picked = match (self.picked, up, down) {
+			(Some(picked), true, false) => Some(picked.saturating_sub(1)),
+			(Some(picked), false, true) => Some((picked + 1).min(last)),
+			(None, true, false) | (None, false, true) => Some(0),
+			(picked, _, _) => picked.map(|picked| picked.min(last)),
+		};
+		self.picked_row = self.picked.and_then(|picked| rows.get(picked)).map(Row::id);
+	}
+}
+
+impl Default for Palette {
+	fn default() -> Self {
+		Self {
+			query: String::new(),
+			picked: Some(0),
+			picked_row: None,
+		}
+	}
 }
 
 /// What a row does.
@@ -64,6 +93,16 @@ struct Row {
 }
 
 impl Row {
+	/// What tells it from every other row as the rows change: the device it
+	/// adds, as the system knows it, since two of one model share a name, or
+	/// else its name and group.
+	fn id(&self) -> String {
+		match &self.command {
+			Command::Device(pick) => format!("{:?}", pick.source),
+			_ => format!("{} {}", self.name, self.group),
+		}
+	}
+
 	fn new(command: Command, name: impl Into<String>, group: impl Into<String>, words: &[&'static str]) -> Self {
 		Self {
 			command,
@@ -363,27 +402,15 @@ impl Panels {
 					let field = ui.add(field);
 					field.request_focus();
 					if field.changed() {
-						palette.picked = 0;
+						palette.picked = Some(0);
 						palette.picked_row = None;
 					}
 				});
 				// Found from what the box holds after this frame's typing, so
 				// Enter pressed with it runs what was typed, not what was before.
 				let rows = found(all, &palette.query);
-				let key = |row: &Row| (row.name.clone(), row.group.clone());
-				if let Some(at) =
-					(palette.picked_row.as_ref()).and_then(|picked| rows.iter().position(|row| key(row) == *picked))
-				{
-					palette.picked = at;
-				}
-				let last = rows.len().saturating_sub(1);
-				palette.picked = match (up, down) {
-					(true, false) => palette.picked.saturating_sub(1),
-					(false, true) => (palette.picked + 1).min(last),
-					_ => palette.picked.min(last),
-				};
-				palette.picked_row = rows.get(palette.picked).map(key);
-				let mut run = enter.then_some(palette.picked);
+				palette.repick(&rows, up, down);
+				let mut run = palette.picked.filter(|_| enter);
 				ui.add_space(10.0);
 				let y = ui.cursor().top();
 				ui.painter()
@@ -402,13 +429,14 @@ impl Panels {
 							ui.add_space(10.0);
 						}
 						for (index, row) in rows.iter().enumerate() {
-							let response = row_ui(ui, row, index == palette.picked);
-							if (up || down) && index == palette.picked {
+							let picked = palette.picked == Some(index);
+							let response = row_ui(ui, row, picked);
+							if (up || down) && picked {
 								response.scroll_to_me(None);
 							}
 							if response.hovered() && ui.input(|input| input.pointer.delta() != egui::Vec2::ZERO) {
-								palette.picked = index;
-								palette.picked_row = Some(key(row));
+								palette.picked = Some(index);
+								palette.picked_row = Some(row.id());
 							}
 							if response.clicked() {
 								run = Some(index);
@@ -486,6 +514,7 @@ impl Panels {
 					name,
 					source: pick.source,
 					layer,
+					format: self.format,
 				};
 				let result = add(&mut state, new);
 				drop(state);
@@ -516,7 +545,7 @@ fn row_ui(ui: &mut Ui, row: &Row, picked: bool) -> egui::Response {
 	let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
 	// Keyed by the row, not its place, so a row found mid-click cannot take
 	// the click.
-	let response = ui.interact(rect, ui.id().with(("row", &row.name, &row.group)), Sense::click());
+	let response = ui.interact(rect, ui.id().with(("row", row.id())), Sense::click());
 	let enabled = row.refused.is_none();
 	response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, &row.name));
 	if !ui.is_rect_visible(rect) {
@@ -574,6 +603,34 @@ fn row_ui(ui: &mut Ui, row: &Row, picked: bool) -> egui::Response {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn the_pick_follows_its_row_and_is_lost_with_it() {
+		let device = |name: &str, id: &str| {
+			let pick = Pick {
+				name: name.into(),
+				source: Source::Camera { id: Some(id.into()) },
+			};
+			Row::new(Command::Device(pick), name, "Devices", &[])
+		};
+		let add = || Row::new(Command::Add, "Add a source", "Studio", &[]);
+		let mut palette = Palette::default();
+		palette.repick(&[add()], false, false);
+		assert_eq!(palette.picked, Some(0));
+		// Two cameras of one model, listed above it as they arrive.
+		let listed = [device("Cam", "a"), device("Cam", "b"), add()];
+		palette.repick(&listed, false, false);
+		assert_eq!(palette.picked, Some(2), "still Add a source");
+		palette.repick(&listed, true, false);
+		palette.repick(&listed, true, false);
+		assert_eq!(palette.picked, Some(0));
+		// The first camera unplugged: its twin does not take its place.
+		let unplugged = [device("Cam", "b"), add()];
+		palette.repick(&unplugged, false, false);
+		assert_eq!(palette.picked, None, "Enter runs nothing until a pick");
+		palette.repick(&unplugged, false, true);
+		assert_eq!(palette.picked, Some(0));
+	}
 
 	fn names(rows: Vec<Row>, query: &str) -> Vec<String> {
 		found(rows, query).into_iter().map(|row| row.name).collect()
