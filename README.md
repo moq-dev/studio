@@ -118,7 +118,8 @@ Recording (except from the Flatpak's menu entry).
 While the scene has no layers and the picture is editable, it shows the quick
 start (on air, only on a scene open off air): one click on **Camera** (naming the camera it adds), **Screen**
 (on macOS before Screen Recording is allowed, the main display, which asks for
-it), **Media** (an image or video file), or **Web / Text** (a web address, or a
+it), **Media** (an image or video file; its dialog lists only the types the studio shows, while a dropped file is
+checked by what it holds), or **Web / Text** (a web address, or a
 text to edit) adds the scene's first layer, and the picture becomes the scene. Anything dropped or
 pasted on the picture lands there too (see
 [Dropping and pasting](#dropping-and-pasting)).
@@ -226,8 +227,9 @@ The **strip** holds:
   [Studio mode](#off-air-and-studio-mode); clicking the scene already on air
   leaves nothing cued. A scene that cannot go on air, of another size or
   showing the program, has a dimmed pad that says why under the pointer.
-  Right-click a pad to take its scene, cue it in Studio mode, **Edit off
-  air**, mark it the safe scene, rename it, duplicate it, move it left or
+  Right-click a pad, or click the **⋯** that shows while the pointer is on
+  it, to take its scene, cue it in Studio mode, **Edit off air**, mark it the
+  safe scene, rename it, duplicate it, move it left or
   right, or remove it. **Duplicate** adds a scene after it showing the same
   sources, linked, so an edit to a source's look shows in both; **Duplicate
   with its own copies** gives each of its layers a copy of its source to edit
@@ -387,14 +389,21 @@ from layer to layer:
 Its **Animate** tab holds the layer's keyframes (see [Keyframes](#keyframes)).
 A scene's own settings are on its pad's menu: take or cue it, edit it off
 air, mark it **Safe**, pick the show's **Transition**, also in Settings, Show
-(see [Transitions](#transitions)), rename, duplicate, move, or remove it. With
+(see [Transitions](#transitions)), rename, duplicate, move, or remove it.
+**Remove** takes any scene, the one on air included: that one goes after the
+next scene that can go on air takes its place at once, or a new empty scene
+when none can. It asks first while you are live or when the scene holds more
+than one source, and otherwise removes at once; either way it is an edit, so
+undo brings it back. Removing the show's last scene empties it instead, so a
+show always has one scene, and its quick start. Tab to a pad and press Delete
+or Backspace to remove its scene the same way; with a pad focused, the keys
+leave the selected layer alone. With
 Published scenes or Smart layout on, the inspector with no layer selected
 shows the edited scene's size and **Publish** with the audio scene it carries
 (see [Published scenes](#published-scenes)), or its slots and their roles
-(see [Slots and roles](#slots-and-roles)). A scene on program, or still
-leaving it in a transition, cannot be removed, even by an undo, until program
-cuts away from it. In a narrow window, the inspector is a tab beside Layers
-and Add while it has anything to show.
+(see [Slots and roles](#slots-and-roles)). An undo never removes a scene on
+air, even one an edit added; cut away from it first. In a narrow window, the
+inspector is a tab beside Layers while it has anything to show.
 
 ### Off air and Studio mode
 
@@ -788,7 +797,8 @@ to replace that layer's file, which every layer showing its source shows, or
 add a layer. Dropped anywhere else in the window, or on another page, it lands
 in the middle of the edited scene.
 
-A file the studio cannot play says why where it was dropped, and how to fix
+A file the studio cannot play says why where it was dropped (under the quick
+start's cards while they show, for the Media card's file), and how to fix
 it where it can: a regular MP4 names the remux that makes it readable. The
 file is read before it is placed, in the background, so a large video holds
 up nothing while it is read.
@@ -2392,7 +2402,11 @@ screenshots.
 ## Development
 
 Use the Nix dev shell (`direnv allow`, or `nix develop --command ...`) so
-tooling matches CI, then:
+tooling matches CI. On a Linux host that is not NixOS and has an AMD or Intel
+GPU, the shell also points Vulkan and VA-API at its own Mesa (and Intel's
+`iHD`), since the host's drivers cannot load from a Nix binary; an NVIDIA
+host keeps its own driver, and a `VK_DRIVER_FILES` or `LIBVA_DRIVERS_PATH`
+you set wins. Then:
 
 ```bash
 just check   # Lint everything, including the quest tree

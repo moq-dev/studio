@@ -432,6 +432,12 @@ impl State {
 		Ok(())
 	}
 
+	/// Finish a transition under way where it is going, the scene on program
+	/// staying as it is, keyframes included.
+	pub fn end_transition(&mut self) {
+		self.compositor.end_transition(&self.sources);
+	}
+
 	/// Take the preview to program by `transition`, starting at `now`; see
 	/// [`Compositor::transition`].
 	pub fn transition(&mut self, transition: moq_scene::Transition, now: Instant) -> anyhow::Result<()> {

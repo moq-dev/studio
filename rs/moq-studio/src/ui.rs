@@ -365,6 +365,8 @@ impl Studio {
 			title_needs: 0.0,
 			renaming_audio: None,
 			renaming_pad: None,
+			removing_pad: None,
+			pad_focused: false,
 			speaker: None,
 			speakers: mixer::Speakers::default(),
 			desk: mixer::Desk::default(),
@@ -564,6 +566,12 @@ impl Studio {
 		self.panels.devices.listing = Some(listing);
 		self.panels.devices.pending = None;
 		self.panels.devices.fixed = true;
+	}
+
+	/// Land the file at `path` on the picture, as the Media card's dialog
+	/// does once a file is picked.
+	pub(crate) fn pick_file(&mut self, path: std::path::PathBuf) {
+		self.panels.dropping.arrive(drop::Arrival::File(path), None);
 	}
 
 	/// Open Settings at `setting`, as the gear would.
@@ -991,6 +999,11 @@ struct Panels {
 	renaming_audio: Option<(String, String)>,
 	/// The scene its pad's sheet renames, by name, and the name typed so far.
 	renaming_pad: Option<(String, String)>,
+	/// The scene its pad's sheet asks whether to remove, by name.
+	removing_pad: Option<String>,
+	/// Whether a scene pad had the keyboard's focus when last drawn, which
+	/// Delete and Backspace then remove, rather than the selected layer.
+	pad_focused: bool,
 	/// The output Listen plays on, by [`mix::Speaker::id`], or `None` for the
 	/// system default. Saved per user, not in the shared scene file.
 	speaker: Option<String>,

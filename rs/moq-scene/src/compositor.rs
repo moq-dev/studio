@@ -967,6 +967,15 @@ impl Compositor {
 		Ok(())
 	}
 
+	/// End the transition under way at once, leaving the scene on program as
+	/// it is, its timeline included, and stopping a stinger's clip in
+	/// `sources`.
+	pub fn end_transition(&mut self, sources: &Sources) {
+		if let Some(switch) = self.switch.take() {
+			switch.stop(sources);
+		}
+	}
+
 	/// Play the program scene's keyframes as if it went on program at
 	/// `start`, such as one a viewer joined after it went on.
 	pub fn set_program_start(&mut self, start: Instant) {

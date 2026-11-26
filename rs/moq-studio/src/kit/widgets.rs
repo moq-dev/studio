@@ -1269,6 +1269,10 @@ impl Widget for Pad<'_> {
 			};
 			let fill = if pose == Pose::Press { P3 } else { P2 };
 			painter.rect(rect, 10, fill, Stroke::new(2.0, border), StrokeKind::Inside);
+			// Where the keyboard is, for the keys a focused pad takes.
+			if response.has_focus() {
+				painter.rect_stroke(rect, 10, Stroke::new(2.0, TEXT), StrokeKind::Outside);
+			}
 			let thumb = Rect::from_min_size(rect.min + vec2(4.0, 4.0), picture);
 			painter.rect_filled(thumb, 7, BG);
 			// The landscape picture, and the portrait one at its right.
