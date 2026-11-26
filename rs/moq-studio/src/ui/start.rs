@@ -63,9 +63,7 @@ impl Panels {
 			(layer, own)
 		};
 		self.devices.poll(&self.runtime);
-		if self.devices.listing.is_none() {
-			self.devices.renew(&self.runtime);
-		}
+		self.devices.list(&self.runtime);
 		if self.devices.pending.is_some() {
 			ui.ctx().request_repaint_after(Duration::from_millis(100));
 		}

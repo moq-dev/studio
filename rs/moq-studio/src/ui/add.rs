@@ -894,10 +894,7 @@ pub(super) fn place(
 	at: Option<[f32; 2]>,
 ) -> (usize, moq_scene::Rect) {
 	let front = items.len();
-	let shown = match source {
-		Source::Clone { source } => collection.sources.get(source),
-		source => Some(source),
-	};
+	let shown = picture(collection, source);
 	let own = match shown {
 		Some(Source::Browser { width, height, .. } | Source::Overlay { width, height, .. }) => {
 			Some([*width as f32, *height as f32])
@@ -906,7 +903,10 @@ pub(super) fn place(
 	};
 	let (width, height) = (canvas.width as f32, canvas.height as f32);
 	if let Some(at) = at {
-		return (front, super::drop::land(canvas, own.unwrap_or([width, height]), at));
+		// At the picture's own shape, not the canvas's, which in the
+		// portrait picture would squeeze it.
+		let landscape = [collection.canvas.width as f32, collection.canvas.height as f32];
+		return (front, super::drop::land(canvas, own.unwrap_or(landscape), at));
 	}
 	if let Some([w, h]) = own {
 		// At its own size, or shrunk to fit and centered, as a portrait
@@ -1046,6 +1046,7 @@ fn both(
 	let (index, rect) = place(collection, landscape, canvas, source, None);
 	let mut item = Item::new(name.to_string(), rect);
 	let Some(portrait) = portrait else {
+		item.crop = covering(collection, source, Format::Landscape, &item.rect);
 		return (index, item);
 	};
 	let turned = collection.canvas_of(Format::Portrait);
@@ -1057,11 +1058,54 @@ fn both(
 			corner(portrait, turned)
 		}
 	};
+	item.crop = covering(collection, source, Format::Landscape, &item.rect);
 	item.portrait = Some(moq_scene::Placement {
+		crop: covering(collection, source, Format::Portrait, &rect),
 		rect,
-		crop: moq_scene::Crop::default(),
 	});
 	(index.max(at), item)
+}
+
+/// The even crop that shows `source`'s picture in `rect` of `format`'s
+/// picture unstretched, as CSS `object-fit: cover` does: none where their
+/// shapes match, or for a color, which has none.
+fn covering(collection: &Collection, source: &Source, format: Format, rect: &moq_scene::Rect) -> moq_scene::Crop {
+	let (shown, wanted) = (shape(collection, source, format), rect.width / rect.height);
+	match matches!(picture(collection, source), Some(Source::Color { .. })) || (shown / wanted - 1.0).abs() < 1e-3 {
+		true => moq_scene::Crop::default(),
+		false => moq_scene::Crop::covering(shown, wanted),
+	}
+}
+
+/// How wide for its height `source`'s picture is in `format`'s picture: a
+/// page's or overlay's own size, a scene's canvas, or else the program's,
+/// as a device's picture is taken to be until it shows; in the portrait
+/// picture, the program or a scene drawn in both shows its portrait one.
+fn shape(collection: &Collection, source: &Source, format: Format) -> f32 {
+	let wide = |canvas: Canvas| canvas.width as f32 / canvas.height as f32;
+	let (own, turns) = match picture(collection, source) {
+		Some(Source::Browser { width, height, .. } | Source::Overlay { width, height, .. }) => {
+			(*width as f32 / *height as f32, false)
+		}
+		Some(Source::Scene { scene }) => (
+			wide(collection.canvas(Some(scene)).unwrap_or(collection.canvas)),
+			collection.dual(&Layer::scene(scene)),
+		),
+		Some(Source::Program) => (wide(collection.canvas), collection.portrait),
+		_ => (wide(collection.canvas), false),
+	};
+	match (format, turns) {
+		(Format::Portrait, true) => own / wide(collection.canvas).powi(2),
+		_ => own,
+	}
+}
+
+/// The source whose picture `source` shows: itself, or the one it clones.
+fn picture<'a>(collection: &'a Collection, source: &'a Source) -> Option<&'a Source> {
+	match source {
+		Source::Clone { source } => collection.sources.get(source),
+		source => Some(source),
+	}
 }
 
 /// A listed device as its card shows it.
@@ -1614,6 +1658,61 @@ name = "Main"
 			),
 			"in front in both, clear of the landscape screen"
 		);
+	}
+
+	/// In the portrait picture a camera's 16:9 picture is cropped evenly to
+	/// the shape it is given, never squeezed; a page keeps its own shape and
+	/// a color has none to crop; one dropped there lands at its own shape.
+	#[test]
+	fn portrait_crops_rather_than_squeezes() {
+		let mut collection = scene(&[]);
+		collection.portrait = true;
+		let layer = |items: &[Item]| items.to_vec();
+		let (_, item) = both(&collection, (&layer(&[]), collection.canvas), Some(&[]), "cam", &CAMERA);
+		assert!(item.crop.is_none(), "16:9 on 16:9");
+		let portrait = item.portrait.unwrap();
+		assert_eq!(portrait.rect, moq_scene::Rect::fill(&collection.canvas.turned()));
+		// 9:16 of a 16:9 picture: the middle (81/256) of its width.
+		let trim = (1.0 - 81.0 / 256.0) / 2.0;
+		assert_eq!(
+			portrait.crop,
+			moq_scene::Crop {
+				left: trim,
+				right: trim,
+				..Default::default()
+			}
+		);
+
+		let screen = Item::new("screen".to_string(), moq_scene::Rect::fill(&collection.canvas));
+		let tall = Item::new("screen".to_string(), moq_scene::Rect::fill(&collection.canvas.turned()));
+		let (_, inset) = both(
+			&collection,
+			(&[screen], collection.canvas),
+			Some(&[tall]),
+			"cam",
+			&CAMERA,
+		);
+		assert_eq!(inset.portrait.unwrap().crop.left, trim, "an inset too");
+
+		let page = Source::Browser {
+			url: "https://example.com".into(),
+			width: 1920,
+			height: 1080,
+		};
+		let (_, page) = both(&collection, (&[], collection.canvas), Some(&[]), "page", &page);
+		assert!(
+			page.crop.is_none() && page.portrait.unwrap().crop.is_none(),
+			"fitted at its shape"
+		);
+		let color = Source::Color {
+			color: moq_scene::Rgba([0, 0, 0, 255]),
+		};
+		let (_, color) = both(&collection, (&[], collection.canvas), Some(&[]), "color", &color);
+		assert!(color.portrait.unwrap().crop.is_none());
+
+		let turned = collection.canvas.turned();
+		let (_, dropped) = place(&collection, &[], turned, &CAMERA, Some([540.0, 960.0]));
+		assert_eq!([dropped.width, dropped.height], [540.0, 304.0], "16:9, half the width");
 	}
 
 	/// Two halves of a split screen cover the canvas together, so a camera

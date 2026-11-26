@@ -549,6 +549,15 @@ impl Studio {
 		self.panels.sound_options = Some(name.to_string());
 	}
 
+	/// Add `source` as `name` to the edited scene, as its card in Add would.
+	pub(crate) fn add_card(&mut self, name: &str, source: Source) {
+		let pick = devices::Pick {
+			name: name.to_string(),
+			source,
+		};
+		self.panels.take_card(&add::Card::New(pick), None);
+	}
+
 	/// Edit `format`'s picture on Studio, as its tab under the picture would.
 	pub(crate) fn edit_format(&mut self, format: Format) {
 		self.panels.format = format;
@@ -2924,6 +2933,13 @@ impl Devices {
 			if std::mem::take(&mut self.again) {
 				self.renew(runtime);
 			}
+		}
+	}
+
+	/// List unless a listing is kept or under way, as the first one does.
+	fn list(&mut self, runtime: &tokio::runtime::Handle) {
+		if self.listing.is_none() && self.pending.is_none() {
+			self.renew(runtime);
 		}
 	}
 

@@ -170,6 +170,8 @@ enum View {
 		cued: Option<&'static str>,
 		off_air: Option<&'static str>,
 	},
+	/// The portrait picture of Break, off air, with a picture just added.
+	DualAdded,
 	/// The command palette, open by its key over Studio with a few keys
 	/// bound, with what is typed into it.
 	Palette(&'static str),
@@ -438,6 +440,10 @@ views! {
 	/// A scene laid out by slots on it, open off air in portrait: its own
 	/// arrangement there, a row, which the inspector picks.
 	build_dual_slots: Still, Open::Studio { view: View::Dual { format: moq_scene::Format::Portrait, index: None, cued: None, off_air: Some("Guests") }, size: SIZE, show: "dual.toml", relay: false };
+	/// Editing the portrait picture of a scene off air, a 16:9 picture just
+	/// added from Add: a picture-in-picture in each, cropped evenly to the
+	/// portrait inset's shape rather than squeezed into it.
+	build_dual_added: Still, Open::Studio { view: View::DualAdded, size: SIZE, show: "dual.toml", relay: false };
 	/// Settings, Show on it: Both at once on.
 	settings_show_dual: Still, Open::Studio { view: View::Setting(Setting::Show), size: SIZE, show: "dual.toml", relay: false };
 	/// GO LIVE's popover on it: both broadcasts to each relay, and the
@@ -3290,6 +3296,13 @@ fn shoot(open: &Open, gpu: &engine::Gpu, runtime: &tokio::runtime::Runtime, show
 			if let Some(scene) = off_air {
 				studio.edit_off_air(scene);
 			}
+		}
+		View::DualAdded => {
+			studio.build(Side::Layers, Inspect::Layer, None);
+			studio.edit_format(moq_scene::Format::Portrait);
+			studio.edit_off_air("Break");
+			let source = Source::Clone { source: "host".into() };
+			studio.add_card("Person", source);
 		}
 		View::Palette(_) => {
 			let key = |code, name: &str| hotkeys::Binding {

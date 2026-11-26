@@ -148,8 +148,8 @@ impl Panels {
 			let capture = collection.sources.get(collection.capture(&item.source));
 			// A window chosen by id offers the windows listed now in its place.
 			let window = matches!(status.lost, Some(Lost::Dark(_))) && matches!(capture, Some(Source::Window { .. }));
-			if window && self.devices.listing.is_none() {
-				self.devices.renew(&self.runtime);
+			if window {
+				self.devices.list(&self.runtime);
 			}
 			let fault = self.fault(&Spot::Layer(layer.clone(), item.source.clone()));
 			let what = words(collection, &item.source);
