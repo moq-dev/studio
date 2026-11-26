@@ -17,8 +17,9 @@ layer**, `A`, the picture's right-click **Add a layer**, or the palette's
 [mock-up](/quest/m0/ux/mock/overhaul-add.webp). What to try:
 
 - **Real devices:** a webcam, a capture card, and a second display listed by
-  name the moment Add opens, and a camera plugged in after launch showing the
-  next time it opens, with no **Refresh**. Each card adds its device in one
+  name once Add's "Looking for…" line gives way to the listing, and a camera
+  plugged in after launch showing the next time Add opens, once that listing
+  finishes, with no **Refresh**. Each card adds its device in one
   click and closes Add with the new layer selected.
 - **Placement over a live screen:** a display added first fills the picture;
   a camera added over it lands as a corner picture-in-picture, the next one
@@ -48,7 +49,8 @@ owns that part, and deletes this one.
   [moq-dev/studio#262](https://github.com/moq-dev/studio/pull/262)).
 - ✅ Placement in both pictures: where the portrait and landscape pictures
   disagree on the order, a new source goes in front as a picture-in-picture
-  in both. Check it feels right with **Both at once** on.
+  in both, whichever picture is edited. Check it feels right with **Both at
+  once** on.
 
 ## Waiting
 

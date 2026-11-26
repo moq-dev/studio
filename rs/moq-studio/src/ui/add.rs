@@ -136,6 +136,9 @@ impl Panels {
 	/// Open Add, listing the devices afresh.
 	pub(super) fn open_add(&mut self) {
 		self.adding.open = true;
+		// A workspace paste still waiting for the clipboard's text would
+		// otherwise land once Add closes.
+		self.dropping.forget_paste();
 		self.devices.renew(&self.runtime);
 	}
 
@@ -151,7 +154,7 @@ impl Panels {
 			return;
 		}
 		let ctx = ui.ctx().clone();
-		self.devices.poll();
+		self.devices.poll(&self.runtime);
 		if self.devices.pending.is_some() {
 			ctx.request_repaint_after(Duration::from_millis(100));
 		}
@@ -327,16 +330,7 @@ impl Panels {
 				let result = match at.map(|at| self.landing(&state, Some(at))) {
 					None => {
 						let layer = self.scene(&state).ok();
-						let format = self.format;
-						add(
-							&mut state,
-							New {
-								name,
-								source,
-								layer,
-								format,
-							},
-						)
+						add(&mut state, New { name, source, layer })
 					}
 					Some(Err(why)) => Err(anyhow::anyhow!(why)),
 					Some(Ok(landing)) => {
@@ -367,7 +361,7 @@ impl Panels {
 		let layer = self.scene(state).map_err(|why| anyhow::anyhow!(why))?;
 		let collection = state.collection();
 		let source = collection.sources.get(name).context("the source is gone")?;
-		let (mut index, mut item) = put(state, &layer, self.format, name, source);
+		let (mut index, mut item) = put(state, &layer, name, source);
 		if let Some(landing) = &landing {
 			let rect = place(collection, &[], landing.canvas, source, Some(landing.at)).1;
 			item = super::drop::landed(collection, landing, name, rect);
@@ -382,7 +376,8 @@ impl Panels {
 			.scene
 			.as_deref()
 			.and_then(|scene| crate::guests::tile(collection, scene, name));
-		if let Some(at) = tile.filter(|_| guest) {
+		// Only for a click: a card dropped on the picture lands where it was let go.
+		if let Some(at) = tile.filter(|_| guest && landing.is_none()) {
 			index = at;
 			item = Item {
 				slot: Some(moq_scene::Slot::Tile),
@@ -534,9 +529,6 @@ impl Panels {
 		}
 		ui.add_space(8.0);
 		ui.horizontal(|ui| {
-			let url = url::Url::parse(self.adding.url.trim())
-				.ok()
-				.filter(|url| matches!(url.scheme(), "http" | "https"));
 			let button = 120.0;
 			let field = ui.add(
 				egui::TextEdit::singleline(&mut self.adding.url)
@@ -545,6 +537,10 @@ impl Panels {
 			);
 			let field = kit::named(field, "Web page URL");
 			let entered = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+			// After the field, so Enter adds what it holds this frame.
+			let url = url::Url::parse(self.adding.url.trim())
+				.ok()
+				.filter(|url| matches!(url.scheme(), "http" | "https"));
 			let add = ui.add_enabled(
 				url.is_some(),
 				kit::button(Icon::Web, "Add page").min_size(vec2(button, 0.0)),
@@ -1021,15 +1017,16 @@ fn corner(items: &[Item], canvas: Canvas) -> moq_scene::Rect {
 		.unwrap_or_else(|| pip(corners[0]))
 }
 
-/// Where `source`, added as `name` to `layer` while `format`'s picture is
-/// edited, goes by [`place`]: among the layers as each picture draws them,
-/// in the landscape picture and, while editing the portrait one of a layer
-/// drawn in both, in that one too, as [`both`] says.
-pub(super) fn put(state: &State, layer: &Layer, format: Format, name: &str, source: &Source) -> (usize, Item) {
+/// Where `source`, added as `name` to `layer`, goes by [`place`]: among the
+/// layers as each picture draws them, in the landscape picture and, for a
+/// layer drawn in both, in the portrait one too, as [`both`] says, whichever
+/// picture is edited.
+pub(super) fn put(state: &State, layer: &Layer, name: &str, source: &Source) -> (usize, Item) {
 	let collection = state.collection();
 	let canvas = collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas);
 	let landscape = super::slots::placed(state, layer, Format::Landscape);
-	let portrait = (collection.format_of(layer, format) == Format::Portrait)
+	let portrait = collection
+		.dual(layer)
 		.then(|| super::slots::placed(state, layer, Format::Portrait));
 	both(collection, (&landscape, canvas), portrait.as_deref(), name, source)
 }
@@ -1603,6 +1600,19 @@ name = "Main"
 				rect([729.0, 1317.0, 324.0, 576.0])
 			),
 			"in front in both, clear of the landscape graphic"
+		);
+
+		// The other way: behind a small screen in landscape, over it in portrait.
+		let landscape = [shown("screen", corner, true)];
+		let portrait = [shown("screen", tall, true)];
+		assert_eq!(
+			added(&landscape, &portrait),
+			(
+				1,
+				rect([48.0, 708.0, 576.0, 324.0]),
+				rect([729.0, 1317.0, 324.0, 576.0])
+			),
+			"in front in both, clear of the landscape screen"
 		);
 	}
 

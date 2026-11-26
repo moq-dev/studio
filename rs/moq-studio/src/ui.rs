@@ -2374,24 +2374,17 @@ fn clone_of(collection: &Collection, name: &str) -> (Source, Option<Video>) {
 }
 
 /// A source to add: its name, what it is, and the layers it joins if it
-/// has a picture, where [`add::put`] puts it while `format`'s picture is
-/// edited.
+/// has a picture, where [`add::put`] puts it.
 struct New {
 	name: String,
 	source: Source,
 	layer: Option<Layer>,
-	format: Format,
 }
 
 /// Add `new`, placed among its layers if it has a picture and heard in the
 /// audio scene on program if it has sound. Returns its name.
 fn add(state: &mut State, new: New) -> anyhow::Result<String> {
-	let New {
-		name,
-		source,
-		layer,
-		format,
-	} = new;
+	let New { name, source, layer } = new;
 	anyhow::ensure!(!name.is_empty(), "a source needs a name");
 	anyhow::ensure!(
 		!state.collection().sources.contains_key(&name),
@@ -2399,7 +2392,7 @@ fn add(state: &mut State, new: New) -> anyhow::Result<String> {
 	);
 	let heard = source.has_audio();
 	let placed = layer.filter(|_| source.has_video()).map(|layer| {
-		let (index, item) = add::put(state, &layer, format, &name, &source);
+		let (index, item) = add::put(state, &layer, &name, &source);
 		(layer, index, item)
 	});
 	edit(state, format!("Add `{name}`"), None, |draft| {
@@ -2901,6 +2894,9 @@ fn gain_field(db: &mut f32) -> egui::DragValue<'_> {
 struct Devices {
 	listing: Option<Listing>,
 	pending: Option<std::sync::mpsc::Receiver<Listing>>,
+	/// Whether to list again once the listing under way arrives, asked for
+	/// while it ran, so a camera plugged in since shows.
+	again: bool,
 	/// A listing a test seeded, which [`Self::renew`] keeps.
 	fixed: bool,
 }
@@ -2921,17 +2917,25 @@ impl Devices {
 		Ok(())
 	}
 
-	fn poll(&mut self) {
+	fn poll(&mut self, runtime: &tokio::runtime::Handle) {
 		if let Some(listing) = self.pending.as_ref().and_then(|pending| pending.try_recv().ok()) {
 			self.listing = Some(listing);
 			self.pending = None;
+			if std::mem::take(&mut self.again) {
+				self.renew(runtime);
+			}
 		}
 	}
 
-	/// List afresh unless a listing is under way, reporting why one cannot
-	/// start as the failure of every kind.
+	/// List afresh, or once the listing under way arrives, reporting why one
+	/// cannot start as the failure of every kind.
 	fn renew(&mut self, runtime: &tokio::runtime::Handle) {
-		if self.pending.is_some() || self.fixed {
+		if self.fixed {
+			return;
+		}
+		self.poll(runtime);
+		if self.pending.is_some() {
+			self.again = true;
 			return;
 		}
 		if let Err(err) = self.refresh(runtime) {

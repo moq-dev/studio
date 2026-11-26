@@ -136,7 +136,7 @@ impl Panels {
 		let now = kio::clock::now();
 		let mut action = None;
 		let mut rows = Vec::new();
-		self.devices.poll();
+		self.devices.poll(&self.runtime);
 		for index in (0..items.len()).rev() {
 			let item = &items[index];
 			let picked = Picked {

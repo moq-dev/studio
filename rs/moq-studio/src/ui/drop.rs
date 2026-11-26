@@ -246,6 +246,11 @@ impl Dropping {
 		self.menu_paste = Some((self.menu_at, 0));
 	}
 
+	/// Drop a paste still waiting for the clipboard's text.
+	pub(super) fn forget_paste(&mut self) {
+		self.menu_paste = None;
+	}
+
 	/// Paste at `at` on screen once the text the window was asked for comes,
 	/// as a menu's Paste does.
 	pub(super) fn paste_asked(&mut self, at: Option<egui::Pos2>) {

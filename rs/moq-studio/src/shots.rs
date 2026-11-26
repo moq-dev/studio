@@ -1878,22 +1878,52 @@ fn add_places_a_card_in_one_click() {
 		dropped.rect
 	);
 
-	// Editing the portrait picture, where the landscape display covers
-	// little, the pictures disagree: behind it there, in front of it in
-	// landscape. A display goes in front as a picture-in-picture in both.
-	let App::Studio(studio) = &mut harness.state_mut().app else {
-		panic!("still the studio")
+	// Display 1 small in the portrait picture: it covers the landscape one
+	// but not the portrait one, so the two disagree. Added from either
+	// editor, a source goes in front as a picture-in-picture in both.
+	{
+		let mut state = engine.state.lock().unwrap();
+		let main = moq_scene::Layer::scene(&state.collection().scenes[0].name);
+		let items = state.collection().items(&main).unwrap().to_vec();
+		let index = items.iter().position(|item| item.source == "Display 1").unwrap();
+		let small = moq_scene::Rect {
+			x: 0.0,
+			y: 0.0,
+			width: 300.0,
+			height: 200.0,
+		};
+		let mut draft = state.collection().draft("Small in portrait");
+		let item = moq_scene::Item {
+			portrait: Some(moq_scene::Placement {
+				rect: small,
+				crop: moq_scene::Crop::default(),
+			}),
+			..items[index].clone()
+		};
+		draft.set_item(&main, index, item).unwrap();
+		state.commit(draft, None).unwrap();
+	}
+	let mut in_front_of_both = |format, card: &str, source: &str| {
+		let App::Studio(studio) = &mut harness.state_mut().app else {
+			panic!("still the studio")
+		};
+		studio.edit_format(format);
+		harness.key_press(egui::Key::A);
+		harness.run_steps(2);
+		harness.get_by_label(card).click();
+		harness.run_steps(2);
+		let added = items().last().cloned().expect("a layer");
+		assert_eq!(added.source, source, "in front, editing {format:?}");
+		assert_eq!(added.rect.width, (width * 0.3).round(), "a picture-in-picture");
+		let portrait = added.portrait.expect("placed in portrait too").rect;
+		assert_eq!(portrait.width, (canvas.turned().width as f32 * 0.3).round());
 	};
-	studio.edit_format(moq_scene::Format::Portrait);
-	harness.key_press(egui::Key::A);
-	harness.run_steps(2);
-	harness.get_by_label("Add Display 2").click();
-	harness.run_steps(2);
-	let added = items().last().cloned().expect("a layer");
-	assert_eq!(added.source, "Display 2", "in front");
-	assert_eq!(added.rect.width, (width * 0.3).round(), "a picture-in-picture");
-	let portrait = added.portrait.expect("placed in portrait too").rect;
-	assert_eq!(portrait.width, (canvas.turned().width as f32 * 0.3).round());
+	in_front_of_both(moq_scene::Format::Landscape, "Add Display 2", "Display 2");
+	in_front_of_both(
+		moq_scene::Format::Portrait,
+		"Add Season 4 (Neon Drift)",
+		"Season 4 (Neon Drift)",
+	);
 	drop(harness);
 	quit(&engine, &runtime);
 }

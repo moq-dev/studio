@@ -62,7 +62,7 @@ impl Panels {
 			let own: Vec<String> = state.cameras().map(|camera| camera.id).collect();
 			(layer, own)
 		};
-		self.devices.poll();
+		self.devices.poll(&self.runtime);
 		if self.devices.listing.is_none() {
 			self.devices.renew(&self.runtime);
 		}
@@ -176,7 +176,6 @@ impl Panels {
 			name,
 			source,
 			layer: Some(layer.clone()),
-			format: self.format,
 		};
 		let result = add(&mut state, new);
 		drop(state);

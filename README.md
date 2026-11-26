@@ -335,12 +335,13 @@ Where a new picture goes: the first fills the canvas; one added while
 nothing covers the canvas fills it behind the smaller layers already there;
 one added over a layer covering the canvas lands as a picture-in-picture,
 30% of its width, in the first corner clear of the others (bottom right,
-bottom left, top right, then top left); a color goes behind everything; and
+bottom left, top right, then top left), or bottom right if none is clear; a
+color goes behind everything; and
 a web page or overlay lands at its own size, or, if larger than the canvas,
-shrunk to fit and centered. Added while editing the portrait picture with
-**Both at once** on, it is placed so in each picture; where one would put it
-behind and the other in front, it goes in front as a picture-in-picture in
-both, hiding nothing in either.
+shrunk to fit and centered. With **Both at once** on, it is placed so in
+each picture, whichever is edited; where one would put it behind and the
+other in front, it goes in front as a picture-in-picture in both, hiding
+nothing in either.
 
 On the **picture**, click a layer to select it, drag it to move it, and drag
 its edges or corners to resize it (see [Placing layers](#placing-layers)). A

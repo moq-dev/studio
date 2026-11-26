@@ -358,7 +358,7 @@ impl Panels {
 	pub(super) fn palette(&mut self, ctx: &egui::Context) {
 		let Some(mut palette) = self.palette.take() else { return };
 		// The listing asked for as it opened arrives on any page.
-		self.devices.poll();
+		self.devices.poll(&self.runtime);
 		if self.devices.pending.is_some() {
 			ctx.request_repaint_after(Duration::from_millis(100));
 		}
@@ -500,11 +500,21 @@ impl Panels {
 					super::settings::seek(ctx, row);
 				}
 			}
-			Command::Layer(picked, _) => {
+			Command::Layer(picked, id) => {
+				// By its id, as a guest taking a tile since the rows were
+				// found may have moved its index.
+				let state = self.engine.state.lock().unwrap();
+				let items = state.collection().items(&picked.layer).unwrap_or_default();
+				let index = items.iter().position(|item| item.id == id);
+				drop(state);
+				let Some(index) = index else {
+					self.report(Err(anyhow::anyhow!("that layer is gone")));
+					return;
+				};
 				self.page = Page::Studio;
 				self.side = Side::Layers;
 				self.rail = true;
-				self.select(Some(picked));
+				self.select(Some(Picked { index, ..picked }));
 			}
 			Command::Device(pick) => {
 				self.page = Page::Studio;
@@ -516,7 +526,6 @@ impl Panels {
 					name,
 					source: pick.source,
 					layer,
-					format: self.format,
 				};
 				let result = add(&mut state, new);
 				drop(state);
