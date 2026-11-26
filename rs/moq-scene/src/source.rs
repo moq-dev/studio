@@ -220,15 +220,64 @@ struct Clock {
 /// holds no more decoder output than this.
 const QUEUED: usize = 3;
 
-/// How long a layer's subscription holds a group it has not read yet once a
-/// newer one arrives: two playouts, the studio's of its broadcast, up to
-/// [`MAX_DELAY`], which its offset carries, and the viewer's own of the
-/// program. Its pictures wait there undecoded, so past this a picture due
-/// later still, as where the studio's path to the broadcast is that much
-/// slower than the viewer's, is skipped. A longer hold would also stall the
-/// layer that long at a lost group, which moq's subscription waits out for
-/// the same time.
-const LAYER_DELAY: Duration = MAX_DELAY.saturating_mul(2);
+/// How long a layer's track waits out a lost group: as long as its frames wait
+/// between arriving and playing, which is how far behind the layer plays, the
+/// studio's playout of its broadcast, which its offset carries, plus the
+/// viewer's of the program. Past that, everything the group holds is due, so
+/// waiting longer only stalls the layer. Measured from arrivals rather than
+/// read off the offset, which also carries how far apart the two broadcasts'
+/// clocks sit.
+struct Reach {
+	/// The wait the subscription holds a lost group for now.
+	held: Duration,
+	/// The longest wait counted since `since`.
+	peak: Duration,
+	since: Instant,
+}
+
+/// How long every frame must wait shorter than a layer's [`Reach`] before it
+/// shrinks, so the late frames a loss leaves behind do not shrink it.
+const SHRINK: Duration = Duration::from_secs(1);
+
+/// How far a layer's [`Reach`] holds past the longest wait, so a playout
+/// still rising after a loss does not skip groups that will play: the jitter
+/// video plays behind its arrivals to ride out.
+const LEEWAY: Duration = VIDEO_DELAY;
+
+impl Reach {
+	/// Holding `held` until frames are counted, from `now`.
+	fn new(held: Duration, now: Instant) -> Self {
+		Self {
+			held,
+			peak: Duration::ZERO,
+			since: now,
+		}
+	}
+
+	/// Count a frame read at `now` that waits `wait` before it plays,
+	/// returning a new reach, the longest wait and [`LEEWAY`]: longer at once
+	/// when a wait comes within `step`, a frame's length, of the one held, so
+	/// no frame on time is skipped, and shorter only once every frame of a
+	/// whole [`SHRINK`] waited more than a frame less. At most
+	/// [`DELAY_MAX`](moq_mux::container::DELAY_MAX), however a peer stamps its
+	/// frames.
+	fn count(&mut self, wait: Duration, step: Duration, now: Instant) -> Option<Duration> {
+		let mut shrink = None;
+		if now.saturating_duration_since(self.since) >= SHRINK {
+			shrink = Some(std::mem::take(&mut self.peak).max(wait));
+			self.since = now;
+		}
+		self.peak = self.peak.max(wait);
+		let reach = |wait: Duration| wait.saturating_add(LEEWAY).min(moq_mux::container::DELAY_MAX);
+		let held = self.held;
+		let next = match wait.saturating_add(step) > held {
+			true => Some(reach(wait)).filter(|next| *next != held)?,
+			false => Some(reach(shrink?)).filter(|next| next.saturating_add(step) < held)?,
+		};
+		self.held = next;
+		Some(next)
+	}
+}
 
 /// How far ahead a layer holds decoded sound, read as it arrives: as long as
 /// its publisher keeps it, a bound on memory alone (about 11 MB of the bus's
@@ -1571,7 +1620,11 @@ impl Driver {
 
 	/// Show each picture once `schedule`, another track's clock, says it is
 	/// due, the newest due one when several are, as
-	/// [`play_video`](Self::play_video) does.
+	/// [`play_video`](Self::play_video) does. Its pictures wait undecoded in
+	/// the subscription, which waits out a lost group for the layer's
+	/// [`Reach`]: moq_video's decoder cannot move that in place, so the track
+	/// is subscribed again whenever it moves, joining where the layer plays,
+	/// and the old subscription plays on until the new one is open.
 	async fn follow_video(
 		&self,
 		broadcast: &moq_net::broadcast::Consumer,
@@ -1579,16 +1632,26 @@ impl Driver {
 		config: hang::catalog::VideoConfig,
 		schedule: &sync::Consumer,
 	) -> Result<(), Error> {
-		let mut options = moq_video::decode::Options::new();
-		options.start = moq_video::decode::Start::Latest;
-		options.decoder.output = self.context.output;
-		options.delay = moq_video::decode::Delay {
-			min: Some(VIDEO_DELAY),
-			max: Some(LAYER_DELAY),
+		let open = |reach: Duration| {
+			let mut options = moq_video::decode::Options::new();
+			options.start = moq_video::decode::Start::Latest;
+			options.decoder.output = self.context.output;
+			options.delay = moq_video::decode::Delay {
+				min: Some(reach),
+				max: Some(reach),
+			};
+			moq_video::decode::Consumer::new(broadcast, &config, name.clone(), options)
 		};
-		let mut consumer = moq_video::decode::Consumer::new(broadcast, &config, name, options).await?;
+		// Until a picture says how far behind the layer plays, the program's
+		// own video delay.
+		let mut reach = Reach::new(VIDEO_DELAY, kio::clock::now());
+		let mut consumer = open(VIDEO_DELAY).await?;
+		let mut opening = None;
 		let mut offsets = self.offset.clone();
 		let mut queue = VecDeque::<moq_video::Frame>::new();
+		// The newest picture queued, which a new subscription's join repeats.
+		let mut newest: Option<moq_net::Timestamp> = None;
+		let mut step = None;
 		let mut ended = false;
 		loop {
 			let now = kio::clock::now();
@@ -1615,10 +1678,32 @@ impl Driver {
 				.filter(|due| *due > now);
 			tokio::select! {
 				read = consumer.read(), if !ended && queue.len() < QUEUED => match read? {
-					Some(moq_video::decode::Read::Frame(frame)) => queue.push_back(frame),
+					Some(moq_video::decode::Read::Frame(frame)) => {
+						if newest.is_some_and(|newest| frame.timestamp <= newest) {
+							continue;
+						}
+						if let Some(newest) = newest {
+							step = Duration::try_from(frame.timestamp).ok().zip(Duration::try_from(newest).ok()).map(|(at, before)| at.saturating_sub(before));
+						}
+						newest = Some(frame.timestamp);
+						let due = shift(frame.timestamp, offset).and_then(|at| schedule.due(at));
+						let moved = match (due, consumer.arrival(), step) {
+							(Some(due), Some(arrived), Some(step)) => reach.count(due.saturating_duration_since(arrived), step, kio::clock::now()),
+							_ => None,
+						};
+						if let Some(moved) = moved {
+							opening = Some(Box::pin(open(moved)));
+						}
+						queue.push_back(frame);
+					}
 					Some(moq_video::decode::Read::Gap { .. } | moq_video::decode::Read::End { .. }) => {}
 					None => ended = true,
 				},
+				opened = async { opening.as_mut().expect("guarded").await }, if opening.is_some() => {
+					opening = None;
+					consumer = opened?;
+					ended = false;
+				}
 				() = kio::clock::sleep_until(wake.unwrap_or(now)), if wake.is_some() => {}
 				// A new offset moves every moment, so the wake is found again.
 				Ok(()) = offsets.changed() => {}
@@ -1643,9 +1728,12 @@ impl Driver {
 		let bus = self.context.bus.config();
 		let mut options = moq_audio::decode::Options::new();
 		options.start = moq_audio::decode::Start::Latest;
+		// Until a frame says how far behind the layer plays, the program's own
+		// video delay. A frame sounds as long as [`STRETCH`] late.
+		let mut reach = Reach::new(VIDEO_DELAY, kio::clock::now());
 		options.delay = moq_audio::decode::Delay {
 			min: None,
-			max: Some(LAYER_DELAY),
+			max: Some(VIDEO_DELAY.saturating_add(STRETCH)),
 		};
 		options.output.format = moq_audio::Format::F32;
 		options.output.sample_rate = Some(bus.sample_rate);
@@ -1691,6 +1779,10 @@ impl Driver {
 						// whatever a peer stamps.
 						let now = kio::clock::now();
 						let due = shift(frame.timestamp, *offsets.borrow()).and_then(|at| schedule.due(at));
+						let wait = due.zip(consumer.arrival()).map(|(due, arrived)| due.saturating_duration_since(arrived));
+						if let Some(moved) = wait.and_then(|wait| reach.count(wait, length(&frame, bus), now)) {
+							consumer.set_max_delay(moved.saturating_add(STRETCH));
+						}
 						let placed = !gone(due, length(&frame, bus), now, STRETCH)
 							&& due.is_some_and(|sounds| sounds <= now.saturating_add(LAYER_SOUND));
 						if placed {
@@ -3810,6 +3902,146 @@ mod tests {
 			assert!(layer_feed.next_picture().is_none(), "shown on its old offset");
 			until_time(due).await;
 			assert_eq!(shown(layer_feed).await, Duration::from_millis(850));
+		})
+		.await;
+	}
+
+	/// A layer's reach holds [`LEEWAY`] past the longest wait: it grows once a
+	/// wait comes within a frame of it, shrinks only once a whole window waited
+	/// more than a frame less, and stops at the longest playout delay whatever
+	/// a peer stamps.
+	#[test]
+	fn a_reach_follows_the_longest_wait() {
+		let ms = Duration::from_millis;
+		let step = ms(33);
+		let start = Instant::ZERO;
+		let at = |millis| start.saturating_add(ms(millis));
+		let mut reach = Reach::new(ms(100), start);
+		assert_eq!(reach.count(ms(50), step, at(0)), None, "covered");
+		assert_eq!(reach.count(ms(500), step, at(10)), Some(ms(500) + LEEWAY));
+		assert_eq!(reach.count(ms(560), step, at(20)), None, "covered");
+		// Late frames after a loss, within the window that saw 560 ms.
+		assert_eq!(reach.count(ms(50), step, at(500)), None);
+		// The window that saw 560 ms ends: its peak is longer than held, but
+		// that only ever grows on a wait of its own.
+		assert_eq!(reach.count(ms(200), step, at(1_020)), None);
+		assert_eq!(reach.count(ms(200), step, at(1_500)), None);
+		assert_eq!(reach.count(ms(210), step, at(2_020)), Some(ms(210) + LEEWAY));
+		// Shorter by no more than a frame holds.
+		assert_eq!(reach.count(ms(190), step, at(3_100)), None);
+		assert_eq!(
+			reach.count(Duration::MAX, step, at(3_110)),
+			Some(moq_mux::container::DELAY_MAX)
+		);
+		assert_eq!(reach.count(Duration::MAX, step, at(3_120)), None, "capped");
+	}
+
+	/// Copy `name` from `from` into `to` as its groups arrive, but of the group
+	/// starting at `lost`, only the first frame: the rest never arrive, and it
+	/// never ends, as over a link that lost them.
+	fn forward(from: &moq_net::broadcast::Consumer, to: &moq_net::broadcast::Producer, name: &str, lost: Option<u64>) {
+		let track = from.track(name).unwrap();
+		let to = to.clone();
+		tokio::task::spawn_local(async move {
+			let mut subscriber = track.subscribe(None).await.unwrap();
+			let out = to.create_track(subscriber.name(), subscriber.info().clone()).unwrap();
+			let mut stalled = Vec::new();
+			while let Some(mut group) = subscriber.recv_group().await.unwrap() {
+				let mut copy = out.create_group(moq_net::group::Info { start: group.start }).unwrap();
+				if lost == Some(group.start) {
+					let frame = group.read_frame().await.unwrap().unwrap();
+					copy.write_frame(frame.timestamp, frame.payload).unwrap();
+					stalled.push(copy);
+					continue;
+				}
+				tokio::task::spawn_local(async move {
+					while let Some(frame) = group.read_frame().await.unwrap() {
+						copy.write_frame(frame.timestamp, frame.payload).unwrap();
+					}
+					copy.finish().unwrap();
+				});
+			}
+		});
+	}
+
+	/// A layer whose pictures play half a second after they arrive waits out
+	/// a group lost mid-way for that long, not the two playouts every layer
+	/// held: the next group's first picture shows when it is due.
+	#[tokio::test(start_paused = true)]
+	async fn a_lost_group_stalls_a_layer_no_longer_than_it_plays_behind() {
+		const FRAME: u64 = 33;
+		/// Pictures to a group.
+		const GROUP: u64 = 10;
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (context, origin) = context(dir.path());
+			let mut live = live(&origin, false).await;
+			// The camera's broadcast, stamped as the program is, reaching the
+			// layer through a link that loses the group after the sixth.
+			let mut source = moq_net::broadcast::Info::new().produce();
+			let catalog = moq_mux::catalog::Producer::new(&mut source, Default::default()).unwrap();
+			let (mut cam, mut cam_encoder) = rendition(&source, catalog.timebase()).await;
+			let name = catalog.snapshot().video.renditions.into_keys().next().unwrap();
+			let publication = origin
+				.route("room/cam", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
+			forward(
+				&source.consume(),
+				publication.broadcast(),
+				hang::Catalog::DEFAULT_NAME,
+				None,
+			);
+			let lost = 1_000 + 6 * GROUP * FRAME;
+			forward(&source.consume(), publication.broadcast(), &name, Some(lost * 1_000));
+			publication.announce().unwrap();
+
+			// 400 ms past the program's picture stamped alike, which plays
+			// VIDEO_DELAY after it arrives.
+			let behind = Duration::from_millis(400).saturating_add(VIDEO_DELAY);
+			let mut collection = collection();
+			collection.sources.insert(
+				"cam".into(),
+				Source::Layer {
+					clock: "guest".into(),
+					path: "room/cam".into(),
+					instance: None,
+					offset: 400_000,
+				},
+			);
+			collection.validate().unwrap();
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection);
+			start(&sources, drivers).await;
+			let layer = sources.get("cam").unwrap();
+
+			let begun = kio::clock::now();
+			let next = lost + GROUP * FRAME;
+			let mut arrived = None;
+			let mut shown = None;
+			for index in 0..11 * GROUP {
+				until_time(begun.saturating_add(Duration::from_millis(index * FRAME))).await;
+				let at = 1_000 + index * FRAME;
+				if at == next {
+					arrived = Some(kio::clock::now());
+				}
+				picture(&mut live.video, &mut live.encoder, at);
+				if index % GROUP == 0 {
+					cam_encoder.cut().unwrap();
+				}
+				picture(&mut cam, &mut cam_encoder, at);
+				if let Some(Picture::Frame(frame)) = layer.next_picture()
+					&& frame.timestamp >= moq_net::Timestamp::from_millis(next).unwrap()
+				{
+					shown.get_or_insert(kio::clock::now());
+				}
+			}
+			let due = arrived.unwrap().saturating_add(behind);
+			let shown = shown.expect("the group after the lost one never showed");
+			assert!(
+				shown <= due.saturating_add(behind),
+				"shown {:?} after it was due",
+				shown.saturating_duration_since(due)
+			);
 		})
 		.await;
 	}
