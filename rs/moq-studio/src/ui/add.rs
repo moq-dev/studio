@@ -1103,7 +1103,9 @@ pub(super) fn put(state: &State, layer: &Layer, name: &str, picture: Picture) ->
 /// portrait one too: where the two agree on the order, each picture's
 /// place; where one would put it behind and the other in front, in front
 /// as a picture-in-picture in both. In each, its picture is cropped to the
-/// shape it is given there.
+/// shape it is given there. One the system's picker chooses has no shape
+/// until it shows, so it is left uncropped and the portrait picture fits it
+/// whole, as for any layer without a portrait place.
 fn both(
 	collection: &Collection,
 	landscape: Among,
@@ -1113,6 +1115,14 @@ fn both(
 ) -> (usize, Item) {
 	let (index, rect) = place(collection, &landscape, picture);
 	let mut item = Item::new(name.to_string(), rect);
+	let unknown = picture.size.is_none()
+		&& matches!(
+			self::picture(collection, picture.source),
+			Some(Source::PickedDisplay | Source::PickedWindow)
+		);
+	if unknown {
+		return (index, item);
+	}
 	let Some(portrait) = portrait else {
 		item.crop = covering(collection, picture, Format::Landscape, &item.rect);
 		return (index, item);
@@ -1814,6 +1824,16 @@ name = "Main"
 			window.crop.top > 0.0 && window.crop.left == 0.0,
 			"cropped top and bottom"
 		);
+
+		// One the system's picker chooses may be any shape, so none is
+		// guessed: uncropped, and fitted whole in the portrait picture.
+		let pickers = [Source::PickedWindow, Source::PickedDisplay];
+		for picked in &pickers {
+			let (_, item) = empty(Picture::of(picked));
+			assert!(item.crop.is_none() && item.portrait.is_none(), "{picked:?}");
+			let (_, inset) = both(&collection, landscape, Some(portrait), "picked", Picture::of(picked));
+			assert!(inset.crop.is_none() && inset.portrait.is_none(), "{picked:?} inset");
+		}
 
 		let turned = collection.canvas.turned();
 		let landed = dropped(&collection, turned, Picture::of(&CAMERA), [540.0, 960.0]);

@@ -342,7 +342,9 @@ shrunk to fit and centered. With **Both at once** on, it is placed so in
 each picture, whichever is edited; where one would put it behind and the
 other in front, it goes in front as a picture-in-picture in both, in each
 picture's first clear corner. Either way its picture is cropped evenly to the
-shape it is given there, never squeezed.
+shape it is given there, never squeezed, except a display or window the
+system's picker chooses, whose shape isn't known until it shows: it is left
+uncropped, and the portrait picture fits it whole.
 
 On the **picture**, click a layer to select it, drag it to move it, and drag
 its edges or corners to resize it (see [Placing layers](#placing-layers)). A
