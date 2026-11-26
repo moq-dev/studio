@@ -4,7 +4,6 @@
 
 use egui::{Align2, Rect, Sense, Stroke, Vec2, pos2, vec2};
 
-use super::drop::Arrival;
 use super::layers::{kind, unplaced, words};
 use super::*;
 
@@ -51,7 +50,7 @@ impl Tab {
 /// Add's own state.
 pub(super) struct Adding {
 	/// Whether it is open over the stage.
-	open: bool,
+	pub(super) open: bool,
 	pub(super) tab: Tab,
 	/// The web address typed so far.
 	url: String,
@@ -99,6 +98,8 @@ struct Entry {
 	card: Result<Card, String>,
 	/// Its picture's color, for a color.
 	swatch: Option<Color32>,
+	/// The source its menu removes for good, for one the show already has.
+	remove: Option<String>,
 }
 
 /// What a click in Add asks for.
@@ -140,11 +141,14 @@ impl Panels {
 			dragged(&ctx, &card);
 			return;
 		}
+		// Over the whole window, so nothing beside it, such as a scene's pad,
+		// takes a click while it is open.
+		let screen = ctx.content_rect();
 		let scrim = egui::Area::new(egui::Id::new("add scrim"))
 			.order(egui::Order::Middle)
-			.fixed_pos(stage.min)
+			.fixed_pos(screen.min)
 			.show(&ctx, |ui| {
-				let (rect, response) = ui.allocate_exact_size(stage.size(), Sense::click());
+				let (rect, response) = ui.allocate_exact_size(screen.size(), Sense::click());
 				ui.painter().rect_filled(rect, 0, kit::BG.gamma_multiply(0.7));
 				kit::named(response, "Beside Add")
 			});
@@ -243,8 +247,20 @@ impl Panels {
 			}
 			Some(Asked::Page(url)) => {
 				self.adding.url.clear();
-				self.dropping.arrive(Arrival::Page(url), None);
-				self.close_add();
+				let canvas = {
+					let state = self.engine.state.lock().unwrap();
+					let collection = state.collection();
+					collection.canvas(self.edited(&state)).unwrap_or(collection.canvas)
+				};
+				let page = Pick {
+					name: url.host_str().unwrap_or("Web page").to_string(),
+					source: Source::Browser {
+						url: url.to_string(),
+						width: canvas.width,
+						height: canvas.height,
+					},
+				};
+				self.take_card(&Card::New(page), None);
 			}
 			Some(Asked::Retry) => {
 				self.devices.listing = None;
@@ -268,8 +284,9 @@ impl Panels {
 		true
 	}
 
-	/// Add what `card` adds to the edited scene, centered on `at` in canvas
-	/// pixels if given, then close Add with its layer selected.
+	/// Add what `card` adds to the edited scene, then close Add with its
+	/// layer selected. Dropped at `at`, in the canvas pixels of the picture
+	/// it was dropped on, it lands there as a dropped file does.
 	pub(super) fn take_card(&mut self, card: &Card, at: Option<[f32; 2]>) {
 		let engine = self.engine.clone();
 		let mut state = engine.state.lock().unwrap();
@@ -278,14 +295,21 @@ impl Panels {
 			Card::New(pick) => {
 				// Two cameras of the same model share a name; number the later ones.
 				let name = state.collection().unused_name(&pick.name);
-				let layer = self.scene(&state).ok();
-				let new = New {
-					name,
-					source: pick.source.clone(),
-					layer,
-					at,
+				let source = pick.source.clone();
+				let result = match at.map(|at| self.landing(&state, Some(at))) {
+					None => {
+						let layer = self.scene(&state).ok();
+						add(&mut state, New { name, source, layer })
+					}
+					Some(Err(why)) => Err(anyhow::anyhow!(why)),
+					Some(Ok(landing)) => {
+						let rect = source
+							.has_video()
+							.then(|| place(state.collection(), &[], landing.canvas, &source, Some(landing.at)).1);
+						let added = self.add_layer(&mut state, &landing, name.clone(), source, rect);
+						added.map(|()| name)
+					}
 				};
-				let result = add(&mut state, new);
 				drop(state);
 				self.added(result);
 			}
@@ -297,16 +321,24 @@ impl Panels {
 		}
 	}
 
-	/// Put `name`, a source nothing shows, in the edited scene, centered on
-	/// `at` if given, or in the next guest tile of a scene with slots if it
-	/// is a guest's.
+	/// Put `name`, a source nothing shows, in the edited scene: dropped at
+	/// `at`, as [`Self::take_card`] says, or else where [`place`] puts it, or
+	/// in the next guest tile of a scene with slots if it is a guest's.
 	fn place_unused(&mut self, state: &mut State, name: &str, at: Option<[f32; 2]>) -> anyhow::Result<()> {
+		let landing = at.map(|at| self.landing(state, Some(at)));
+		let landing = landing.transpose().map_err(|why| anyhow::anyhow!(why))?;
 		let layer = self.scene(state).map_err(|why| anyhow::anyhow!(why))?;
+		let shown = super::slots::placed(state, &layer, Format::Landscape);
 		let collection = state.collection();
 		let source = collection.sources.get(name).context("the source is gone")?;
 		let canvas = collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas);
-		let (mut index, rect) = place(collection, &layer, canvas, source, at);
+		let (mut index, rect) = place(collection, &shown, canvas, source, None);
 		let mut item = Item::new(name.to_string(), rect);
+		if let Some(landing) = &landing {
+			let rect = place(collection, &[], landing.canvas, source, Some(landing.at)).1;
+			item = super::drop::landed(collection, landing, name, rect);
+			index = shown.len();
+		}
 		// A guest takes the next tile of a scene with slots.
 		let room = self.engine.room();
 		let guest = room
@@ -371,19 +403,23 @@ impl Panels {
 		collection
 			.sources
 			.iter()
-			.filter(|(name, source)| unplaced(collection, name) && !heard(name) && source.has_video())
+			.filter(|(name, _)| unplaced(collection, name) && !heard(name))
 			.filter(|(_, source)| {
 				let guest = room
 					.as_ref()
 					.is_some_and(|room| crate::guests::plays_guest(room.path(), source));
 				guest == guests
 			})
-			.map(|(name, _)| Entry {
+			.map(|(name, source)| Entry {
 				icon: kind(collection, name),
 				name: name.clone(),
 				line: words(collection, name),
-				card: Ok(Card::Unused(name.clone())),
+				card: match source.has_video() {
+					true => Ok(Card::Unused(name.clone())),
+					false => Err("No picture to place; right-click to remove it for good".into()),
+				},
 				swatch: None,
+				remove: Some(name.clone()),
 			})
 			.collect()
 	}
@@ -507,6 +543,7 @@ impl Panels {
 					},
 				})),
 				swatch: None,
+				remove: None,
 			},
 			Entry {
 				icon: Icon::Color,
@@ -519,6 +556,7 @@ impl Panels {
 					},
 				})),
 				swatch: Some(color),
+				remove: None,
 			},
 		];
 		asked = asked.or(cards(ui, "made", &made, true));
@@ -542,6 +580,7 @@ impl Panels {
 				source,
 			})),
 			swatch: None,
+			remove: None,
 		};
 		let mut shown = vec![new(Icon::Live, "Program", "Whatever is on air", Source::Program)];
 		for scene in &state.collection().scenes {
@@ -582,22 +621,13 @@ impl Panels {
 			Ok(picks) => picks.clone(),
 			Err(err) => return unavailable(ui, err),
 		};
-		let ids: Vec<String> = picks
-			.iter()
-			.filter_map(|pick| match &pick.source {
-				Source::Microphone { id: Some(id) } => Some(id.clone()),
-				_ => None,
-			})
-			.collect();
-		self.adding.meters.follow(&self.runtime, &ids);
+		let inputs: Vec<Input> = picks.iter().filter_map(|pick| Input::of(&pick.source)).collect();
+		self.adding.meters.follow(&self.runtime, &inputs);
 		ui.ctx().request_repaint_after(Duration::from_millis(33));
 		caption(ui, "Sound", Beside::Note("Talk, and watch which one moves"));
 		let mut asked = None;
 		for pick in picks {
-			let level = match &pick.source {
-				Source::Microphone { id: Some(id) } => self.adding.meters.level(id),
-				_ => None,
-			};
+			let level = Input::of(&pick.source).and_then(|input| self.adding.meters.level(&input));
 			if sound_row(ui, &pick, level).clicked() {
 				asked = Some(Asked::Card(Card::New(pick)));
 			}
@@ -626,7 +656,7 @@ impl Panels {
 		state: &State,
 		picture: &egui::Response,
 		canvas: Canvas,
-	) -> Option<(Card, Option<[f32; 2]>)> {
+	) -> Option<(Card, [f32; 2])> {
 		let card = egui::DragAndDrop::payload::<Card>(ui.ctx())?;
 		let pointer = ui.ctx().pointer_latest_pos()?;
 		if !picture.contains_pointer() {
@@ -634,17 +664,14 @@ impl Panels {
 		}
 		let scale = picture.rect.size() / vec2(canvas.width.max(1) as f32, canvas.height.max(1) as f32);
 		let at = (pointer - picture.rect.min) / scale;
-		// Only the landscape picture places by where it is let go; the portrait
-		// one lands it where it would land clicked.
-		let at = (self.format == Format::Landscape).then_some([at.x, at.y]);
-		let layer = self.scene(state).ok()?;
+		let at = [at.x, at.y];
 		let collection = state.collection();
 		let landing = match &*card {
 			Card::New(pick) => Some(&pick.source),
 			Card::Unused(name) => collection.sources.get(name),
 		};
 		if let Some(source) = landing.filter(|source| source.has_video()) {
-			let (_, rect) = place(collection, &layer, canvas, source, at);
+			let (_, rect) = place(collection, &[], canvas, source, Some(at));
 			let outline = Rect::from_min_size(
 				picture.rect.min + vec2(rect.x, rect.y) * scale,
 				vec2(rect.width, rect.height) * scale,
@@ -822,8 +849,8 @@ impl Panels {
 	}
 }
 
-/// Where a new layer showing `source` goes among `layer`'s on `canvas`: its
-/// index, back first, and its place. Centered on `at` in canvas pixels, it
+/// Where a new layer showing `source` goes among `items`, a layer's layers
+/// where they are drawn on `canvas`: its index, back first, and its place. Centered on `at` in canvas pixels, it
 /// lands there at most half the canvas; otherwise the first picture fills
 /// the canvas, behind any smaller layers, one over a layer already covering
 /// it lands as a picture-in-picture in the first corner clear of the
@@ -831,12 +858,11 @@ impl Panels {
 /// its own size.
 pub(super) fn place(
 	collection: &Collection,
-	layer: &Layer,
+	items: &[Item],
 	canvas: Canvas,
 	source: &Source,
 	at: Option<[f32; 2]>,
 ) -> (usize, moq_scene::Rect) {
-	let items = collection.items(layer).unwrap_or_default();
 	let front = items.len();
 	let shown = match source {
 		Source::Clone { source } => collection.sources.get(source),
@@ -930,6 +956,7 @@ fn device(icon: Icon, pick: &Pick) -> Entry {
 		line: line.into(),
 		card: Ok(Card::New(pick.clone())),
 		swatch: None,
+		remove: None,
 	}
 }
 
@@ -1004,14 +1031,15 @@ fn cards(ui: &mut Ui, id: &str, shown: &[Entry], drag: bool) -> Option<Asked> {
 	let columns = ((width + GAP) / (CARD_MIN + GAP)).floor().clamp(1.0, 3.0) as usize;
 	let card_width = (width - GAP * (columns - 1) as f32) / columns as f32;
 	let mut asked = None;
-	for row in shown.chunks(columns) {
+	for (number, row) in shown.chunks(columns).enumerate() {
 		let (rect, _) = ui.allocate_exact_size(vec2(width, CARD), Sense::hover());
 		for (column, shown) in row.iter().enumerate() {
 			let at = Rect::from_min_size(
 				pos2(rect.left() + column as f32 * (card_width + GAP), rect.top()),
 				vec2(card_width, CARD),
 			);
-			let response = card(ui, at, (id, &shown.name), shown, drag);
+			// By its place, since two devices can share a name.
+			let mut response = card(ui, at, (id, number * columns + column), shown, drag);
 			match &shown.card {
 				Ok(card) => {
 					if drag && response.drag_started() {
@@ -1020,18 +1048,18 @@ fn cards(ui: &mut Ui, id: &str, shown: &[Entry], drag: bool) -> Option<Asked> {
 					if response.clicked() {
 						asked = Some(Asked::Card(card.clone()));
 					}
-					if let Card::Unused(name) = card {
-						response.context_menu(|ui| {
-							if ui.add(kit::button(Icon::Remove, "Remove for good")).clicked() {
-								asked = Some(Asked::Remove(name.clone()));
-								ui.close();
-							}
-						});
-					}
 				}
 				Err(why) => {
-					response.on_hover_text(why);
+					response = response.on_hover_text(why);
 				}
+			}
+			if let Some(name) = &shown.remove {
+				response.context_menu(|ui| {
+					if ui.add(kit::button(Icon::Remove, "Remove for good")).clicked() {
+						asked = Some(Asked::Remove(name.clone()));
+						ui.close();
+					}
+				});
 			}
 		}
 		ui.add_space(GAP);
@@ -1041,9 +1069,11 @@ fn cards(ui: &mut Ui, id: &str, shown: &[Entry], drag: bool) -> Option<Asked> {
 
 /// Draw `shown` in `rect`: an icon in a well, its name, and the line under
 /// it, lit while hovered.
-fn card(ui: &mut Ui, rect: Rect, id: (&str, &str), shown: &Entry, drag: bool) -> egui::Response {
+fn card(ui: &mut Ui, rect: Rect, id: (&str, usize), shown: &Entry, drag: bool) -> egui::Response {
 	let enabled = shown.card.is_ok();
+	// One that cannot be added may still be removed from its menu.
 	let sense = match (enabled, drag) {
+		(false, _) if shown.remove.is_some() => Sense::click(),
 		(false, _) => Sense::hover(),
 		(true, false) => Sense::click(),
 		(true, true) => Sense::click_and_drag(),
@@ -1180,12 +1210,32 @@ fn dragged(ctx: &egui::Context, card: &Card) {
 		});
 }
 
-/// Each listed microphone's level while the Audio tab shows it, each opened
-/// on a thread of its own and let go once it is no longer shown.
+/// Each listed input's level while the Audio tab shows it, each opened on a
+/// thread of its own and let go once it is no longer shown.
 #[derive(Default)]
 struct Meters {
 	#[cfg(feature = "capture")]
-	open: std::collections::HashMap<String, Meter>,
+	open: std::collections::HashMap<Input, Meter>,
+}
+
+/// An input a meter listens to.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Input {
+	/// A microphone, by its id.
+	Microphone(String),
+	/// The system's sound.
+	System,
+}
+
+impl Input {
+	/// What `source` listens to, if it is a listed input.
+	fn of(source: &Source) -> Option<Self> {
+		match source {
+			Source::Microphone { id: Some(id) } => Some(Self::Microphone(id.clone())),
+			Source::SystemAudio => Some(Self::System),
+			_ => None,
+		}
+	}
 }
 
 #[cfg(feature = "capture")]
@@ -1202,32 +1252,31 @@ struct Meter {
 }
 
 impl Meters {
-	/// Meter exactly the microphones of `ids`.
+	/// Meter exactly `inputs`.
 	#[cfg(feature = "capture")]
-	fn follow(&mut self, runtime: &tokio::runtime::Handle, ids: &[String]) {
-		self.open.retain(|id, _| ids.contains(id));
-		for id in ids {
-			if self.open.contains_key(id) {
+	fn follow(&mut self, runtime: &tokio::runtime::Handle, inputs: &[Input]) {
+		self.open.retain(|input, _| inputs.contains(input));
+		for input in inputs {
+			if self.open.contains_key(input) {
 				continue;
 			}
-			match Meter::open(runtime, id) {
+			match Meter::open(runtime, input) {
 				Ok(meter) => {
-					self.open.insert(id.clone(), meter);
+					self.open.insert(input.clone(), meter);
 				}
-				Err(err) => tracing::warn!(%err, "cannot meter a microphone"),
+				Err(err) => tracing::warn!(%err, "cannot meter an input"),
 			}
 		}
 	}
 
 	#[cfg(not(feature = "capture"))]
-	fn follow(&mut self, _: &tokio::runtime::Handle, _: &[String]) {}
+	fn follow(&mut self, _: &tokio::runtime::Handle, _: &[Input]) {}
 
-	/// The level of the microphone `id`, from 0 to 1, unless it is not
-	/// metered.
+	/// The level of `input`, from 0 to 1, unless it is not metered.
 	#[cfg(feature = "capture")]
-	fn level(&mut self, id: &str) -> Option<f32> {
+	fn level(&mut self, input: &Input) -> Option<f32> {
 		use std::sync::atomic::Ordering;
-		let meter = self.open.get_mut(id)?;
+		let meter = self.open.get_mut(input)?;
 		if meter.failed.load(Ordering::Relaxed) {
 			return None;
 		}
@@ -1237,21 +1286,24 @@ impl Meters {
 	}
 
 	#[cfg(not(feature = "capture"))]
-	fn level(&mut self, _: &str) -> Option<f32> {
+	fn level(&mut self, _: &Input) -> Option<f32> {
 		None
 	}
 }
 
 #[cfg(feature = "capture")]
 impl Meter {
-	/// Open the microphone `id` on a thread of its own: the capture backends'
-	/// futures are `!Send` on macOS, as the device listing's are.
-	fn open(runtime: &tokio::runtime::Handle, id: &str) -> std::io::Result<Self> {
+	/// Open `input` on a thread of its own: the capture backends' futures
+	/// are `!Send` on macOS, as the device listing's are.
+	fn open(runtime: &tokio::runtime::Handle, input: &Input) -> std::io::Result<Self> {
 		use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 		let peak = Arc::new(AtomicU32::new(0));
 		let failed = Arc::new(AtomicBool::new(false));
 		let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-		let source = moq_audio::capture::Source::Microphone(Some(id.to_string()));
+		let source = match input {
+			Input::Microphone(id) => moq_audio::capture::Source::Microphone(Some(id.clone())),
+			Input::System => moq_audio::capture::Source::System,
+		};
 		let (heard, failing) = (peak.clone(), failed.clone());
 		let handle = runtime.clone();
 		std::thread::Builder::new().name("meter".into()).spawn(move || {
@@ -1260,7 +1312,7 @@ impl Meter {
 					_ = stopped => {}
 					result = listen(source, &heard) => {
 						if let Err(err) = result {
-							tracing::info!(%err, "cannot meter a microphone");
+							tracing::info!(%err, "cannot meter an input");
 						}
 						failing.store(true, Ordering::Relaxed);
 					}
@@ -1355,7 +1407,8 @@ name = "Main"
 	}
 
 	fn placed(collection: &Collection, source: Source, at: Option<[f32; 2]>) -> (usize, [f32; 4]) {
-		let (index, rect) = place(collection, &Layer::scene("Main"), collection.canvas, &source, at);
+		let items = collection.items(&Layer::scene("Main")).unwrap_or_default();
+		let (index, rect) = place(collection, items, collection.canvas, &source, at);
 		(index, [rect.x, rect.y, rect.width, rect.height])
 	}
 

@@ -346,7 +346,7 @@ impl Panels {
 			self.fail(spot, result);
 		}
 		if let Some((card, at)) = card {
-			self.take_card(&card, at);
+			self.take_card(&card, Some(at));
 		}
 		self.quick_start(ui, response.rect);
 		if let Some(cued) = snapshot.cued.as_ref().filter(|_| off_air.is_none()) {
@@ -631,7 +631,8 @@ impl Panels {
 		if self.drag.is_some() {
 			ui.ctx().request_repaint_after(moq_scene::place::GRAB / 4);
 		}
-		if response.has_focus() && self.drag.is_none() && result.is_ok() {
+		// Add over the picture holds its keys back.
+		if response.has_focus() && self.drag.is_none() && result.is_ok() && !self.adding.open {
 			(spot, result) = self.nudge(ui, state, response.id);
 		}
 

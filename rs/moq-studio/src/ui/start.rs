@@ -175,7 +175,6 @@ impl Panels {
 			name,
 			source,
 			layer: Some(layer.clone()),
-			at: None,
 		};
 		let result = add(&mut state, new);
 		drop(state);

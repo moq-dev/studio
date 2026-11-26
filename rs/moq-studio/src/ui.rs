@@ -2348,24 +2348,17 @@ fn clone_of(collection: &Collection, name: &str) -> (Source, Option<Video>) {
 }
 
 /// A source to add: its name, what it is, and the layers it joins if it
-/// has a picture, centered on `at` in canvas pixels, or where
-/// [`add::place`] puts it.
+/// has a picture, where [`add::place`] puts it.
 struct New {
 	name: String,
 	source: Source,
 	layer: Option<Layer>,
-	at: Option<[f32; 2]>,
 }
 
 /// Add `new`, placed among its layers if it has a picture and heard in the
 /// audio scene on program if it has sound. Returns its name.
 fn add(state: &mut State, new: New) -> anyhow::Result<String> {
-	let New {
-		name,
-		source,
-		layer,
-		at,
-	} = new;
+	let New { name, source, layer } = new;
 	anyhow::ensure!(!name.is_empty(), "a source needs a name");
 	anyhow::ensure!(
 		!state.collection().sources.contains_key(&name),
@@ -2375,7 +2368,9 @@ fn add(state: &mut State, new: New) -> anyhow::Result<String> {
 	let placed = layer.filter(|_| source.has_video()).map(|layer| {
 		let collection = state.collection();
 		let canvas = collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas);
-		let (index, rect) = add::place(collection, &layer, canvas, &source, at);
+		// Where they are drawn, so a layer in a slot covers what it covers.
+		let shown = slots::placed(state, &layer, Format::Landscape);
+		let (index, rect) = add::place(collection, &shown, canvas, &source, None);
 		(layer, index, rect)
 	});
 	edit(state, format!("Add `{name}`"), None, |draft| {

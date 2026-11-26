@@ -50,15 +50,15 @@ impl Arrival {
 
 /// Where an arrival lands.
 #[derive(Clone, Debug)]
-struct Landing {
+pub(super) struct Landing {
 	/// The layers it joins.
-	layer: Layer,
+	pub(super) layer: Layer,
 	/// The picture it lands in, Studio's while it edits a scene drawn in both,
 	/// and that picture's canvas.
 	format: Format,
-	canvas: Canvas,
+	pub(super) canvas: Canvas,
 	/// Its center, in canvas pixels.
-	at: [f32; 2],
+	pub(super) at: [f32; 2],
 	/// The layer under it on the picture, which a file can replace the file
 	/// of or a color grade grades, with that layer as it was.
 	onto: Option<(Picked, Item)>,
@@ -304,6 +304,33 @@ fn reason(err: &moq_scene::Error, path: &Path) -> String {
 	match text.find(&named) {
 		Some(at) => text[at + named.len()..].to_string(),
 		None => text,
+	}
+}
+
+/// A layer showing `name` at `rect` in `landing`'s picture. Landed in the
+/// portrait picture, it sits there; in the landscape one, it lands centered
+/// at the same size until moved there. One that landed in portrait before
+/// its layers stopped being drawn in both, such as while its file was read,
+/// lands centered in their one.
+pub(super) fn landed(collection: &Collection, landing: &Landing, name: &str, rect: Rect) -> Item {
+	let layer = &landing.layer;
+	let centered = |canvas: Canvas, rect: Rect| {
+		let center = [canvas.width as f32 / 2.0, canvas.height as f32 / 2.0];
+		land(canvas, [rect.width, rect.height], center)
+	};
+	match (landing.format, collection.dual(layer)) {
+		(Format::Landscape, _) => Item::new(name.to_string(), rect),
+		(Format::Portrait, true) => Item {
+			portrait: Some(Placement {
+				rect,
+				crop: Crop::default(),
+			}),
+			..Item::new(name.to_string(), centered(collection.canvas, rect))
+		},
+		(Format::Portrait, false) => {
+			let canvas = collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas);
+			Item::new(name.to_string(), centered(canvas, rect))
+		}
 	}
 }
 
@@ -566,7 +593,7 @@ impl Panels {
 
 	/// Where on the picture a drop at `at`, in canvas pixels, lands: there,
 	/// or the edited scene's center for `None`, over the layer it is on.
-	fn landing(&self, state: &State, at: Option<[f32; 2]>) -> Result<Landing, String> {
+	pub(super) fn landing(&self, state: &State, at: Option<[f32; 2]>) -> Result<Landing, String> {
 		let layer = self.scene(state)?;
 		let collection = state.collection();
 		let format = collection.format_of(&layer, self.format);
@@ -763,7 +790,7 @@ impl Panels {
 
 	/// Add `source` as `name`, in front of `landing`'s layers at `rect` if
 	/// given, heard on program if it has sound, and select its layer.
-	fn add_layer(
+	pub(super) fn add_layer(
 		&mut self,
 		state: &mut State,
 		landing: &Landing,
@@ -774,29 +801,7 @@ impl Panels {
 		let layer = &landing.layer;
 		let heard = source.has_audio();
 		let index = state.collection().items(layer).map_or(0, <[Item]>::len);
-		// Landed in the portrait picture, it sits there; in the landscape
-		// one, it lands centered at the same size until moved there. One that
-		// landed in portrait before its layers stopped being drawn in both,
-		// such as while its file was read, lands centered in their one.
-		let collection = state.collection();
-		let centered = |canvas: Canvas, rect: Rect| {
-			let center = [canvas.width as f32 / 2.0, canvas.height as f32 / 2.0];
-			land(canvas, [rect.width, rect.height], center)
-		};
-		let item = rect.map(|rect| match (landing.format, collection.dual(layer)) {
-			(Format::Landscape, _) => Item::new(name.clone(), rect),
-			(Format::Portrait, true) => Item {
-				portrait: Some(Placement {
-					rect,
-					crop: Crop::default(),
-				}),
-				..Item::new(name.clone(), centered(collection.canvas, rect))
-			},
-			(Format::Portrait, false) => {
-				let canvas = collection.canvas(layer.scene.as_deref()).unwrap_or(collection.canvas);
-				Item::new(name.clone(), centered(canvas, rect))
-			}
-		});
+		let item = rect.map(|rect| landed(state.collection(), landing, &name, rect));
 		edit(state, format!("Drop `{name}` {}", place(layer)), None, |draft| {
 			draft.set_source(&name, Some(source))?;
 			if heard {

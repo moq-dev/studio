@@ -22,6 +22,9 @@ const LIST: f32 = 420.0;
 pub(super) struct Palette {
 	query: String,
 	picked: usize,
+	/// The picked row's name and group, which keep it picked as rows found
+	/// since, such as devices, move it.
+	picked_row: Option<(String, String)>,
 }
 
 /// What a row does.
@@ -361,17 +364,25 @@ impl Panels {
 					field.request_focus();
 					if field.changed() {
 						palette.picked = 0;
+						palette.picked_row = None;
 					}
 				});
 				// Found from what the box holds after this frame's typing, so
 				// Enter pressed with it runs what was typed, not what was before.
 				let rows = found(all, &palette.query);
+				let key = |row: &Row| (row.name.clone(), row.group.clone());
+				if let Some(at) =
+					(palette.picked_row.as_ref()).and_then(|picked| rows.iter().position(|row| key(row) == *picked))
+				{
+					palette.picked = at;
+				}
 				let last = rows.len().saturating_sub(1);
 				palette.picked = match (up, down) {
 					(true, false) => palette.picked.saturating_sub(1),
 					(false, true) => (palette.picked + 1).min(last),
 					_ => palette.picked.min(last),
 				};
+				palette.picked_row = rows.get(palette.picked).map(key);
 				let mut run = enter.then_some(palette.picked);
 				ui.add_space(10.0);
 				let y = ui.cursor().top();
@@ -397,6 +408,7 @@ impl Panels {
 							}
 							if response.hovered() && ui.input(|input| input.pointer.delta() != egui::Vec2::ZERO) {
 								palette.picked = index;
+								palette.picked_row = Some(key(row));
 							}
 							if response.clicked() {
 								run = Some(index);
@@ -474,7 +486,6 @@ impl Panels {
 					name,
 					source: pick.source,
 					layer,
-					at: None,
 				};
 				let result = add(&mut state, new);
 				drop(state);
@@ -502,7 +513,10 @@ impl Panels {
 fn row_ui(ui: &mut Ui, row: &Row, picked: bool) -> egui::Response {
 	let height = if row.refused.is_some() { 48.0 } else { 34.0 };
 	let width = ui.available_width();
-	let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+	let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+	// Keyed by the row, not its place, so a row found mid-click cannot take
+	// the click.
+	let response = ui.interact(rect, ui.id().with(("row", &row.name, &row.group)), Sense::click());
 	let enabled = row.refused.is_none();
 	response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, &row.name));
 	if !ui.is_rect_visible(rect) {

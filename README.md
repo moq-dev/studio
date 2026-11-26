@@ -193,8 +193,7 @@ macOS the system's buttons and edges stay. It holds, from the left:
   undo or redo back to just after it.
 - While a mod adds a page, the pages: **STUDIO**, and **MIX** and **REVIEW**
   while their [mods](#mods) are on.
-- On Studio, **Layers**, which opens and closes the rail of layers and Add,
-  giving the picture its room, and **Editable**, which locks the picture
+- On Studio, **Layers**, which opens and closes the rail of layers, giving the picture its room, and **Editable**, which locks the picture
   against clicks and drags (reading **Locked**) so nothing on air moves by
   accident; the inspector, the layers' rows, and the keys still edit. Both
   are kept on this computer.
@@ -868,9 +867,10 @@ cloned or published; its layers take their own.
 
 The scene inspector's **Slots** section picks the arrangement, lists the
 slots with the role or source in each and what fills each role, and adds a
-**Main slot** or **Camera slot**, making the role if the show has none. Add, under
-**Not in any scene**, puts a guest into the scene's next tile when it has
-slots, and any source it adds there is heard on the stream.
+**Main slot** or **Camera slot**, making the role if the show has none. Add's
+**Guests** tab, under **Waiting for a scene**, puts a guest into the scene's
+next tile when it has slots, and any source it adds there is heard on the
+stream.
 
 **Appear on their own**, in Settings, Guests, has a guest whose camera comes
 online take the next tile of the scene on program, and be heard on program,
