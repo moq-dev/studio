@@ -118,7 +118,8 @@ Recording (except from the Flatpak's menu entry).
 While the scene has no layers and the picture is editable, it shows the quick
 start (on air, only on a scene open off air): one click on **Camera** (naming the camera it adds), **Screen**
 (on macOS before Screen Recording is allowed, the main display, which asks for
-it), **Media** (an image or video file), or **Web / Text** (a web address, or a
+it), **Media** (an image or video file; its dialog lists only the types the studio shows, while a dropped file is
+checked by what it holds), or **Web / Text** (a web address, or a
 text to edit) adds the scene's first layer, and the picture becomes the scene. Anything dropped or
 pasted on the picture lands there too (see
 [Dropping and pasting](#dropping-and-pasting)).
@@ -768,7 +769,8 @@ to replace that layer's file, which every layer showing its source shows, or
 add a layer. Dropped anywhere else in the window, or on another page, it lands
 in the middle of the edited scene.
 
-A file the studio cannot play says why where it was dropped, and how to fix
+A file the studio cannot play says why where it was dropped (under the quick
+start's cards while they show, for the Media card's file), and how to fix
 it where it can: a regular MP4 names the remux that makes it readable. The
 file is read before it is placed, in the background, so a large video holds
 up nothing while it is read.
@@ -2373,7 +2375,11 @@ screenshots.
 ## Development
 
 Use the Nix dev shell (`direnv allow`, or `nix develop --command ...`) so
-tooling matches CI, then:
+tooling matches CI. On a Linux host that is not NixOS and has an AMD or Intel
+GPU, the shell also points Vulkan and VA-API at its own Mesa (and Intel's
+`iHD`), since the host's drivers cannot load from a Nix binary; an NVIDIA
+host keeps its own driver, and a `VK_DRIVER_FILES` or `LIBVA_DRIVERS_PATH`
+you set wins. Then:
 
 ```bash
 just check   # Lint everything, including the quest tree
