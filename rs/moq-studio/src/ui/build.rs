@@ -487,7 +487,13 @@ impl Panels {
 			let mut both = false;
 			if !held && !paired {
 				let picked = response.interact_pointer_pos().and_then(hit);
-				let first = released.iter().rev().nth(1).and_then(|&pos| hit(pos));
+				// Off the picture, a selected layer's edges would still reach it.
+				let first = released
+					.iter()
+					.rev()
+					.nth(1)
+					.filter(|&&pos| response.rect.contains(pos))
+					.and_then(|&pos| hit(pos));
 				both = together && picked.is_some() && first.map(|(index, _)| index) == picked.map(|(index, _)| index);
 				self.select(picked.map(|(index, _)| shown[index].0.clone()));
 			}
