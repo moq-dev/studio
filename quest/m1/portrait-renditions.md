@@ -27,15 +27,17 @@ which watches `<broadcast>/portrait` on a phone, in this PR.
 `VideoConfig::preference` is a decode tier today: `@moq/watch` keeps only a
 catalog's highest preference before it selects (`preferredRenditions` in
 `js/watch/src/video/source.ts`), so a lower-ranked orientation stays reachable
-only once the orientation quest below filters by orientation before that
+only once the orientation pick decided below filters by orientation before that
 tier.
 
-## Waiting
+Decided 2026-11-26 (maintainer, /quest-run): ✅ the studio reads `@moq/watch`
+from the `moq` submodule (`workspace:*`, as `js/join` does), so it waits on the
+pin carrying
+[the orientation quest](https://github.com/moq-dev/moq/pull/9287) (landed
+2026-11-21), not on an npm release (rejected: waiting on npm's `@moq/watch`).
+A player on an older `@moq/watch` keeps only the top preference, the show's
+main format, so it never lands on portrait unless that is the main format.
 
-- moq-dev/moq: `@moq/watch` and `moq play` pick a rendition by the viewport's
-  orientation, as
-  [Players pick a rendition by the viewport's orientation](https://github.com/moq-dev/moq/blob/main/quest/m1/orientation.md)
-  plans (being planned in [moq-dev/moq#9247](https://github.com/moq-dev/moq/pull/9247)),
-  and a `@moq/watch` release carries it, so a desktop viewer never lands on
-  portrait. Check: that quest's PR has merged on moq's `main`, and npm's
-  newest `@moq/watch` is past it.
+## Required
+
+- [The studio catches up to moq's main](/quest/m0/pin-moq-tip.md) - its pin carries the players' orientation pick
