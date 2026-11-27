@@ -152,6 +152,28 @@ reference mock-ups live in [`mock/overhaul.html`](/quest/m0/ux/mock/overhaul.htm
 
 ![Unified Studio](/quest/m0/ux/mock/overhaul-studio.webp)
 
+### 2026-11-27 Try Add findings
+
+Decided 2026-11-27 with the maintainer (/quest-plan) after trying Add on a
+real desktop. These supersede the overhaul's lines above where they differ:
+
+- **Inspector:** ✅ always shown, with an empty state when nothing is
+  selected (rejected: opening only while a layer is selected). Owned by
+  [Layers and the inspector stay put](/quest/m0/ux/layers-polish.md).
+- **Add:** ✅ a row of buttons, each opening one picker, the system's where it
+  is the only way and the studio's own elsewhere; one source per device
+  (rejected: tabs of cards; the system picker beside the studio's list).
+  Owned by [Add is a row of buttons](/quest/m0/ux/add-buttons.md).
+- **Mods:** ✅ a MODS page in the title bar, always shown, with a picture of
+  each mod and **Show me**; guest rooms become a mod, off by default; the
+  scene graph becomes a page (rejected: Settings > Mods). Owned by
+  [Mods is a page in the title bar](/quest/m0/ux/mods-page.md).
+- **Audio:** ✅ sound is layers, and the Layers column is the mixer; the MIX
+  page, audio scenes, routes, and the bottom sound strip go, and a "Separate
+  recording mix" mod keeps split mixes (rejected: Audio Scenes & Routes as a
+  mod; the bottom dock's sound rows). Owned by
+  [Audio is layers](/quest/m0/ux/audio-layers.md).
+
 ### What is where
 
 The default window holds one directly editable canvas, a collapsible Layers

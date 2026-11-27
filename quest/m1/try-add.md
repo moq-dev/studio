@@ -61,6 +61,16 @@ owns that part, and deletes this one.
   in both, whichever picture is edited. Check it feels right with **Both at
   once** on.
 
+Tried 2026-11-27 on the maintainer's GNOME desktop, real devices and a few
+adds. Its findings are quests:
+[Layers and the inspector stay put](/quest/m0/ux/layers-polish.md),
+[A new layer takes its picture's own shape](/quest/m0/ux/source-size.md),
+[Add is a row of buttons](/quest/m0/ux/add-buttons.md),
+[Mods is a page in the title bar](/quest/m0/ux/mods-page.md), and
+[Audio is layers](/quest/m0/ux/audio-layers.md). Add is being redone as
+buttons, so the rest of this list waits for that: try it on the new Add, and
+read the Real devices and Microphones items above in terms of its pickers.
+
 ## Waiting
 
 - Maintainer (PC): try Add as the Plan lists and report what to change, or
@@ -68,3 +78,7 @@ owns that part, and deletes this one.
   no camera, microphone, capture card, or permission prompts; a kittest run
   already covers the clicks, the placement, and a drag onto the picture, and
   `just shots` the layout. Check: a comment or quest records the result.
+
+## Required
+
+- [Add is a row of buttons](/quest/m0/ux/add-buttons.md) - the Add this try is for
