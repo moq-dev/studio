@@ -9,6 +9,9 @@ nextest a crash after a pass still fails the run.
 
 ## Plan
 
+Decided 2026-11-26 (maintainer, /quest-run): ✅ keep this quest (rejected:
+drop it). A rare crash after a pass will turn into a CI flake under nextest.
+
 What is known: while
 [shots-scene-remove-flake](https://github.com/moq-dev/studio/pull/271) was
 being reproduced, `shots::a_scene_removes_from_its_pad` printed `test result:
