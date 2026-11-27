@@ -21,9 +21,8 @@ never "Picked …". Adding a device the show already has, known by a stable
 identity such as a camera's or microphone's device id, reuses its source; each
 portal pick of a screen or window stays a source of its own, since the scene
 stores no window id and its saved grant belongs to the first source. Deleting a
-layer also deletes its source once nothing else uses it, and
-deleting a layer also deletes its source once nothing else uses it, so the
-"Not in any scene" section goes away.
+layer also deletes its source once nothing else uses it, so the "Not in any
+scene" section goes away.
 
 ## Plan
 
