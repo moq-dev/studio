@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fail unless a moq commit (default: the gitlink) is on moq-dev/moq's main, as
 # AGENTS.md requires of the pin, and print the commit ID it checked. It fetches
-# main, so `just check` doesn't run it.
+# main, so `just check` runs it only when the pin moved from origin/main.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

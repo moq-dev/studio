@@ -11,6 +11,8 @@ default:
 # Lint the repository tooling, the quest tree, the join page, and the workspace.
 check:
     sh/check-moq-pin.sh
+    # A pin moved from origin/main must be on moq's main; only then does this fetch.
+    if [ "$(git ls-tree origin/main moq --object-only 2>/dev/null)" != "$(git ls-tree HEAD moq --object-only)" ]; then sh/check-moq-main.sh >/dev/null; fi
     sh/check-ignore-recipes.sh
     quest check
     actionlint
