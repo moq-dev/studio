@@ -24,7 +24,7 @@ Every other PR has at least these sections:
 
 # Landing
 
-Ready PRs into `main` run **Check** (`just ci` on a hosted runner); drafts skip it.
+CI runs no checks on pull requests: run `just ci` before pushing, also on a macOS host when the change touches macOS code, and `cargo build --locked -p moq-studio --features release` on a Windows host (no Nix there) when it touches Windows code. **Check** runs `just ci` on each push to `main`.
 Queue the reviewed head with `/quest-merge` once the maintainer has approved merging that PR.
 
 # Bumping moq

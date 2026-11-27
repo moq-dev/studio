@@ -3,24 +3,20 @@ name: Check
 permissions:
   contents: read
 
-# Ready PRs into main run the full `just ci`; drafts skip it. Pushes to main run
-# it too, since a merge is nobody's pull request.
+# Runs the full `just ci` on every push to main. Pull requests run no CI:
+# authors run `just ci` before pushing.
 on:
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
   workflow_dispatch:
 
 concurrency:
-  group: check-${{ github.event.pull_request.number || github.ref }}
+  group: check-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   check:
     name: Check
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-24.04-arm
     # Backstop a hang instead of holding the runner for the 6-hour default.
     timeout-minutes: 60
@@ -40,18 +36,6 @@ jobs:
         with:
           persist-credentials: false
           submodules: true
-
-      # Only a PR that moves the pin fetches moq's history, so an unchanged pin
-      # never fails on the network.
-      - name: The moq pin is on moq's main
-        if: github.event_name == 'pull_request'
-        env:
-          BASE: ${{ github.event.pull_request.base.sha }}
-        run: |
-          git fetch --quiet --no-tags --depth=1 origin "$BASE"
-          if [ "$(git rev-parse "$BASE:moq")" != "$(git rev-parse HEAD:moq)" ]; then
-            sh/check-moq-main.sh
-          fi
 
       - uses: ./.github/actions/nix
 

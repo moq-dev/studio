@@ -13,11 +13,10 @@ Decided 2026-11-15 (maintainer, on moq-dev/studio#170): ✅ these checks
 are this follow-up's, so the macOS app's PR lands without them (rejected:
 keeping that PR a draft until the hand check is done).
 
-CI covers everything else. A pull request that touches `packaging/macos/`,
-and Nightly, build each architecture's disk image, sign the app ad hoc, and
-launch it from the mounted image with no camera. A pull request cannot deploy
-the `release` environment, so the Developer ID signing and both notarizations
-first run in a release.
+CI covers everything else. Nightly builds each architecture's disk image,
+signs the app ad hoc, and launches it from the mounted image with no camera.
+Only a release deploys the `release` environment, so the Developer ID signing
+and both notarizations first run in a release.
 
 Checked 2026-11-23 (/quest-run): the
 [v0.0.1 release run](https://github.com/moq-dev/studio/actions/runs/45101688958)'s

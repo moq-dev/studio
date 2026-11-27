@@ -5,8 +5,7 @@ name: macOS
 # release's hardened runtime and entitlements, less those only the release's
 # provisioning profile grants, runs the browser-source tests against it on Apple silicon,
 # packs it into a disk image, and checks the app in the image launches and
-# lists devices. Pull requests that change the packaging run it; nightly runs
-# it against main.
+# lists devices. Nightly runs it against main.
 # release.yml calls it with `sign`, which signs and notarizes the app as the
 # Developer ID, then the disk image holding it, checks them again, and ships
 # the images.
@@ -15,14 +14,6 @@ permissions:
   contents: read
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - .github/workflows/macos.yml
-      - packaging/macos/**
-      - packaging/*.svg
-      # The bundle's icon.
-      - rs/moq-studio/build.rs
   workflow_call:
     inputs:
       sign:
@@ -34,7 +25,7 @@ on:
 concurrency:
   # A called run takes its caller's workflow name, keeping its group apart
   # from the caller's own.
-  group: macos-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: macos-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

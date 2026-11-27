@@ -1,7 +1,7 @@
 name: Join page
 
 # Deploys the join page (js/join) to GitHub Pages from main, at the domain
-# `--join-page` defaults to. Check builds it on every ready PR.
+# `--join-page` defaults to. `just check` builds it.
 
 permissions:
   contents: read

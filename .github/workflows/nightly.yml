@@ -1,10 +1,10 @@
 name: Nightly
 
-# The gates too slow or too specialized for a pull request: compositing,
+# The gates too slow or too specialized for every push: compositing,
 # publishing, and the virtual camera through wgpu on Mesa's software Vulkan
 # driver, the camera in a private PipeWire session, and `just shots`, the
 # window's named views drawn there; the virtual camera's
-# v4l2loopback fallback, a module load no pull request job should make;
+# v4l2loopback fallback, a module load no per-push job should make;
 # `just ci` on macOS and the studio's Windows build, whose capture backends
 # Check's Linux runner never compiles; and the Flatpak and the macOS app,
 # release builds of everything.
