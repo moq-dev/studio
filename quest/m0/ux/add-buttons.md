@@ -3,17 +3,25 @@
 ## Goal
 
 Add opens as one row of plain buttons, with no tabs: Camera, Screen, Window,
-File, Web page, Text, Color, Microphone, and Guest when guests are on. A
-button that needs a choice opens one picker, then adds the pick and closes:
+File, Web page, Text, Color, Microphone, From the show, and Guest when guests
+are on. A button that needs a choice opens one picker, then adds the pick and
+closes:
 
 - Screen and Window use the system's picker where it is the only way to
   capture (a Wayland desktop), and the studio's own list everywhere else,
   never both side by side.
 - Camera and Microphone open the studio's list of devices.
 - File opens the system's file dialog.
+- From the show lists what Add's "From the show" section offers today: the
+  program, the show's other scenes (a lower third built as a scene), and,
+  behind their mods as now, the replay and a role.
 
 Layers are named for what they show ("Screen", "Window", or the picked name),
-never "Picked …". Adding a device the show already has reuses its source, and
+never "Picked …". Adding a device the show already has, known by a stable
+identity such as a camera's or microphone's device id, reuses its source; each
+portal pick of a screen or window stays a source of its own, since the scene
+stores no window id and its saved grant belongs to the first source. Deleting a
+layer also deletes its source once nothing else uses it, and
 deleting a layer also deletes its source once nothing else uses it, so the
 "Not in any scene" section goes away.
 

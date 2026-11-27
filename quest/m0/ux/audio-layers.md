@@ -9,7 +9,8 @@ other layer. A scene's sound is its layers' sounds.
 
 - Every new show has a Microphone layer, and a Computer sound layer where the
   platform can capture it, each linked across every scene so it never cuts
-  out on a scene switch.
+  out on a scene switch. The quick start stays on an empty picture until the
+  scene has a picture layer: sound layers do not count.
 - The MIX page, audio scenes, and routes go away, and so does the sound strip
   at the bottom of the Studio page.
 - A "Separate recording mix" mod adds per-layer Stream and Recording toggles
