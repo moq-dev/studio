@@ -1,26 +1,20 @@
 name: Flatpak
 
 # Builds the Flatpak bundle for each architecture, installs it, and checks it
-# launches and lists devices. Pull requests that change the packaging run it;
-# nightly runs it against main, and release.yml ships what it builds.
+# launches and lists devices. Nightly runs it against main, and release.yml
+# ships what it builds.
 
 permissions:
   contents: read
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - .github/workflows/flatpak.yml
-      - packaging/flatpak/**
-      - packaging/*.svg
   workflow_call:
   workflow_dispatch:
 
 concurrency:
   # A called run takes its caller's workflow name, keeping its group apart
   # from the caller's own.
-  group: flatpak-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: flatpak-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
