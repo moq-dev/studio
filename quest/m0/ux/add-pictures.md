@@ -16,6 +16,12 @@ reports device changes.
 
 ## Plan
 
+Decided 2026-11-27 (maintainer, /quest-plan): Add becomes a row of buttons
+([Add is a row of buttons](/quest/m0/ux/add-buttons.md)), so these pictures
+go in the studio's own Camera, Screen, and Window pickers rather than on cards
+in a tab. On a Wayland desktop the system's picker shows screens and windows,
+so only cameras get pictures there.
+
 Split from Add's quest on 2026-11-25 (maintainer, /quest-run), so Add could
 land on today's capture listing
 ([moq-dev/studio#262](https://github.com/moq-dev/studio/pull/262)) while

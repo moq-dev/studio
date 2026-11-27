@@ -23,3 +23,7 @@ but cannot tell headphones from speakers yet.
 ## Required
 
 - [moq-audio's output kind is pinned](/quest/m0/pin-output-kind.md) - whether an output is headphones, where the system can tell
+
+## Related
+
+- [Audio is layers](/quest/m0/ux/audio-layers.md) - removes the MIX page; Listen moves with the mixer into the Layers column
