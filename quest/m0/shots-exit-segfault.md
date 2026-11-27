@@ -17,10 +17,10 @@ What is known: while
 being reproduced, `shots::a_scene_removes_from_its_pad` printed `test result:
 ok` and then died with SIGSEGV in 3 of 384 runs. That was 96 copies at once on
 a 24-core host. In 48 runs at one copy per core it never crashed. Shots
-tests end in one of two orders. That test calls `quit` while its harness is
-still alive. The named views drop the harness first and then call `quit`
-(`view` in `rs/moq-studio/src/shots.rs`). Whether both orders crash is still
-open.
+tests that stop the engine with `quit` do it in one of two orders. That test
+calls `quit` while its harness is still alive. The named views drop the
+harness first and then call `quit` (`shoot` in `rs/moq-studio/src/shots.rs`).
+Whether both orders crash is still open.
 
 Start by catching a core (`coredumpctl`, or `ulimit -c` under the stress loop
 that PR describes) and reading its backtrace. If the crash is in the studio,
