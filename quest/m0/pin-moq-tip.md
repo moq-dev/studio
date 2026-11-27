@@ -41,6 +41,9 @@ query; a session capability query; matching the version string).
 ## Waiting
 
 - moq-dev/moq: `hang::health` is public again, as
-  [Client health in use](https://github.com/moq-dev/moq/blob/main/quest/m3/stats/health-consumers.md)
-  plans ([moq-dev/moq#8956](https://github.com/moq-dev/moq/pull/8956) made it
-  private). Check: `rs/hang/src/lib.rs` on moq's `main` exports `health`.
+  [Publish hang health again in Rust and JS](https://github.com/moq-dev/moq/blob/main/quest/m0/hang-health-public.md)
+  plans (split out of Client health in use 2026-11-26, planned in
+  [moq-dev/moq#9731](https://github.com/moq-dev/moq/pull/9731);
+  [moq-dev/moq#8956](https://github.com/moq-dev/moq/pull/8956) made it
+  private). Check: that quest's PR has merged on moq's `main`, deleting its
+  file, and `rs/hang/src/lib.rs` there exports `health`.

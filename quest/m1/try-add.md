@@ -5,8 +5,8 @@
 The maintainer tries Add on their own machines and either signs it off or
 files what they find as quests: what the epic's
 [What a person must check](/quest/m0/ux/README.md) asks of it, which no
-headless run exercises, and what [Try the Studio workspace](/quest/m0/ux/try-studio.md)
-and [Try the first launch](/quest/m0/ux/try-first-run.md) left to it.
+headless run exercises, and what [Try the Studio workspace](/quest/m1/try-studio.md)
+and [Try the first launch](/quest/m1/try-first-run.md) left to it.
 
 ## Plan
 
@@ -47,7 +47,7 @@ layer**, `A`, the picture's right-click **Add a layer**, or the palette's
   A live picture in the card is unmeasured on a real guest: look at the
   window's frame time with several guests listed.
 - **The first launch:** from a cold launch (moving the app's storage aside as
-  [Try the first launch](/quest/m0/ux/try-first-run.md) says), count the
+  [Try the first launch](/quest/m1/try-first-run.md) says), count the
   clicks to a live screen with a camera picture-in-picture, through the
   quick start and Add.
 

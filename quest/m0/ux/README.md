@@ -199,8 +199,9 @@ quest links its own.
 An agent can prove a page matches its mock-up's layout, that nothing clips at
 any window size, and what a frame costs. It cannot judge these, so each child's
 PR adds a follow-up quest for the maintainer to try the page, such as
-[Try the Studio workspace](/quest/m0/ux/try-studio.md), with a `Maintainer:` item saying
-what to look at, rather than waiting on it:
+[Try the Studio workspace](/quest/m1/try-studio.md), with a `Maintainer:` item saying
+what to look at, rather than waiting on it. Try quests go in m1 or later, never m0, so
+they block nothing: the m1 audits require all of m0. What a try covers:
 
 - **Taste:** whether the page reads as bold and calm at once. The PR shows its
   screenshots beside the mock-up frames.

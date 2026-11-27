@@ -13,7 +13,7 @@ The Studio workspace (the editable picture, the Layers rail and Editable
 switch, the slim strip with each sound's slider, meter, and options, and the
 title bar the studio draws itself) is on `main`
 (`cargo run -p moq-studio --features capture`, or the macOS app's disk
-image, as [Try the macOS app](/quest/m0/packaging/macos-try.md) says where to
+image, as [Try the macOS app](/quest/m1/try-packaging-macos.md) says where to
 find it). It replaced the LIVE and BUILD pages. What to try, beside the
 [mock-up](/quest/m0/ux/mock/overhaul-studio.webp) and the
 [audio popover](/quest/m0/ux/mock/overhaul-popovers.webp):
@@ -34,7 +34,7 @@ find it). It replaced the LIVE and BUILD pages. What to try, beside the
 - **Real sources:** a camera, a capture card, and a display already in the
   show, so the row's status dot and the inspector's Source section show a
   real device starting, failing, and coming back. Adding them from Add is
-  [Try Add](/quest/m0/ux/try-add.md)'s.
+  [Try Add](/quest/m1/try-add.md)'s.
 - **Displays and the frame:** a second monitor, moving the window between
   displays of mixed scales, and the custom frame on each desktop it runs on
   (GNOME, KDE, macOS, and Windows once
