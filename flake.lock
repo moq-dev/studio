@@ -55,9 +55,7 @@
         "flake-utils": [
           "flake-utils"
         ],
-        "nixpkgs": [
-          "nixpkgs"
-        ],
+        "nixpkgs": "nixpkgs",
         "nixpkgs-bun": "nixpkgs-bun",
         "quest-pinned": "quest-pinned",
         "token-max": "token-max"
@@ -95,7 +93,10 @@
     "root": {
       "inputs": {
         "flake-utils": "flake-utils",
-        "nixpkgs": "nixpkgs",
+        "nixpkgs": [
+          "quest",
+          "nixpkgs"
+        ],
         "quest": "quest",
         "rust-overlay": "rust-overlay"
       }
